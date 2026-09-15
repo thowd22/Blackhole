@@ -179,6 +179,11 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - **Match highlighting**: the matched terms in a snippet are drawn in the accent colour (FTS5 already marks them; the panel currently strips the markers).
 - **Preview pane**: expand a result (→ or Tab) to read the full item inline with the above formatting, without opening the source app.
 
+### 5.6b On-theme scrollbars — P1
+- The stock Windows scrollbars (grey, rounded, anti-aliased) break the pixel look on the result list and the answer box. Replace them app-wide with custom-drawn pixel-art scrollbars: dark track, 1-unit orange border, blocky thumb, no arrows (or 1-unit stepped arrows), sized in the same integer units as the dot.
+- Applies to every scrollable surface: results list, answer box, future preview pane and settings; long speech-bubble messages that overflow should scroll the same way.
+- Implementation: hide the native bars (`ShowScrollBar(..., FALSE)` / owner-draw the controls) and paint the bar in the parent, handling drag, wheel and keyboard so behaviour matches the native control.
+
 ### 5.7 Item actions — P1
 - Open, copy, reveal, re-index, delete ("let it escape" — with confirmation).
 - Tag / rename display title.
