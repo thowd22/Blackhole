@@ -2,7 +2,7 @@
 //! tokens back to the search panel as window messages.
 
 use crate::embed::Embedder;
-use crate::llm::{Llm, Source};
+use crate::llm_ort::{Llm, Source};
 use crate::store::Store;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -95,7 +95,7 @@ impl AskEngine {
         };
 
         let Some(path) = &self.model_path else {
-            post(WM_ASK_DONE, "No model found. Put a .gguf file (e.g. qwen2.5-1.5b-instruct-q4_k_m.gguf) next to blackhole.exe.".into());
+            post(WM_ASK_DONE, "No model found. Put a Qwen2.5-Instruct ONNX file (e.g. qwen2.5-1.5b-instruct-q4.onnx) next to blackhole.exe.".into());
             return;
         };
 
@@ -136,7 +136,7 @@ impl AskEngine {
         let _ = std::fs::write(crate::config::data_dir().join("last_ask.txt"), &log);
 
         let words: usize = sources.iter().map(|s| s.text.split_whitespace().count()).sum();
-        post(WM_ASK_STATUS, format!("thinking over {} excerpts ({words} words)…  Esc to stop", sources.len()));
+        post(WM_ASK_STATUS, format!("thinking over {} excerpts ({words} words) on {}…  Esc to stop", sources.len(), llm.backend));
         let result = llm.answer(&question, &sources, &cancel, |tok| post(WM_ASK_TOKEN, tok.to_string()));
         let status = match result {
             Ok(_) if cancel.load(Ordering::Relaxed) => "stopped".to_string(),

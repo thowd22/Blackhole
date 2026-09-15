@@ -86,8 +86,14 @@ If the runtime DLL is missing or fails to initialise, the app falls back to the 
 
 ### Phases
 1. ~~**Embeddings on ORT**~~ — **done 2026-09-15**: `tract` replaced by `ort` (`load-dynamic`, `api-20`, ORT 1.20.1 + DirectML 1.15.4). DLLs embedded in the exe and unpacked beside it (fallback: vault `bin/`), `SetDllDirectory` so ORT finds DirectML. Inputs padded to 32/64/128/256-token buckets to limit DML shape recompiles. Loads in ~340 ms on DirectML. Still to do from this phase: int8 bge (RAM diet).
-2. **LLM on ORT + DirectML** — load a GenAI-format int4 Qwen2.5-1.5B; implement the decode loop: prompt pass → sample → feed one token + `past_key_values.*` tensors back each step (the model's inputs/outputs are named for this). Stream tokens as today. Target < 1 s to first token for a ~1,500-token prompt.
-3. **Bigger model** — with GPU headroom, ship Qwen2.5-3B-Instruct int4 as the default (better before/after reasoning); keep 1.5B as the "lite" choice. Retire `candle` and the GGUF path.
+2. ~~**LLM on ORT + DirectML**~~ — **done 2026-09-15**, with findings that changed the design:
+   - Model: `onnx-community/Qwen2.5-1.5B-Instruct` `model_q4.onnx` (int4 weights, fp32 activations, 1.8 GB), with a last-token Slice inserted before the LM head (`tools/last_logits.py`). The `q4f16` variant produces NaNs on DirectML (Qwen2.5 overflows fp16) — avoid.
+   - DirectML picks the *integrated* GPU by default on a dual-GPU machine; `gpu.rs` enumerates DXGI adapters and pins the one with the most dedicated VRAM (RX 9070 XT: 0.9 s to first token vs 12 s on the iGPU).
+   - Prompt pass on DirectML is 5–6× faster than CPU (1,300 tokens: 1.1 s vs 6.4 s). Decode on DirectML is a flat ~120 ms/token regardless of context — per-op dispatch on this unfused dynamic-shape graph; neither IO binding (cache resident on GPU) nor `ep.dml.disable_graph_fusion` changed it. CPU decode runs 10–22 tok/s.
+   - Therefore **hybrid**: prompt pass on the GPU with outputs bound to CPU memory, decode on the CPU session. Costs two sessions (~2 GB RAM + ~2 GB VRAM while loaded; unloaded 60 s after the panel closes).
+   - Fast GPU decode needs a static-shape GenAI-style export (GroupQueryAttention, fixed-length cache shared between past and present) — see phase 2b.
+2b. **Static-cache DML model** — export with ONNX Runtime GenAI's model builder (`-e dml -p int4`), bind a fixed max-length cache in and out, so DirectML compiles once and decodes at 30+ tok/s. Also enables 3B/7B at interactive speed.
+3. **Bigger model** — with the prompt pass on the GPU, try Qwen2.5-3B-Instruct int4 (`onnx-community`, ~3.5 GB) as the default for better before/after reasoning; keep 1.5B as the "lite" choice. (`candle` and the GGUF path are already retired.)
 4. **Accelerator selection UI** — probe DirectML device → CPU; show "Running on: <adapter>" in the menu; manual override in settings.
 5. **NPU** — ARM64 build with the QNN EP for Snapdragon X; evaluate OpenVINO / Vitis AI EPs on x64 Copilot+ machines.
 

@@ -51,6 +51,7 @@ const MENU_CENTER_MSG: usize = 8;
 const MENU_QUIT: usize = 9;
 const MENU_START_LOGIN: usize = 10;
 const MENU_TUTORIAL: usize = 11;
+const MENU_SIZE_XL: usize = 12;
 
 /// First-run tutorial. Each step waits for the action it describes.
 pub const TUTORIAL: &[&str] = &[
@@ -518,6 +519,7 @@ impl Dot {
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.scale == 1), MENU_SIZE_S, w!("Small"));
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.scale == 2), MENU_SIZE_M, w!("Medium"));
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.scale == 3), MENU_SIZE_L, w!("Large"));
+        let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.scale == 4), MENU_SIZE_XL, w!("Extra large"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING | chk(!self.cfg.hidden), MENU_SHOW_DOT, w!("Show dot"));
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.center_on_message), MENU_CENTER_MSG, w!("Center on new message"));
@@ -545,6 +547,7 @@ impl Dot {
             MENU_SIZE_S => self.set_scale(1),
             MENU_SIZE_M => self.set_scale(2),
             MENU_SIZE_L => self.set_scale(3),
+            MENU_SIZE_XL => self.set_scale(4),
             MENU_SHOW_DOT => {
                 let hidden = !self.cfg.hidden;
                 self.set_hidden(hidden);

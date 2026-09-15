@@ -10,7 +10,8 @@ mod dot;
 mod embed;
 mod drop;
 mod ingest;
-mod llm;
+mod gpu;
+mod llm_ort;
 mod runtime;
 mod search;
 mod sprite;
@@ -61,7 +62,7 @@ fn main() {
         };
 
         // The LLM is optional and loaded lazily on the first question.
-        let model = llm::find_model(&config::data_dir());
+        let model = llm_ort::find_model(&config::data_dir());
         let ask = Arc::new(ask::AskEngine::new(model, store.clone(), embedder.clone()));
 
         let (tx, rx) = mpsc::channel();

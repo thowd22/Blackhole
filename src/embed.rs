@@ -32,9 +32,9 @@ fn ok<T, E: std::fmt::Display>(r: Result<T, E>) -> anyhow::Result<T> {
     r.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-fn gpu_session() -> anyhow::Result<Session> {
+fn gpu_session(device: i32) -> anyhow::Result<Session> {
     let b = ok(Session::builder())?;
-    let b = ok(b.with_execution_providers([DirectML::default().build().error_on_failure()]))?;
+    let b = ok(b.with_execution_providers([DirectML::default().with_device_id(device).build().error_on_failure()]))?;
     let mut b = ok(b.with_memory_pattern(false))?;
     ok(b.commit_from_memory(MODEL_BYTES))
 }
@@ -49,9 +49,11 @@ impl Embedder {
     /// Try the GPU first; fall back to the CPU provider of the same runtime.
     pub fn load() -> anyhow::Result<Embedder> {
         let tok = WordPiece::new(VOCAB_TXT);
-        if DirectML::default().is_available().unwrap_or(false) {
-            if let Ok(session) = gpu_session() {
-                return Ok(Embedder { session: Mutex::new(session), tok, backend: "DirectML" });
+        if let Some(a) = crate::gpu::preferred() {
+            if DirectML::default().is_available().unwrap_or(false) {
+                if let Ok(session) = gpu_session(a.index) {
+                    return Ok(Embedder { session: Mutex::new(session), tok, backend: "DirectML" });
+                }
             }
         }
         Ok(Embedder { session: Mutex::new(cpu_session()?), tok, backend: "CPU" })

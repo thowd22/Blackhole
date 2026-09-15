@@ -22,18 +22,17 @@ Working now:
 - Hybrid search: keyword + semantic (cosine over chunks), score-fused (keyword weight scales with query-term coverage);
   results are tagged `≈` (semantic), `≈=` (both) or untagged (keyword)
 - Search panel: live results, ↵ open, Ctrl+↵ reveal in Explorer, Ctrl+C copy text, Del forget
-- Ask mode: start a query with `?` and press ↵ — Qwen2.5-1.5B-Instruct (GGUF, via `candle` on CPU) answers
-  from a ~1,400-word context: the best-matching chunks with their neighbours in document order, or the whole
-  document when the top hit is small (a résumé, a receipt). Streams into an answer box; Esc stops.
-  Questions about order/time get a forced "Timeline:" scratchpad first, then "Answer:".
-  The model is optional: the app looks for a `*.gguf` next to the exe (or in the vault folder). It is
-  pre-loaded when the search panel opens (~3 s, so a question typed a moment later is instant) and unloaded
-  60 s after the panel closes (~1.1 GB RAM while loaded). The exact prompt of the last question is written to
-  `%LOCALAPPDATA%\Blackhole\last_ask.txt` for debugging odd answers.
+- Ask mode: start a query with `?` and press ↵ — Qwen2.5-1.5B-Instruct as int4 ONNX on **ONNX Runtime**,
+  hybrid execution: the prompt pass runs on **DirectML** (the GPU with the most VRAM, picked via DXGI),
+  decoding runs on the CPU provider (DirectML's per-op overhead makes it slower for single tokens on this
+  graph). First text in ~1 s for a ~1,400-word context; 10–20 tok/s after. Context = best chunks with
+  neighbours in document order, or the whole document when the top hit is small. Order/time questions get
+  a forced "Timeline:" scratchpad; greedy decoding with a repeated-line stop.
+  The model is optional: the app looks for the largest `*.onnx` next to the exe (or in the vault folder),
+  pre-loads it when the search panel opens (~6 s) and unloads it 60 s after the panel closes.
+  The exact prompt of the last question is written to `%LOCALAPPDATA%\Blackhole\last_ask.txt`.
   Known limit: the 1.5B model lists dates correctly but often misreads before/after off its own timeline;
-  a larger model needs GPU inference (see PACKAGING.md). Qwen3 GGUFs load too (architecture detected) but
-  garble digits under candle 0.11 — treat as experimental.
-
+  a 3B model is the next step now that the GPU carries the prompt pass.
 - Tray icon (the sprite) with the same menu; **Show dot** toggles dot visibility, **Start at login**
   writes the per-user Run key, **Center on new message** warps the dot to screen centre for notifications
 - Pixel-art speech bubbles: a 6-step first-run tutorial (each step waits for the action it describes;
@@ -51,9 +50,11 @@ rustup target add x86_64-pc-windows-gnu
 # model files (not committed):
 #   models/bge-small-en-v1.5/{model.onnx,vocab.txt}  from https://huggingface.co/BAAI/bge-small-en-v1.5
 #   models/qwen2.5/tokenizer.json                    from https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct
-#   models/qwen2.5/qwen2.5-1.5b-instruct-q4_k_m.gguf from https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF
+#   runtime/{onnxruntime.dll,DirectML.dll}           from NuGet Microsoft.ML.OnnxRuntime.DirectML 1.20.1 / Microsoft.AI.DirectML 1.15.4
 ./build.sh            # builds and copies the exe to /mnt/c/Users/<you>/blackhole/
-# copy the .gguf next to the exe to enable ask mode
+# Ask mode model (beside the exe): onnx/model_q4.onnx from https://huggingface.co/onnx-community/Qwen2.5-1.5B-Instruct,
+# run through tools/last_logits.py so the prompt pass only returns the last token's logits.
+# cargo build --release --bin ortllm gives a console bench for the LLM path.
 # Build memory: .cargo/config.toml caps cargo at 4 jobs — 24 parallel rustc on candle/tract at
 # opt-level 3 can take down a 15 GB WSL VM. Avoid running a second heavy cargo build concurrently.
 ```
@@ -73,7 +74,9 @@ SQLite is bundled. `onnxruntime.dll` + `DirectML.dll` (from the `Microsoft.ML.On
 | `src/chunk.rs` | Paragraph-aware overlapping chunker |
 | `src/runtime.rs` | Unpacks and loads ONNX Runtime (+DirectML) dynamically |
 | `src/embed.rs` | bge-small embedder (ONNX Runtime, DirectML→CPU) + WordPiece tokenizer |
-| `src/llm.rs` | Qwen2.5 GGUF generation via candle, prompt template |
+| `src/llm_ort.rs` | Qwen2.5 ONNX generation: DirectML prompt pass + CPU decode, prompt template |
+| `src/gpu.rs` | Picks the DirectML adapter (most dedicated VRAM) via DXGI |
+| `src/bin/ortllm.rs` | Console bench for the LLM path |
 | `src/ask.rs` | Ask worker: retrieval → generation, streams tokens to the panel |
 | `src/store.rs` | SQLite + FTS5 vault |
 | `src/search.rs` | Search panel window |
