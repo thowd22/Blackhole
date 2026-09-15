@@ -244,7 +244,15 @@ Blackhole exposes itself as a local **MCP server** so agents and tools (Claude C
 - Security: put/retrieve are local-only; an allowlist of client names and a per-client "may notify" toggle in settings so a noisy tool can be muted.
 - Ships as a `--mcp` flag on the same exe (no second binary): the running dot instance handles requests, so the animation and bubbles reflect agent activity.
 
-## 10. Suggested build order
+## 10. CI/CD — GitHub Actions — P1
+
+- **CI on every push/PR** (`windows-latest` runner, native `x86_64-pc-windows-gnu` or MSVC target): `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build --release`, unit tests for the pure parts (chunker, tokenizer, FTS query builder, store fusion).
+- **Model & runtime fetch step**: the build embeds bge-small (`model.onnx`, `vocab.txt`), the Qwen tokenizers and the ORT/DirectML DLLs via `include_bytes!`, so CI downloads them (Hugging Face + NuGet, pinned versions/hashes) into `models/` and `runtime/` and caches them between runs (`actions/cache` keyed on the pin file).
+- **Smoke test**: launch the exe headless-ish on the runner (`--version` / `--selftest` flag: load runtime on CPU EP, embed one sentence, open the vault, exit 0) so a broken DLL/model bundle fails CI, not the user.
+- **Release on tag** (`v*`): build, zip `blackhole.exe` (DLLs are embedded), attach to a GitHub Release with checksums; optional second artefact with the default GGUF for the "Full" edition; later the installer from PACKAGING.md. Code-signing as a follow-up once a certificate exists.
+- **Dependabot / cargo-audit** weekly.
+
+## 11. Suggested build order
 
 1. Dot window: transparent, always-on-top, draggable, pixel sprite, summon-to-cursor hotkey.
 2. Drop + paste of plain text and files into a local vault.
@@ -253,6 +261,7 @@ Blackhole exposes itself as a local **MCP server** so agents and tools (Claude C
 5. Ask mode, settings, storage policies, more formats.
 6. Tray icon, speech bubbles (tutorial + notifications), center-on-message.
 7. MCP server (put / retrieve / notify).
+7b. CI/CD in GitHub Actions (§10) — build, smoke test, tagged releases.
 8. **GPU inference** — move embeddings and the LLM onto **ONNX Runtime + DirectML** (dynamically loaded, no C++ build; one x64 binary for NVIDIA/AMD/Intel; NPU providers later). Retire tract and candle. Target: < 1 s to first token so Qwen2.5-3B int4 fits today's latency budget. Phased plan in PACKAGING.md § GPU plan.
 
 ---
