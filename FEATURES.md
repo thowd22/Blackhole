@@ -133,8 +133,10 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - **Metadata filters**: type, date range, source.
 - Target: search results in well under 100 ms for tens of thousands of chunks on a laptop.
 
-### 4.2b Embedding model upgrade — P1
-- bge-small (33M, 384-dim) misses paraphrase-level matches: "list my employers" does not reach a résumé that never uses the word. Evaluate bge-base-en-v1.5 (110M, 768-dim, ~110 MB int8) on the test vault; ship it if recall improves without hurting ingest speed on DirectML. Vectors are re-embedded automatically when the model id changes.
+### 4.2b Embedding model upgrade — evaluated 2026-09-15, bge-small kept
+- bge-small (33M, 384-dim) misses paraphrase-level matches: "list my employers" does not reach a résumé that never uses the word.
+- **bge-base-en-v1.5 tested** (110M, 768-dim, 435 MB fp32, ~600 ms load on DirectML, re-embeds the vault in ~3 s): top-document accuracy on a 5-question set was 3/5 plain, 4/5 with BGE's query instruction — versus bge-small's 4/5 without it — and it demoted the résumé below customs paperwork for "most recent job title". Neither model gets "list my employers". Pipeline verified exact against the official tokenizer + CPU ORT (cosine 1.0000), so this is model behaviour, not a bug.
+- Next candidates when this is revisited: nomic-embed-text-v1.5 / gte-base / e5-base (different training mixes), query rewriting ("employers" → "work history, positions, companies"), or a small reranker over the top 20 chunks.
 
 ### 4.3 Background & resource behaviour — P0
 - Indexing runs at low priority; the UI never blocks.
