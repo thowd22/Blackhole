@@ -1,0 +1,10 @@
+[build]
+target = "x86_64-pc-windows-gnu"
+# 24 cores × rustc on candle/tract at opt-level 3 exhausts a 15 GB WSL VM; keep it modest.
+jobs = 4
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-gcc-ar"
+# candle's quantized kernels only vectorise when AVX2/FMA are enabled at compile time (any x64 CPU since ~2013).
+rustflags = ["-C", "target-feature=+avx2,+fma"]

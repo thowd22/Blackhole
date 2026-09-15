@@ -1,0 +1,783 @@
+//! The dot itself: a layered, topmost, tool window showing the sprite.
+//! Handles drag-to-move, click-to-search, the summon hotkey, the context
+//! menu (shared with the tray icon), speech bubbles and the tutorial.
+
+use crate::ask::AskEngine;
+use crate::bubble::{Bubble, WM_BUBBLE_CLICKED, WM_BUBBLE_EXPIRED};
+use crate::config::{self, Config};
+use crate::drop::{self, DropTarget, WM_DROP_ENTER, WM_DROP_LEAVE, WM_DROP_SWALLOW};
+use crate::embed::Embedder;
+use crate::ingest::{Input, Report};
+use crate::search::{SearchWin, WM_ASK_STARTED, WM_SEARCH_CLOSED};
+use crate::sprite::{self, Mood, SIZE};
+use crate::startup;
+use crate::store::Store;
+use crate::tray::{self, WM_TRAY};
+use crate::util::wide;
+use std::collections::VecDeque;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE as WSIZE, WPARAM};
+use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::Ole::{IDropTarget, RegisterDragDrop, RevokeDragDrop};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::Shell::{ShellExecuteW, NINF_KEY, NIN_SELECT};
+use windows::Win32::UI::WindowsAndMessaging::*;
+
+pub const WM_INGEST_DONE: u32 = 0x8004;
+/// Show a notification bubble; lparam = Box<String>. Used by ingest and (later) MCP.
+pub const WM_NOTIFY: u32 = 0x8005;
+const WM_STARTUP: u32 = 0x8006;
+
+const TIMER_ANIM: usize = 1;
+/// Unload the LLM this long after the search panel closes.
+const TIMER_UNLOAD: usize = 2;
+const UNLOAD_AFTER_MS: u32 = 60_000;
+const FRAME_MS: u32 = 90;
+const HOTKEY_SUMMON: i32 = 1;
+const HOTKEY_PASTE: i32 = 2;
+
+const MENU_SEARCH: usize = 1;
+const MENU_PASTE: usize = 2;
+const MENU_VAULT: usize = 3;
+const MENU_SIZE_S: usize = 4;
+const MENU_SIZE_M: usize = 5;
+const MENU_SIZE_L: usize = 6;
+const MENU_SHOW_DOT: usize = 7;
+const MENU_CENTER_MSG: usize = 8;
+const MENU_QUIT: usize = 9;
+const MENU_START_LOGIN: usize = 10;
+const MENU_TUTORIAL: usize = 11;
+
+/// First-run tutorial. Each step waits for the action it describes.
+pub const TUTORIAL: &[&str] = &[
+    "Hi! I'm Blackhole.\nDrop a file or some text on me to get started. Ctrl+Shift+V swallows the clipboard.",
+    "Nice. Click me to search what I've eaten.",
+    "Press Ctrl+Shift+Space anywhere to summon me to your mouse.",
+    "Start a search with ? to ask me a question about your files.",
+    "Right-click me for size, tray and settings.\nThat's it — I'll be here.",
+    "Blackhole is open source:\ngithub.com/thowd22/Blackhole\nIssues and PRs are welcome.",
+];
+const TUTORIAL_DONE: u8 = TUTORIAL.len() as u8;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Event {
+    Swallow,
+    SearchOpened,
+    Summoned,
+    Asked,
+}
+
+pub struct Dot {
+    hwnd: HWND,
+    search: HWND,
+    bubble: HWND,
+    cfg: Config,
+    tx: Sender<Input>,
+    store: Arc<Mutex<Store>>,
+    embedder: Arc<Embedder>,
+    ask: Arc<AskEngine>,
+    drop_target: Option<IDropTarget>,
+    frame: u32,
+    phase: f32,
+    mood: Mood,
+    mood_until: Option<Instant>,
+    pending: usize,
+    /// Position before the last summon / centring, so it can go back.
+    home: Option<(i32, i32)>,
+    dragging: bool,
+    drag_moved: bool,
+    drag_origin: POINT,
+    win_origin: POINT,
+    pixels: Vec<u32>,
+    dib: HBITMAP,
+    dib_bits: *mut u32,
+    mem_dc: HDC,
+    /// Queued notification texts; one bubble at a time.
+    messages: VecDeque<String>,
+    /// True while the visible bubble is a tutorial step.
+    tutorial_showing: bool,
+    taskbar_created: u32,
+}
+
+unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut Dot> {
+    (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Dot).as_mut()
+}
+
+impl Dot {
+    pub fn create(tx: Sender<Input>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder>, ask: Arc<AskEngine>) -> HWND {
+        unsafe {
+            let class = w!("BlackholeDot");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(wndproc),
+                lpszClassName: class,
+                hCursor: LoadCursorW(None, IDC_HAND).unwrap_or_default(),
+                ..Default::default()
+            };
+            RegisterClassW(&wc);
+            let cfg = config::load();
+            let dot = Box::new(Dot {
+                hwnd: HWND::default(),
+                search: HWND::default(),
+                bubble: HWND::default(),
+                tx,
+                store,
+                embedder,
+                ask,
+                drop_target: None,
+                frame: 0,
+                phase: 0.0,
+                mood: Mood::Idle,
+                mood_until: None,
+                pending: 0,
+                home: None,
+                dragging: false,
+                drag_moved: false,
+                drag_origin: POINT::default(),
+                win_origin: POINT::default(),
+                pixels: vec![0; SIZE * SIZE],
+                dib: HBITMAP::default(),
+                dib_bits: std::ptr::null_mut(),
+                mem_dc: HDC::default(),
+                messages: VecDeque::new(),
+                tutorial_showing: false,
+                taskbar_created: tray::taskbar_created_message(),
+                cfg,
+            });
+            let (x, y, hidden) = (dot.cfg.x, dot.cfg.y, dot.cfg.hidden);
+            let ptr = Box::into_raw(dot);
+            let style = if hidden { WS_POPUP } else { WS_POPUP | WS_VISIBLE };
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class,
+                w!("Blackhole"),
+                style,
+                x, y, 64, 64,
+                None, None, None,
+                Some(ptr as *const _),
+            )
+            .unwrap_or_default()
+        }
+    }
+
+    /// Integer pixel multiplier: user scale × DPI factor.
+    unsafe fn unit(&self) -> i32 {
+        let dpi = GetDpiForWindow(self.hwnd).max(96) as i32;
+        let dpi_mul = ((dpi + 48) / 96).max(1);
+        self.cfg.scale.clamp(1, 4) * dpi_mul
+    }
+
+    /// On-screen size in pixels.
+    unsafe fn px_size(&self) -> i32 {
+        SIZE as i32 * self.unit()
+    }
+
+    unsafe fn ensure_surface(&mut self, side: i32) {
+        if !self.dib.is_invalid() {
+            let mut bm = BITMAP::default();
+            GetObjectW(self.dib.into(), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut _));
+            if bm.bmWidth == side {
+                return;
+            }
+            let _ = DeleteObject(self.dib.into());
+            let _ = DeleteDC(self.mem_dc);
+        }
+        let bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: side,
+                biHeight: -side, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        self.dib = CreateDIBSection(None, &bi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
+        self.dib_bits = bits as *mut u32;
+        self.mem_dc = CreateCompatibleDC(None);
+        SelectObject(self.mem_dc, self.dib.into());
+    }
+
+    unsafe fn redraw(&mut self) {
+        let side = self.px_size();
+        self.ensure_surface(side);
+        if self.dib_bits.is_null() {
+            return;
+        }
+        sprite::render(&mut self.pixels, self.frame, self.phase, self.mood);
+
+        // Nearest-neighbour upscale straight into the DIB.
+        let mul = (side as usize) / SIZE;
+        let dst = std::slice::from_raw_parts_mut(self.dib_bits, (side * side) as usize);
+        for y in 0..side as usize {
+            let sy = y / mul;
+            let row = &self.pixels[sy * SIZE..sy * SIZE + SIZE];
+            let out = &mut dst[y * side as usize..(y + 1) * side as usize];
+            for (x, px) in out.iter_mut().enumerate() {
+                *px = row[x / mul];
+            }
+        }
+
+        let r = self.rect();
+        let pos = POINT { x: r.left, y: r.top };
+        let size = WSIZE { cx: side, cy: side };
+        let src = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+        let _ = UpdateLayeredWindow(self.hwnd, None, Some(&pos), Some(&size), Some(self.mem_dc), Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
+    }
+
+    fn set_mood(&mut self, mood: Mood, for_ms: Option<u64>) {
+        self.mood = mood;
+        self.mood_until = for_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
+    }
+
+    unsafe fn tick(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+        self.phase = (self.phase + 0.12 * sprite::speed(self.mood)) % (std::f32::consts::TAU * 30.0);
+        if let Some(t) = self.mood_until {
+            if Instant::now() >= t {
+                self.mood_until = None;
+                self.mood = if self.pending > 0 {
+                    Mood::Digesting
+                } else if self.search_open() {
+                    Mood::Listening
+                } else {
+                    Mood::Idle
+                };
+            }
+        }
+        self.redraw();
+    }
+
+    unsafe fn rect(&self) -> RECT {
+        let mut r = RECT::default();
+        let _ = GetWindowRect(self.hwnd, &mut r);
+        r
+    }
+
+    unsafe fn search_open(&self) -> bool {
+        !self.search.is_invalid() && IsWindowVisible(self.search).as_bool()
+    }
+
+    unsafe fn move_to(&mut self, x: i32, y: i32) {
+        let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        self.cfg.x = x;
+        self.cfg.y = y;
+        if !self.bubble.is_invalid() {
+            Bubble::follow(self.bubble, self.rect());
+        }
+    }
+
+    unsafe fn set_hidden(&mut self, hidden: bool) {
+        self.cfg.hidden = hidden;
+        config::save(&self.cfg);
+        let _ = ShowWindow(self.hwnd, if hidden { SW_HIDE } else { SW_SHOWNOACTIVATE });
+        if hidden {
+            if self.search_open() {
+                SearchWin::hide(self.search);
+            }
+            if !self.bubble.is_invalid() {
+                Bubble::hide(self.bubble);
+            }
+        }
+    }
+
+    unsafe fn open_search(&mut self) {
+        if self.cfg.hidden {
+            self.set_hidden(false);
+        }
+        if self.search.is_invalid() {
+            self.search = SearchWin::create(self.hwnd, self.store.clone(), self.embedder.clone(), self.ask.clone());
+        }
+        self.set_mood(Mood::Listening, None);
+        SearchWin::show(self.search, self.rect());
+        // Warm the LLM now; a `?` question a few seconds from now finds it loaded.
+        let _ = KillTimer(Some(self.hwnd), TIMER_UNLOAD);
+        self.ask.preload();
+        self.tutorial_event(Event::SearchOpened);
+    }
+
+    unsafe fn toggle_search(&mut self) {
+        if self.search_open() {
+            SearchWin::hide(self.search);
+        } else {
+            self.open_search();
+        }
+    }
+
+    /// Hotkey: warp to the cursor and open search; press again to go home.
+    unsafe fn summon(&mut self) {
+        if self.search_open() {
+            SearchWin::hide(self.search);
+            self.go_home();
+            return;
+        }
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let side = self.px_size();
+        if self.home.is_none() {
+            self.home = Some((self.cfg.x, self.cfg.y));
+        }
+        if self.cfg.hidden {
+            self.set_hidden(false);
+        }
+        self.move_to(pt.x - side / 2, pt.y - side / 2);
+        self.set_mood(Mood::Satisfied, Some(250));
+        self.redraw();
+        self.open_search();
+        self.tutorial_event(Event::Summoned);
+    }
+
+    unsafe fn go_home(&mut self) {
+        if let Some((x, y)) = self.home.take() {
+            self.move_to(x, y);
+            config::save(&self.cfg);
+        }
+    }
+
+    /// Warp to the centre of the monitor the cursor is on (for messages).
+    unsafe fn center(&mut self) {
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let _ = GetMonitorInfoW(mon, &mut mi);
+        let w = mi.rcWork;
+        let side = self.px_size();
+        if self.home.is_none() {
+            self.home = Some((self.cfg.x, self.cfg.y));
+        }
+        self.move_to((w.left + w.right) / 2 - side / 2, (w.top + w.bottom) / 2 - side / 2);
+    }
+
+    unsafe fn paste_clipboard(&mut self) {
+        match drop::read_clipboard(self.hwnd) {
+            Some(input) => {
+                let _ = self.tx.send(input);
+                self.swallow();
+            }
+            None => self.set_mood(Mood::Upset, Some(700)),
+        }
+    }
+
+    unsafe fn swallow(&mut self) {
+        self.pending += 1;
+        self.set_mood(Mood::Digesting, None);
+        self.tutorial_event(Event::Swallow);
+    }
+
+    unsafe fn ingest_done(&mut self, report: Report) {
+        if !report.errors.is_empty() {
+            crate::util::log(&format!("ingest failures: {:?}", report.errors));
+        }
+        self.pending = self.pending.saturating_sub(1);
+        if report.failed > 0 && report.added == 0 {
+            self.set_mood(Mood::Upset, Some(1200));
+        } else {
+            self.set_mood(Mood::Satisfied, Some(700));
+        }
+        for e in report.errors {
+            self.notify(format!("Couldn't swallow that: {e}"));
+        }
+        let n = self.store.lock().unwrap().count();
+        tray::set_tip(self.hwnd, &format!("Blackhole — {n} items inside"));
+    }
+
+    // ---- bubbles -------------------------------------------------------
+
+    unsafe fn ensure_bubble(&mut self) {
+        if self.bubble.is_invalid() {
+            self.bubble = Bubble::create(self.hwnd);
+        }
+    }
+
+    /// Queue a notification; shown when nothing else is up.
+    unsafe fn notify(&mut self, text: String) {
+        self.messages.push_back(text);
+        self.show_next_message();
+    }
+
+    unsafe fn show_next_message(&mut self) {
+        self.ensure_bubble();
+        if Bubble::is_visible(self.bubble) {
+            if !self.tutorial_showing || self.messages.is_empty() {
+                return; // a message is up; the next one follows when it closes
+            }
+            // A notification pre-empts a (sticky) tutorial step; the step returns afterwards.
+            Bubble::hide(self.bubble);
+        }
+        let Some(text) = self.messages.pop_front() else { return };
+        if self.cfg.hidden {
+            self.set_hidden(false);
+        }
+        // Warp to the screen centre unless the user is mid-search beside the dot.
+        if self.cfg.center_on_message && !self.search_open() {
+            self.center();
+        }
+        self.tutorial_showing = false;
+        let unit = self.unit();
+        let timeout = 6000 + 40 * text.len() as u32; // longer texts stay longer
+        Bubble::show(self.bubble, &text, self.rect(), unit, Some(timeout.min(20000)));
+        self.set_mood(Mood::Satisfied, Some(400));
+    }
+
+    /// `closed_x`: the × was clicked (skips the tour); a body click or timeout just hides.
+    unsafe fn bubble_closed(&mut self, closed_x: bool) {
+        if self.tutorial_showing {
+            self.tutorial_showing = false;
+            let step = self.cfg.tutorial_step;
+            if closed_x || step + 1 >= TUTORIAL_DONE {
+                self.cfg.tutorial_step = TUTORIAL_DONE;
+                config::save(&self.cfg);
+            } else if step >= 4 {
+                // Informational card finished: move to the next one.
+                self.cfg.tutorial_step = step + 1;
+                config::save(&self.cfg);
+            }
+        }
+        // A message may have been queued behind a bubble; go home after messages.
+        if self.messages.is_empty() && !self.search_open() {
+            self.go_home();
+        }
+        self.show_next_message();
+        // Nothing left to say? Resume the tutorial where it was.
+        if !Bubble::is_visible(self.bubble) && self.cfg.tutorial_step < TUTORIAL_DONE {
+            self.show_tutorial_step();
+        }
+    }
+
+    // ---- tutorial ------------------------------------------------------
+
+    unsafe fn show_tutorial_step(&mut self) {
+        let step = self.cfg.tutorial_step as usize;
+        if step >= TUTORIAL.len() {
+            return;
+        }
+        self.ensure_bubble();
+        if self.cfg.hidden {
+            self.set_hidden(false);
+        }
+        self.tutorial_showing = true;
+        let unit = self.unit();
+        // The closing cards are informational: they time out and chain instead of waiting for an action.
+        let informational = step >= 4;
+        let timeout = if informational { Some(12000) } else { None };
+        Bubble::show(self.bubble, TUTORIAL[step], self.rect(), unit, timeout);
+    }
+
+    /// Advance the tutorial when the awaited action happens.
+    unsafe fn tutorial_event(&mut self, ev: Event) {
+        let step = self.cfg.tutorial_step;
+        if step >= TUTORIAL_DONE {
+            return;
+        }
+        let awaited = match step {
+            0 => Event::Swallow,
+            1 => Event::SearchOpened,
+            2 => Event::Summoned,
+            3 => Event::Asked,
+            _ => return,
+        };
+        if ev != awaited {
+            return;
+        }
+        self.cfg.tutorial_step = step + 1;
+        config::save(&self.cfg);
+        self.tutorial_showing = false;
+        // Step 2 (click to search) opens the panel over the dot; wait a beat so the
+        // bubble isn't shown under it — SearchWin sits beside the dot, bubble above.
+        self.show_tutorial_step();
+    }
+
+    unsafe fn restart_tutorial(&mut self) {
+        self.cfg.tutorial_step = 0;
+        config::save(&self.cfg);
+        self.show_tutorial_step();
+    }
+
+    // ---- menu ----------------------------------------------------------
+
+    unsafe fn context_menu(&mut self) {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let count = self.store.lock().unwrap().count();
+        let header = wide(&format!("{count} items inside · embeddings on {}", self.embedder.backend));
+        let chk = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(header.as_ptr()));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SEARCH, w!("Search\tCtrl+Shift+Space"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_PASTE, w!("Swallow clipboard\tCtrl+Shift+V"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_VAULT, w!("Open vault folder"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_TUTORIAL, w!("Show tutorial"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.scale == 1), MENU_SIZE_S, w!("Small"));
+        let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.scale == 2), MENU_SIZE_M, w!("Medium"));
+        let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.scale == 3), MENU_SIZE_L, w!("Large"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_STRING | chk(!self.cfg.hidden), MENU_SHOW_DOT, w!("Show dot"));
+        let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.center_on_message), MENU_CENTER_MSG, w!("Center on new message"));
+        let _ = AppendMenuW(menu, MF_STRING | chk(startup::enabled()), MENU_START_LOGIN, w!("Start at login"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        // Required so the menu closes when clicking elsewhere.
+        let _ = SetForegroundWindow(self.hwnd);
+        let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_LEFTALIGN, pt.x, pt.y, None, self.hwnd, None);
+        let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+    }
+
+    unsafe fn command(&mut self, id: usize) {
+        match id {
+            MENU_SEARCH => self.open_search(),
+            MENU_PASTE => self.paste_clipboard(),
+            MENU_VAULT => {
+                let dir = wide(&config::data_dir().display().to_string());
+                ShellExecuteW(None, w!("open"), PCWSTR(dir.as_ptr()), None, None, SW_SHOWNORMAL);
+            }
+            MENU_TUTORIAL => self.restart_tutorial(),
+            MENU_SIZE_S => self.set_scale(1),
+            MENU_SIZE_M => self.set_scale(2),
+            MENU_SIZE_L => self.set_scale(3),
+            MENU_SHOW_DOT => {
+                let hidden = !self.cfg.hidden;
+                self.set_hidden(hidden);
+            }
+            MENU_CENTER_MSG => {
+                self.cfg.center_on_message = !self.cfg.center_on_message;
+                config::save(&self.cfg);
+            }
+            MENU_START_LOGIN => startup::set(!startup::enabled()),
+            MENU_QUIT => {
+                let _ = DestroyWindow(self.hwnd);
+            }
+            _ => {}
+        }
+    }
+
+    unsafe fn set_scale(&mut self, s: i32) {
+        self.cfg.scale = s;
+        config::save(&self.cfg);
+        self.redraw();
+        if !self.bubble.is_invalid() {
+            Bubble::follow(self.bubble, self.rect());
+        }
+    }
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_CREATE => {
+            let cs = &*(lparam.0 as *const CREATESTRUCTW);
+            let ptr = cs.lpCreateParams as *mut Dot;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
+            let d = &mut *ptr;
+            d.hwnd = hwnd;
+            let target = DropTarget::new(hwnd, d.tx.clone());
+            let _ = RegisterDragDrop(hwnd, &target);
+            d.drop_target = Some(target);
+            let _ = RegisterHotKey(Some(hwnd), HOTKEY_SUMMON, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_SPACE.0 as u32);
+            let _ = RegisterHotKey(Some(hwnd), HOTKEY_PASTE, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_V.0 as u32);
+            SetTimer(Some(hwnd), TIMER_ANIM, FRAME_MS, None);
+            let n = d.store.lock().unwrap().count();
+            tray::add(hwnd, &format!("Blackhole — {n} items inside"));
+            d.redraw();
+            // Tutorial bubble once the window is up and positioned.
+            let _ = PostMessageW(Some(hwnd), WM_STARTUP, WPARAM(0), LPARAM(0));
+            LRESULT(0)
+        }
+        WM_STARTUP => {
+            if let Some(d) = state(hwnd) {
+                if d.cfg.tutorial_step < TUTORIAL_DONE {
+                    d.show_tutorial_step();
+                }
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_ANIM => {
+            if let Some(d) = state(hwnd) {
+                d.tick();
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            if let Some(d) = state(hwnd) {
+                d.dragging = true;
+                d.drag_moved = false;
+                let _ = GetCursorPos(&mut d.drag_origin);
+                let r = d.rect();
+                d.win_origin = POINT { x: r.left, y: r.top };
+                SetCapture(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            if let Some(d) = state(hwnd) {
+                if d.dragging {
+                    let mut pt = POINT::default();
+                    let _ = GetCursorPos(&mut pt);
+                    let (dx, dy) = (pt.x - d.drag_origin.x, pt.y - d.drag_origin.y);
+                    if d.drag_moved || dx.abs() > 3 || dy.abs() > 3 {
+                        d.drag_moved = true;
+                        d.move_to(d.win_origin.x + dx, d.win_origin.y + dy);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            if let Some(d) = state(hwnd) {
+                if d.dragging {
+                    d.dragging = false;
+                    let _ = ReleaseCapture();
+                    if d.drag_moved {
+                        d.home = None;
+                        config::save(&d.cfg);
+                    } else {
+                        d.toggle_search();
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_RBUTTONUP => {
+            if let Some(d) = state(hwnd) {
+                d.context_menu();
+            }
+            LRESULT(0)
+        }
+        WM_TRAY => {
+            // NOTIFYICON_VERSION_4: the event is in the low word of lparam.
+            let ev = (lparam.0 & 0xFFFF) as u32;
+            if let Some(d) = state(hwnd) {
+                if ev == WM_CONTEXTMENU || ev == WM_RBUTTONUP {
+                    d.context_menu();
+                } else if ev == NIN_SELECT || ev == NIN_SELECT | NINF_KEY || ev == WM_LBUTTONUP {
+                    if d.cfg.hidden {
+                        d.set_hidden(false);
+                    }
+                    d.open_search();
+                }
+            }
+            LRESULT(0)
+        }
+        WM_COMMAND => {
+            if let Some(d) = state(hwnd) {
+                d.command(wparam.0 & 0xFFFF);
+            }
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            if let Some(d) = state(hwnd) {
+                match wparam.0 as i32 {
+                    HOTKEY_SUMMON => d.summon(),
+                    HOTKEY_PASTE => d.paste_clipboard(),
+                    _ => {}
+                }
+            }
+            LRESULT(0)
+        }
+        WM_DROP_ENTER => {
+            if let Some(d) = state(hwnd) {
+                d.set_mood(Mood::Hungry, None);
+            }
+            LRESULT(0)
+        }
+        WM_DROP_LEAVE => {
+            if let Some(d) = state(hwnd) {
+                d.set_mood(Mood::Idle, Some(0));
+            }
+            LRESULT(0)
+        }
+        WM_DROP_SWALLOW => {
+            if let Some(d) = state(hwnd) {
+                d.swallow();
+            }
+            LRESULT(0)
+        }
+        WM_INGEST_DONE => {
+            if let Some(d) = state(hwnd) {
+                let report = Box::from_raw(lparam.0 as *mut Report);
+                d.ingest_done(*report);
+            }
+            LRESULT(0)
+        }
+        WM_NOTIFY => {
+            let text = *Box::from_raw(lparam.0 as *mut String);
+            if let Some(d) = state(hwnd) {
+                d.notify(text);
+            }
+            LRESULT(0)
+        }
+        WM_BUBBLE_CLICKED | WM_BUBBLE_EXPIRED => {
+            if let Some(d) = state(hwnd) {
+                d.bubble_closed(msg == WM_BUBBLE_CLICKED && wparam.0 == 1);
+            }
+            LRESULT(0)
+        }
+        WM_SEARCH_CLOSED => {
+            if let Some(d) = state(hwnd) {
+                if d.mood == Mood::Listening {
+                    d.set_mood(Mood::Idle, None);
+                }
+                // Panel closed: let the LLM go after a minute of not being needed.
+                SetTimer(Some(hwnd), TIMER_UNLOAD, UNLOAD_AFTER_MS, None);
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_UNLOAD => {
+            if let Some(d) = state(hwnd) {
+                // Still open (reopened without a close event) or mid-generation: try again next tick.
+                if !d.search_open() && d.ask.unload() {
+                    let _ = KillTimer(Some(hwnd), TIMER_UNLOAD);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_ASK_STARTED => {
+            if let Some(d) = state(hwnd) {
+                d.tutorial_event(Event::Asked);
+            }
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            if let Some(d) = state(hwnd) {
+                d.redraw();
+            }
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            if let Some(d) = state(hwnd) {
+                let _ = RevokeDragDrop(hwnd);
+                let _ = UnregisterHotKey(Some(hwnd), HOTKEY_SUMMON);
+                let _ = UnregisterHotKey(Some(hwnd), HOTKEY_PASTE);
+                tray::remove(hwnd);
+                config::save(&d.cfg);
+                if !d.search.is_invalid() {
+                    let _ = DestroyWindow(d.search);
+                }
+                if !d.bubble.is_invalid() {
+                    let _ = DestroyWindow(d.bubble);
+                }
+            }
+            PostQuitMessage(0);
+            LRESULT(0)
+        }
+        _ => {
+            if let Some(d) = state(hwnd) {
+                if msg == d.taskbar_created && msg != 0 {
+                    let n = d.store.lock().unwrap().count();
+                    tray::add(hwnd, &format!("Blackhole — {n} items inside"));
+                    return LRESULT(0);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+    }
+}

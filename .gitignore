@@ -1,0 +1,4 @@
+models/*/model.onnx
+models/*/*.gguf
+runtime/*.dll
+target/
