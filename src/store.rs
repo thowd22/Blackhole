@@ -298,10 +298,23 @@ impl Store {
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(40);
 
-        let terms: Vec<String> = query
+        // Distinctive query terms (names, numbers, jargon) that embeddings blur:
+        // weight each by how rare it is across the vault, so "list", "with" or
+        // "dates" don't drag random chunks up.
+        let n_items = self.count().max(1) as f32;
+        let terms: Vec<(String, f32)> = query
             .split(|c: char| !c.is_alphanumeric())
             .filter(|t| t.len() >= 4)
             .map(|t| t.to_lowercase())
+            .filter_map(|t| {
+                let docs: i64 = self
+                    .conn
+                    .query_row("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1", params![format!("\"{t}\"")], |r| r.get(0))
+                    .unwrap_or(0);
+                let frac = docs as f32 / n_items;
+                // Present in more than a third of items: not distinctive.
+                (frac <= 0.34).then(|| (t, 0.08 * (1.0 - frac)))
+            })
             .collect();
         let Ok(mut meta) = self.conn.prepare("SELECT item_id, ord, text FROM chunks WHERE id = ?1") else {
             return Vec::new();
@@ -313,13 +326,45 @@ impl Store {
                     .ok()
                     .map(|(item, ord, text)| {
                         let lower = text.to_lowercase();
-                        let hits = terms.iter().filter(|t| lower.contains(t.as_str())).count();
-                        C { id, item, ord, words: text.split_whitespace().count(), score: c + 0.08 * hits as f32 }
+                        let boost: f32 = terms.iter().filter(|(t, _)| lower.contains(t.as_str())).map(|(_, w)| *w).sum();
+                        C { id, item, ord, words: text.split_whitespace().count(), score: c + boost }
                     })
             })
             .collect();
         cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        let Some(top) = cands.first().cloned() else { return Vec::new() };
+        if cands.is_empty() {
+            return Vec::new();
+        }
+        // The "top document" is judged on its best three chunks (decayed), not
+        // its single best one: a long document that matches moderately all over
+        // (a résumé for "list my employers") beats a short one with one lucky chunk.
+        let mut doc_scores: HashMap<i64, Vec<f32>> = HashMap::new();
+        for c in &cands {
+            doc_scores.entry(c.item).or_default().push(c.score);
+        }
+        let top_item = doc_scores
+            .iter()
+            .map(|(item, scores)| {
+                let s: f32 = scores.iter().take(3).enumerate().map(|(i, v)| v * [1.0, 0.5, 0.25][i]).sum();
+                (*item, s)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(item, _)| item)
+            .unwrap_or(cands[0].item);
+        let top = cands.iter().find(|c| c.item == top_item).cloned().unwrap_or_else(|| cands[0].clone());
+        {
+            // Retrieval trace for debugging odd answers (pairs with last_ask.txt).
+            let mut title_of = self.conn.prepare("SELECT title FROM items WHERE id = ?1").ok();
+            let line: Vec<String> = cands
+                .iter()
+                .take(8)
+                .map(|c| {
+                    let t: String = title_of.as_mut().and_then(|st| st.query_row(params![c.item], |r| r.get(0)).ok()).unwrap_or_default();
+                    format!("{:.3} {}#{}", c.score, t.chars().take(14).collect::<String>(), c.ord)
+                })
+                .collect();
+            crate::util::log(&format!("retrieval for {query:?}: {}", line.join(" | ")));
+        }
 
         // Pick chunks under the budget: seeds in score order, each with its neighbours.
         let Ok(mut by_pos) = self.conn.prepare("SELECT id, text FROM chunks WHERE item_id = ?1 AND ord = ?2") else {

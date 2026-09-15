@@ -39,6 +39,8 @@ pub struct Llm {
     layers: usize,
     kv_heads: usize,
     head_dim: usize,
+    /// HF-style exports take explicit `position_ids`; GenAI exports derive positions from the mask.
+    wants_position_ids: bool,
     pub backend: &'static str,
     #[allow(dead_code)]
     pub name: String,
@@ -48,7 +50,15 @@ fn ok<T, E: std::fmt::Display>(r: Result<T, E>) -> anyhow::Result<T> {
     r.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Find an ONNX LLM: next to the exe, then in the vault folder. Largest `*.onnx` wins.
+/// Size of a model = graph file + its external data file (`<name>.onnx.data`), if any.
+fn model_size(p: &Path) -> u64 {
+    let graph = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let mut data = p.as_os_str().to_owned();
+    data.push(".data");
+    graph + std::fs::metadata(PathBuf::from(data)).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Find an ONNX LLM: next to the exe, then in the vault folder. Largest model wins.
 pub fn find_model(extra_dir: &Path) -> Option<PathBuf> {
     let mut dirs = vec![extra_dir.to_path_buf()];
     if let Ok(exe) = std::env::current_exe() {
@@ -62,7 +72,7 @@ pub fn find_model(extra_dir: &Path) -> Option<PathBuf> {
         for e in rd.flatten() {
             let p = e.path();
             if p.extension().map(|x| x.eq_ignore_ascii_case("onnx")).unwrap_or(false) {
-                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                let size = model_size(&p);
                 if best.as_ref().map(|b| size > b.0).unwrap_or(true) {
                     best = Some((size, p));
                 }
@@ -116,8 +126,12 @@ impl Llm {
         let mut layers = 0;
         let mut kv_heads = 2;
         let mut head_dim = 128;
+        let mut wants_position_ids = false;
         for input in session.inputs() {
             let name = input.name();
+            if name == "position_ids" {
+                wants_position_ids = true;
+            }
             if name.starts_with("past_key_values.") && name.ends_with(".key") {
                 layers += 1;
                 if let Some(dims) = input.dtype().tensor_shape() {
@@ -133,7 +147,7 @@ impl Llm {
         }
         let tok = Tokenizer::from_bytes(TOKENIZER_QWEN2).map_err(|e| anyhow::anyhow!("{e}"))?;
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Llm { cpu, gpu, tok, layers, kv_heads, head_dim, backend, name })
+        Ok(Llm { cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, backend, name })
     }
 
     fn is_temporal(question: &str) -> bool {
@@ -190,6 +204,38 @@ impl Llm {
             .collect()
     }
 
+    fn prompt_pass_gpu(
+        gpu: &mut Session,
+        layers: usize,
+        wants_position_ids: bool,
+        input_ids: &Tensor<i64>,
+        mask: &Tensor<i64>,
+        pos: &Tensor<i64>,
+        past: &[DynValue],
+    ) -> anyhow::Result<(u32, Vec<DynValue>)> {
+        let mut binding = ok(gpu.create_binding())?;
+        ok(binding.bind_input("input_ids", input_ids))?;
+        ok(binding.bind_input("attention_mask", mask))?;
+        if wants_position_ids {
+            ok(binding.bind_input("position_ids", pos))?;
+        }
+        for (i, kv) in past.iter().enumerate() {
+            ok(binding.bind_input(Self::kv_name(i, "past_key_values"), kv))?;
+        }
+        // Everything comes back to the CPU: the decode loop runs there.
+        let cpu_mem = ok(MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::Default))?;
+        ok(binding.bind_output_to_device("logits", &cpu_mem))?;
+        for i in 0..layers * 2 {
+            ok(binding.bind_output_to_device(Self::kv_name(i, "present"), &cpu_mem))?;
+        }
+        let mut outputs = ok(gpu.run_binding(&binding))?;
+        let next = Self::argmax(&outputs["logits"])?;
+        let present = (0..layers * 2)
+            .map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output")))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok((next, present))
+    }
+
     /// One forward pass over `ids` at position `past_len`. The cache values in
     /// `past` are consumed and the new ones returned (always in CPU memory).
     /// The prompt pass (`past_len == 0`) goes to the GPU when there is one.
@@ -203,32 +249,22 @@ impl Llm {
 
         if past_len == 0 {
             if let Some(gpu) = self.gpu.as_mut() {
-                let mut binding = ok(gpu.create_binding())?;
-                ok(binding.bind_input("input_ids", &input_ids))?;
-                ok(binding.bind_input("attention_mask", &mask))?;
-                ok(binding.bind_input("position_ids", &pos))?;
-                for (i, kv) in past.iter().enumerate() {
-                    ok(binding.bind_input(Self::kv_name(i, "past_key_values"), kv))?;
+                match Self::prompt_pass_gpu(gpu, layers, self.wants_position_ids, &input_ids, &mask, &pos, &past) {
+                    Ok(r) => return Ok(r),
+                    Err(e) => {
+                        // A kernel this export doesn't support on DirectML: do the pass on the CPU from now on.
+                        crate::util::log(&format!("llm: DirectML prompt pass failed, switching to CPU: {e}"));
+                        self.gpu = None;
+                    }
                 }
-                // Everything comes back to the CPU: the decode loop runs there.
-                let cpu_mem = ok(MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::Default))?;
-                ok(binding.bind_output_to_device("logits", &cpu_mem))?;
-                for i in 0..layers * 2 {
-                    ok(binding.bind_output_to_device(Self::kv_name(i, "present"), &cpu_mem))?;
-                }
-                let mut outputs = ok(gpu.run_binding(&binding))?;
-                let next = Self::argmax(&outputs["logits"])?;
-                let present = (0..layers * 2)
-                    .map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output")))
-                    .collect::<anyhow::Result<Vec<_>>>()?;
-                return Ok((next, present));
             }
         }
-
         let mut inputs: Vec<(Cow<'static, str>, ort::session::SessionInputValue<'static>)> = Vec::with_capacity(3 + layers * 2);
         inputs.push(("input_ids".into(), input_ids.into()));
         inputs.push(("attention_mask".into(), mask.into()));
-        inputs.push(("position_ids".into(), pos.into()));
+        if self.wants_position_ids {
+            inputs.push(("position_ids".into(), pos.into()));
+        }
         for (i, kv) in past.into_iter().enumerate() {
             inputs.push((Self::kv_name(i, "past_key_values").into(), kv.into()));
         }

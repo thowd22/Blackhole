@@ -133,6 +133,9 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - **Metadata filters**: type, date range, source.
 - Target: search results in well under 100 ms for tens of thousands of chunks on a laptop.
 
+### 4.2b Embedding model upgrade — P1
+- bge-small (33M, 384-dim) misses paraphrase-level matches: "list my employers" does not reach a résumé that never uses the word. Evaluate bge-base-en-v1.5 (110M, 768-dim, ~110 MB int8) on the test vault; ship it if recall improves without hurting ingest speed on DirectML. Vectors are re-embedded automatically when the model id changes.
+
 ### 4.3 Background & resource behaviour — P0
 - Indexing runs at low priority; the UI never blocks.
 - Idle CPU ≈ 0, RAM small enough to leave running permanently.

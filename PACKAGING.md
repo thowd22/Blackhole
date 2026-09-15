@@ -93,7 +93,11 @@ If the runtime DLL is missing or fails to initialise, the app falls back to the 
    - Therefore **hybrid**: prompt pass on the GPU with outputs bound to CPU memory, decode on the CPU session. Costs two sessions (~2 GB RAM + ~2 GB VRAM while loaded; unloaded 60 s after the panel closes).
    - Fast GPU decode needs a static-shape GenAI-style export (GroupQueryAttention, fixed-length cache shared between past and present) — see phase 2b.
 2b. **Static-cache DML model** — export with ONNX Runtime GenAI's model builder (`-e dml -p int4`), bind a fixed max-length cache in and out, so DirectML compiles once and decodes at 30+ tok/s. Also enables 3B/7B at interactive speed.
-3. **Bigger model** — with the prompt pass on the GPU, try Qwen2.5-3B-Instruct int4 (`onnx-community`, ~3.5 GB) as the default for better before/after reasoning; keep 1.5B as the "lite" choice. (`candle` and the GGUF path are already retired.)
+3. **Bigger model — evaluated 2026-09-15, not adopted yet.** Qwen2.5-3B-Instruct int4 (ONNX Runtime GenAI export, `keisuke-miyako/Qwen2.5-3B-Instruct-onnx-int4`, 3.0 GB; needs `tools/trim_gqa.py` for ORT 1.20 and `tools/last_logits.py`). Findings:
+   - The GenAI layout (GroupQueryAttention, no `position_ids`) is now supported by the loop and runs on the CPU provider. Its fp32 GQA kernel is rejected by DirectML at run time (`80070057`), so the prompt pass falls back to CPU: 10–15 s to first text vs ~1 s for the 1.5B on the GPU.
+   - Answer quality on the test vault: cleaner, well-structured timelines and correct "most recent title", but still wrong on "the job before Maxar" (picked Raytheon, skipped AWS) and refused the shipping-cost question the 1.5B answers. Not a clear win for 2× the latency and ~3 GB more RAM.
+   - Decision: 1.5B stays the default. The 3B (or 7B) becomes worthwhile only with phase 2b — an fp16 static-cache DirectML export where GQA runs on the GPU.
+   - Retrieval limit surfaced during testing: bge-small ranks customs paperwork above the résumé for "list all my employers with dates" (the résumé never says "employer"). Term boosts are now IDF-weighted so common words can't drag junk up, and the top document is scored over its best three chunks; the remaining gap needs a stronger embedding model (try bge-base, 768-dim) — tracked in FEATURES.md §4.
 4. **Accelerator selection UI** — probe DirectML device → CPU; show "Running on: <adapter>" in the menu; manual override in settings.
 5. **NPU** — ARM64 build with the QNN EP for Snapdragon X; evaluate OpenVINO / Vitis AI EPs on x64 Copilot+ machines.
 

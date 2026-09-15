@@ -1,4 +1,6 @@
 models/**/*.onnx
-models/*/*.gguf
+models/**/*.onnx.data
+models/**/*.onnx_data
+models/**/*.gguf
 runtime/*.dll
 target/

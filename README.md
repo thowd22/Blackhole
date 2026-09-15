@@ -31,8 +31,9 @@ Working now:
   The model is optional: the app looks for the largest `*.onnx` next to the exe (or in the vault folder),
   pre-loads it when the search panel opens (~6 s) and unloads it 60 s after the panel closes.
   The exact prompt of the last question is written to `%LOCALAPPDATA%\Blackhole\last_ask.txt`.
-  Known limit: the 1.5B model lists dates correctly but often misreads before/after off its own timeline;
-  a 3B model is the next step now that the GPU carries the prompt pass.
+  Known limit: the 1.5B model lists dates correctly but often misreads before/after off its own timeline.
+  Qwen2.5-3B (GenAI int4 export) also loads and runs — on CPU only, its GQA kernel fails on DirectML — and
+  wasn't a clear quality win in testing (see PACKAGING.md phase 3); drop a larger `.onnx` beside the exe to try it.
 - Tray icon (the sprite) with the same menu; **Show dot** toggles dot visibility, **Start at login**
   writes the per-user Run key, **Center on new message** warps the dot to screen centre for notifications
 - Pixel-art speech bubbles: a 6-step first-run tutorial (each step waits for the action it describes;
@@ -53,7 +54,8 @@ rustup target add x86_64-pc-windows-gnu
 #   runtime/{onnxruntime.dll,DirectML.dll}           from NuGet Microsoft.ML.OnnxRuntime.DirectML 1.20.1 / Microsoft.AI.DirectML 1.15.4
 ./build.sh            # builds and copies the exe to /mnt/c/Users/<you>/blackhole/
 # Ask mode model (beside the exe): onnx/model_q4.onnx from https://huggingface.co/onnx-community/Qwen2.5-1.5B-Instruct,
-# run through tools/last_logits.py so the prompt pass only returns the last token's logits.
+# run through tools/last_logits.py so the prompt pass only returns the last token's logits
+# (GenAI-builder exports additionally need tools/trim_gqa.py for ORT 1.20).
 # cargo build --release --bin ortllm gives a console bench for the LLM path.
 # Build memory: .cargo/config.toml caps cargo at 4 jobs — 24 parallel rustc on candle/tract at
 # opt-level 3 can take down a 15 GB WSL VM. Avoid running a second heavy cargo build concurrently.
