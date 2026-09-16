@@ -69,7 +69,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - Show/hide the dot.
 - Paste clipboard directly into Blackhole without dragging (ingest the current clipboard contents).
 - Open search from anywhere without moving the dot.
-- **Ctrl+Shift+N — summon to mouse and open a new note** (2026-09-16): the dot warps to the cursor, the panel opens on the Notes tab with an empty note ready to type into (see §5.8).
+- **Ctrl+Shift+N — summon to mouse and open a new note** (2026-09-16): the dot warps to the cursor, the panel opens on the Notes tab with an empty note ready to type into (see §5.8). — done 2026-09-16
 - **Screenshot shortcut** (2026-09-16): see §3.6; a global shortcut (default Ctrl+Shift+S, falling back to Ctrl+Alt+S when another program owns it — logged, and the menu label follows) and a panel button start a drag-region capture. — done 2026-09-16
 
 ### 2.5 System tray icon — P1
@@ -78,7 +78,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - Closing/hiding the dot never quits; quitting is explicit from the tray or dot menu.
 
 ### 2.6 Right-click menu — P1
-- **Default view** submenu (2026-09-16): *Notes* or *Files* — which tab the panel opens on (left-click and Ctrl+Shift+Space). Ctrl+Shift+N always opens Notes.
+- **Default view** submenu (2026-09-16): *Notes* or *Files* — which tab the panel opens on (left-click and Ctrl+Shift+Space). Ctrl+Shift+N always opens Notes. — done 2026-09-16
 - Paste from clipboard
 - Open search
 - Recent items
@@ -213,12 +213,12 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 - Tag / rename display title.
 
 ### 5.8 Notes tab — built-in editor — P1 (2026-09-16)
-- The panel gets two tabs: **Files** (today's search/ask view) and **Notes**: direct note-taking inside Blackhole. A note is a vault item like any other (searchable, askable, MCP-retrievable) that stays editable; saving is automatic on every pause.
-- Ctrl+Shift+N summons the dot and opens a fresh note; the right-click **Default view** picks which tab opens otherwise (§2.6).
+- The panel gets two tabs: **Files** (today's search/ask view) and **Notes**: direct note-taking inside Blackhole. A note is a vault item like any other (searchable, askable, MCP-retrievable) that stays editable; saving is automatic on every pause. — done 2026-09-16 (pixel tab strip, "+" button, notes list above the editor, autosave 600 ms after a pause with re-embedding on a worker, Ctrl+Tab switches tabs, Ctrl+N new, Ctrl+Del forgets; a note found in Files opens in Notes)
+- Ctrl+Shift+N summons the dot and opens a fresh note; the right-click **Default view** picks which tab opens otherwise (§2.6). — done 2026-09-16
 - **Editor with LSP support**: the goal is a real editor, not a text box — syntax highlighting, completion and diagnostics for code snippets, markdown for prose. Options, to decide when this is built:
   1. **Package Neovim**: ship `nvim` (≈10 MB, MIT) and embed it — either a terminal control hosting `nvim --embed`/`--headless` over its msgpack-RPC UI protocol, drawn with the panel's pixel font (the "external UI" route Neovim supports natively), or launch it in a Windows Terminal/ConHost window positioned over the panel. Gives LSP, treesitter, the user's own config for free; the cost is a modal editor for non-vim users (a `-u` starter config with insert-mode defaults mitigates that).
   2. A native pixel-styled edit control with an LSP client speaking to external servers (`rust-analyzer`, `marksman`, …): full control of the look, much more work.
-  Leaning to (1): it is the only way "LSP support" is honest at this project's size.
+  Leaning to (1): it is the only way "LSP support" is honest at this project's size. Status 2026-09-16: v1 ships a native multi-line edit control in the panel's pixel style (frame, on-theme scrollbar, autosave); the Neovim embed is the next step for this section.
 - Notes render with §5.6's rich formatting in the Files view and previews; the raw text is what's stored.
 
 ---

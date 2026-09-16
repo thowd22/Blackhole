@@ -21,6 +21,9 @@ pub struct Config {
     /// Let the model reason before answering (models with a think mode; ~5 s extra).
     #[serde(default = "yes")]
     pub think: bool,
+    /// The panel opens on the Notes tab instead of Files.
+    #[serde(default)]
+    pub notes_default: bool,
     /// Search panel size the user dragged, in 96-DPI px (0 = default); see `search.rs`.
     #[serde(default)]
     pub panel_w: i32,
@@ -34,7 +37,7 @@ fn yes() -> bool {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, panel_w: 0, panel_h: 0 }
+        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0 }
     }
 }
 

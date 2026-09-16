@@ -778,6 +778,35 @@ impl Store {
         .unwrap_or_default()
     }
 
+    /// The user's own notes (kind "note"), newest first, as list rows.
+    pub fn notes(&self, limit: usize) -> Vec<Hit> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id, title, kind, source, substr(content, 1, 160) FROM items WHERE kind = 'note' ORDER BY added_at DESC, id DESC LIMIT ?1",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![limit as i64], |r| {
+            Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "), via: "" })
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    /// A new, empty note; notes never dedupe against each other (unique hash).
+    pub fn add_note(&self, now: i64) -> rusqlite::Result<Option<i64>> {
+        let hash = format!("note:{now}:{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0));
+        self.add("Untitled note", "note", None, "", &hash, now)
+    }
+
+    /// Rewrite a note's title and text; chunks are dropped so the caller re-embeds it.
+    pub fn update_note(&mut self, id: i64, title: &str, content: &str) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE items SET title = ?1, content = ?2, added_at = ?3 WHERE id = ?4", params![title, content, crate::util::now_secs(), id])?;
+        self.conn.execute("DELETE FROM chunks WHERE item_id = ?1", params![id])?;
+        self.conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])?;
+        self.index.retain(|e| e.item_id != id);
+        Ok(())
+    }
+
     pub fn content(&self, id: i64) -> Option<String> {
         self.conn
             .query_row("SELECT content FROM items WHERE id = ?1", params![id], |r| r.get(0))

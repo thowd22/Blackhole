@@ -48,6 +48,7 @@ const TRANSITION_MS: u32 = 150;
 const HOTKEY_SUMMON: i32 = 1;
 const HOTKEY_PASTE: i32 = 2;
 const HOTKEY_SHOT: i32 = 3;
+const HOTKEY_NOTE: i32 = 4;
 /// Ctrl+Shift+S was taken; the screenshot key is Ctrl+Alt+S (menu label follows).
 static SHOT_KEY_ALT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -64,6 +65,9 @@ const MENU_START_LOGIN: usize = 10;
 const MENU_TUTORIAL: usize = 11;
 const MENU_SIZE_XL: usize = 12;
 const MENU_THINK: usize = 13;
+const MENU_VIEW_FILES: usize = 15;
+const MENU_VIEW_NOTES: usize = 16;
+const MENU_NEW_NOTE: usize = 17;
 const MENU_SCREENSHOT: usize = 14;
 
 /// First-run tutorial. Each step waits for the action it describes.
@@ -398,7 +402,7 @@ impl Dot {
             self.set_hidden(false);
         }
         if self.search.is_invalid() {
-            self.search = SearchWin::create(self.hwnd, self.store.clone(), self.embedder.clone(), self.ask.clone(), (self.cfg.panel_w, self.cfg.panel_h));
+            self.search = SearchWin::create(self.hwnd, self.store.clone(), self.embedder.clone(), self.ask.clone(), (self.cfg.panel_w, self.cfg.panel_h), self.cfg.notes_default);
         }
         self.set_mood(Mood::Listening, None);
         SearchWin::show(self.search, self.rect());
@@ -437,6 +441,14 @@ impl Dot {
         self.redraw();
         self.open_search();
         self.tutorial_event(Event::Summoned);
+    }
+
+    /// Ctrl+Shift+N: come to the mouse and open a fresh note on the Notes tab.
+    unsafe fn new_note(&mut self) {
+        if !self.search_open() {
+            self.summon();
+        }
+        SearchWin::new_note_in(self.search);
     }
 
     unsafe fn go_home(&mut self) {
@@ -629,6 +641,7 @@ impl Dot {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, MENU_SEARCH, w!("Search\tCtrl+Shift+Space"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_PASTE, w!("Swallow clipboard\tCtrl+Shift+V"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_NEW_NOTE, w!("New note\tCtrl+Shift+N"));
         let shot_label = crate::util::wide(if SHOT_KEY_ALT.load(std::sync::atomic::Ordering::Relaxed) { "Take screenshot\tCtrl+Alt+S" } else { "Take screenshot\tCtrl+Shift+S" });
         let _ = AppendMenuW(menu, MF_STRING, MENU_SCREENSHOT, PCWSTR(shot_label.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, MENU_VAULT, w!("Open vault folder"));
@@ -642,6 +655,10 @@ impl Dot {
         let _ = AppendMenuW(menu, MF_STRING | chk(!self.cfg.hidden), MENU_SHOW_DOT, w!("Show dot"));
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.center_on_message), MENU_CENTER_MSG, w!("Center on new message"));
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.think), MENU_THINK, w!("Think before answering"));
+        let view = CreatePopupMenu().unwrap_or_default();
+        let _ = AppendMenuW(view, MF_STRING | chk(!self.cfg.notes_default), MENU_VIEW_FILES, w!("Files"));
+        let _ = AppendMenuW(view, MF_STRING | chk(self.cfg.notes_default), MENU_VIEW_NOTES, w!("Notes"));
+        let _ = AppendMenuW(menu, MF_POPUP, view.0 as usize, w!("Default view"));
         let _ = AppendMenuW(menu, MF_STRING | chk(startup::enabled()), MENU_START_LOGIN, w!("Start at login"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
@@ -681,6 +698,14 @@ impl Dot {
                 crate::llm_ort::set_thinking(self.cfg.think);
                 config::save(&self.cfg);
             }
+            MENU_VIEW_FILES | MENU_VIEW_NOTES => {
+                self.cfg.notes_default = id == MENU_VIEW_NOTES;
+                config::save(&self.cfg);
+                if !self.search.is_invalid() {
+                    SearchWin::set_default_tab(self.search, self.cfg.notes_default);
+                }
+            }
+            MENU_NEW_NOTE => self.new_note(),
             MENU_START_LOGIN => startup::set(!startup::enabled()),
             MENU_QUIT => {
                 let _ = DestroyWindow(self.hwnd);
@@ -712,7 +737,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             d.drop_target = Some(target);
             // A hotkey another program already owns fails silently otherwise; say so in the
             // log (and, for the screenshot key, offer the fallback the menu shows).
-            for (id, vk, name) in [(HOTKEY_SUMMON, VK_SPACE, "Ctrl+Shift+Space"), (HOTKEY_PASTE, VK_V, "Ctrl+Shift+V"), (HOTKEY_SHOT, VK_S, "Ctrl+Shift+S")] {
+            for (id, vk, name) in [(HOTKEY_SUMMON, VK_SPACE, "Ctrl+Shift+Space"), (HOTKEY_PASTE, VK_V, "Ctrl+Shift+V"), (HOTKEY_SHOT, VK_S, "Ctrl+Shift+S"), (HOTKEY_NOTE, VK_N, "Ctrl+Shift+N")] {
                 if RegisterHotKey(Some(hwnd), id, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, vk.0 as u32).is_err() {
                     crate::util::log(&format!("hotkey {name} is taken by another program"));
                     if id == HOTKEY_SHOT && RegisterHotKey(Some(hwnd), HOTKEY_SHOT, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, vk.0 as u32).is_ok() {
@@ -816,6 +841,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     HOTKEY_SUMMON => d.summon(),
                     HOTKEY_PASTE => d.paste_clipboard(),
                     HOTKEY_SHOT => d.screenshot(),
+                    HOTKEY_NOTE => d.new_note(),
                     _ => {}
                 }
             }
@@ -917,6 +943,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = UnregisterHotKey(Some(hwnd), HOTKEY_SUMMON);
                 let _ = UnregisterHotKey(Some(hwnd), HOTKEY_PASTE);
                 let _ = UnregisterHotKey(Some(hwnd), HOTKEY_SHOT);
+                let _ = UnregisterHotKey(Some(hwnd), HOTKEY_NOTE);
                 tray::remove(hwnd);
                 config::save(&d.cfg);
                 if !d.search.is_invalid() {

@@ -183,6 +183,15 @@ the DirectML findings and the memory work are in [PACKAGING.md](PACKAGING.md).
   colloquial questions with no word in common with a one-line note can't be retrieved. Those are the open
   items below; RAG.md records every step that was measured, including the ones that made things worse.
 
+## Notes
+
+The panel has two tabs, **Files** and **Notes**. Notes are written right in Blackhole: **Ctrl+Shift+N** summons the
+dot to your mouse with a fresh note open (or press **+** in the panel, Ctrl+N inside it). Notes save themselves
+600 ms after you pause and are re-embedded in the background, so a note is a vault item like any other — it
+shows up in search, ask mode and MCP `retrieve` — but stays editable: open it from the list, or from a search
+hit in Files. Ctrl+Tab switches tabs; right-click → **Default view** picks which one opens. The editor is a
+pixel-framed native text box today; an embedded Neovim (LSP, treesitter, your config) is the planned upgrade.
+
 ## Using it from agents (MCP)
 
 Blackhole is an **MCP server**, so Claude Code (or any MCP client) can use your vault as memory: `retrieve`
