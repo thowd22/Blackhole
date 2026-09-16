@@ -16,7 +16,7 @@
 //! fight the control's own repaints — so the bar simply lives outside the control.
 
 use crate::ask::{AskEngine, Job, WM_ASK_DONE, WM_ASK_STATUS, WM_ASK_TOKEN};
-use crate::nvim::{self, WM_NVIM_CHANGED, WM_NVIM_CMD, WM_NVIM_ESCAPE, WM_NVIM_FLUSH};
+use crate::nvim::{self, WM_NVIM_CHANGED, WM_NVIM_CMD, WM_NVIM_ESCAPE, WM_NVIM_FLUSH, WM_NVIM_STATUS};
 use crate::embed::Embedder;
 use crate::store::{Hit, Store};
 use crate::util::wide;
@@ -178,6 +178,10 @@ pub struct SearchWin {
     tidy: bool,
     /// Del pressed once on this item; a second press within a few seconds forgets it.
     confirm_forget: Option<(i64, Instant)>,
+    /// Path of the user's Neovim init (empty = built-in config only).
+    nvim_init: String,
+    /// A Neovim message / command line currently shown in place of the status.
+    nvim_status: Option<String>,
 }
 
 unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut SearchWin> {
@@ -187,7 +191,7 @@ unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut SearchWin> {
 
 impl SearchWin {
     /// `size` is the remembered dragged size from the config, (w, h) in 96-DPI px, 0 = default.
-    pub fn create(dot: HWND, store: Arc<Mutex<Store>>, embedder: Arc<Embedder>, ask: Arc<AskEngine>, size: (i32, i32), notes_default: bool) -> HWND {
+    pub fn create(dot: HWND, store: Arc<Mutex<Store>>, embedder: Arc<Embedder>, ask: Arc<AskEngine>, size: (i32, i32), notes_default: bool, nvim_init: &str) -> HWND {
         unsafe {
             let class = w!("BlackholeSearch");
             let wc = WNDCLASSW {
@@ -251,6 +255,8 @@ impl SearchWin {
                 carets: std::collections::HashMap::new(),
                 tidy: false,
                 confirm_forget: None,
+                nvim_init: nvim_init.to_string(),
+                nvim_status: None,
             });
             let ptr = Box::into_raw(boxed);
             let hwnd = CreateWindowExW(
@@ -863,6 +869,7 @@ impl SearchWin {
 
     unsafe fn begin_new_note(&mut self) {
         self.flush_note();
+        self.remember_caret();
         self.tab = Tab::Notes;
         self.ensure_nvim();
         self.editing = None;
@@ -883,7 +890,7 @@ impl SearchWin {
     /// Start Neovim the first time the Notes tab is used (no-op without nvim.exe).
     unsafe fn ensure_nvim(&mut self) {
         if self.nvim.is_none() && !self.editor.is_invalid() && std::env::var_os("BLACKHOLE_NO_NVIM").is_none() {
-            self.nvim = nvim::Host::create(self.hwnd, self.px(15), self.unit(), BORDER);
+            self.nvim = nvim::Host::create(self.hwnd, self.px(15), self.unit(), BORDER, &self.nvim_init);
         }
     }
 
@@ -917,7 +924,8 @@ impl SearchWin {
         self.editing = Some(id);
         self.dirty = false;
         self.set_editor_text(&text);
-        if let (Some(h), Some(pos)) = (&self.nvim, self.carets.get(&id).copied()) {
+        let remembered = self.carets.get(&id).copied().or_else(|| self.store.lock().unwrap().cursor_of(id));
+        if let (Some(h), Some(pos)) = (&self.nvim, remembered) {
             h.set_cursor(pos);
         }
         self.set_status(&format!("{} notes   ↵ opens · Ctrl+Del forgets · Ctrl+N new · :Name <title>", self.hits.len()));
@@ -928,6 +936,7 @@ impl SearchWin {
         if let (Some(h), Some(id)) = (&self.nvim, self.editing) {
             if let Some(pos) = h.cursor() {
                 self.carets.insert(id, pos);
+                self.store.lock().unwrap().set_cursor(id, pos.0, pos.1);
             }
         }
     }
@@ -1012,6 +1021,13 @@ impl SearchWin {
                         self.set_status("copied");
                     }
                 }
+                "tag" => {
+                    if let Some(id) = self.preview_id {
+                        let _ = self.store.lock().unwrap().set_tags(id, arg);
+                        self.set_status(&if arg.trim().is_empty() { "tags cleared".into() } else { format!("tagged {}", tag_line(arg)) });
+                        self.refresh_keep_sel();
+                    }
+                }
                 "q" => self.set_preview(false),
                 _ => {}
             }
@@ -1021,6 +1037,17 @@ impl SearchWin {
             "copy" => {
                 set_clipboard_text(self.hwnd, &self.editor_text());
                 self.set_status("note copied to the clipboard");
+            }
+            "tag" => {
+                if self.editing.is_none() {
+                    self.dirty = true;
+                    self.flush_note();
+                }
+                if let Some(id) = self.editing {
+                    let _ = self.store.lock().unwrap().set_tags(id, arg);
+                    self.set_status(&if arg.trim().is_empty() { "tags cleared".into() } else { format!("tagged {}", tag_line(arg)) });
+                    self.refresh_keep_sel();
+                }
             }
             "ask" => self.ask_note(arg, false),
             "tidy" => self.ask_note(
@@ -1198,7 +1225,40 @@ impl SearchWin {
 
     unsafe fn set_status(&mut self, text: &str) {
         self.status_text = text.to_string();
-        let _ = SetWindowTextW(self.status, PCWSTR(wide(text).as_ptr()));
+        if self.nvim_status.is_none() {
+            let _ = SetWindowTextW(self.status, PCWSTR(wide(text).as_ptr()));
+        }
+    }
+
+    /// Neovim's messages and command line show in the status line while they last.
+    unsafe fn set_nvim_status(&mut self, text: Option<String>) {
+        self.nvim_status = text;
+        let shown = self.nvim_status.clone().unwrap_or_else(|| self.status_text.clone());
+        let _ = SetWindowTextW(self.status, PCWSTR(wide(&shown).as_ptr()));
+    }
+
+    /// Restart the embedded editor (config changed); the open note is reloaded into it.
+    pub unsafe fn set_nvim_init(hwnd: HWND, path: &str) {
+        let Some(s) = state(hwnd) else { return };
+        s.nvim_init = path.to_string();
+        s.flush_note();
+        s.remember_caret();
+        if let Some(h) = s.nvim.take() {
+            let _ = DestroyWindow(h.hwnd);
+        }
+        s.preview = false;
+        s.preview_id = None;
+        if s.tab == Tab::Notes {
+            s.ensure_nvim();
+            if let Some(id) = s.editing {
+                let text = s.store.lock().unwrap().content(id).unwrap_or_default();
+                s.set_editor_text(&text);
+            } else {
+                s.set_editor_text("");
+            }
+            s.layout_children();
+            let _ = SetFocus(Some(s.editor_hwnd()));
+        }
     }
 
     unsafe fn on_ask_message(&mut self, msg: u32, id: u64, text: String) {
@@ -1349,9 +1409,14 @@ impl SearchWin {
         if self.tab == Tab::Notes {
             // The search box filters notes by title/preview; "? question" asks about the open
             // note on Enter instead. The editor keeps its note.
-            let q = if Self::question_of(&raw).is_some() { String::new() } else { raw.trim().to_lowercase() };
+            let (tags, rest) = crate::store::split_tags(&raw);
+            let q = if Self::question_of(&raw).is_some() { String::new() } else { rest.trim().to_lowercase() };
             let all = self.store.lock().unwrap().notes(MAX_NOTES);
-            self.hits = if q.is_empty() { all } else { all.into_iter().filter(|h| h.title.to_lowercase().contains(&q) || h.snippet.to_lowercase().contains(&q)).collect() };
+            self.hits = all
+                .into_iter()
+                .filter(|h| tags.iter().all(|t| h.tags.split(' ').any(|x| x == t)))
+                .filter(|h| q.is_empty() || h.title.to_lowercase().contains(&q) || h.snippet.to_lowercase().contains(&q))
+                .collect();
             SendMessageW(self.list, LB_RESETCONTENT, None, None);
             for i in 0..self.hits.len() {
                 SendMessageW(self.list, LB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(i as isize)));
@@ -1507,18 +1572,54 @@ impl SearchWin {
         title_r.left = tag_r.right + pad;
         SetTextColor(hdc, FG);
         let mut title = wide(&hit.title);
+        if !hit.tags.is_empty() {
+            // Tags sit at the right edge in the accent colour; the title ellipsises before them.
+            SelectObject(hdc, self.font_small.into());
+            let mut tags = wide(&tag_line(&hit.tags));
+            let mut tr = title_r;
+            DrawTextW(hdc, &mut tags, &mut tr, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+            let tw = tr.right - tr.left;
+            let mut tag_area = RECT { left: (title_r.right - tw).max(title_r.left), top: title_r.top + self.px(2), right: title_r.right, bottom: title_r.bottom };
+            SetTextColor(hdc, FG_KIND);
+            DrawTextW(hdc, &mut tags, &mut tag_area, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+            title_r.right = (tag_area.left - pad).max(title_r.left);
+            SelectObject(hdc, self.font.into());
+            SetTextColor(hdc, FG);
+        }
         DrawTextW(hdc, &mut title, &mut title_r, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-        // snippet, with FTS highlight markers stripped (rendered plain for now)
+        // Snippet: FTS marks matched terms with \u{1}…\u{2}; those runs are drawn in the accent.
         SelectObject(hdc, self.font_small.into());
-        SetTextColor(hdc, FG_DIM);
         let mut snip_r = r;
         snip_r.top += self.px(18);
-        let clean: String = hit.snippet.chars().filter(|c| *c != '\u{1}' && *c != '\u{2}').map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
-        let mut snip = wide(&clean);
-        DrawTextW(hdc, &mut snip, &mut snip_r, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        let flat: String = hit.snippet.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+        let mut x = snip_r.left;
+        let mut lit = false;
+        for run in flat.split_inclusive(|c| c == '\u{1}' || c == '\u{2}') {
+            let (text, toggles) = match run.chars().last() {
+                Some('\u{1}') | Some('\u{2}') => (&run[..run.len() - 1], true),
+                _ => (run, false),
+            };
+            if !text.is_empty() && x < snip_r.right {
+                SetTextColor(hdc, if lit { FG_KIND } else { FG_DIM });
+                let mut w16 = wide(text);
+                let mut m = RECT { left: x, top: snip_r.top, right: snip_r.right, bottom: snip_r.bottom };
+                DrawTextW(hdc, &mut w16, &mut m, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+                let mut d = RECT { left: x, top: snip_r.top, right: snip_r.right, bottom: snip_r.bottom };
+                DrawTextW(hdc, &mut w16, &mut d, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                x = m.right;
+            }
+            if toggles {
+                lit = !lit;
+            }
+        }
         SelectObject(hdc, old);
     }
+}
+
+/// "work ideas" / "work, ideas" → "#work #ideas".
+fn tag_line(raw: &str) -> String {
+    raw.split(|c: char| c == ',' || c.is_whitespace()).map(|t| t.trim_start_matches('#')).filter(|t| !t.is_empty()).map(|t| format!("#{}", t.to_lowercase())).collect::<Vec<_>>().join(" ")
 }
 
 unsafe fn set_clipboard_text(owner: HWND, text: &str) {
@@ -1726,6 +1827,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if s.nvim.as_ref().map(|h| h.is_user_change(wparam.0 as u64)).unwrap_or(false) {
                     s.note_changed();
                 }
+            }
+            LRESULT(0)
+        }
+        WM_NVIM_STATUS => {
+            let text = *Box::from_raw(lparam.0 as *mut String);
+            if let Some(s) = state(hwnd) {
+                s.set_nvim_status((!text.is_empty()).then_some(text));
             }
             LRESULT(0)
         }

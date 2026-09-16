@@ -24,6 +24,9 @@ pub struct Config {
     /// The panel opens on the Notes tab instead of Files.
     #[serde(default)]
     pub notes_default: bool,
+    /// The user's own Neovim init file, sourced after Blackhole's (empty = built-in only).
+    #[serde(default)]
+    pub nvim_init: String,
     /// Search panel size the user dragged, in 96-DPI px (0 = default); see `search.rs`.
     #[serde(default)]
     pub panel_w: i32,
@@ -37,7 +40,7 @@ fn yes() -> bool {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0 }
+        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0, nvim_init: String::new() }
     }
 }
 

@@ -32,6 +32,8 @@ pub struct Hit {
     pub snippet: String,
     /// How it matched: "kw" (keyword), "sem" (semantic) or "both".
     pub via: &'static str,
+    /// User tags, space-separated without the '#'.
+    pub tags: String,
 }
 
 /// Semantic matches must clear this cosine (bge: relevant ≈ 0.6+, noise ≈ 0.5)…
@@ -135,6 +137,9 @@ impl Store {
         // item re-chunks, and the ingest worker re-extracts PDFs whose file is still around.
         // Notes named by the user keep their title across saves (migration: older vaults lack the column).
         let _ = conn.execute("ALTER TABLE items ADD COLUMN custom_title INTEGER NOT NULL DEFAULT 0", []);
+        // Tags (stored as ",a,b," for LIKE matching) and the note's last cursor "row,col".
+        let _ = conn.execute("ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE items ADD COLUMN cursor TEXT NOT NULL DEFAULT ''", []);
         let text_stamp: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'text_version'", [], |r| r.get(0)).optional()?;
         let stale_text = text_stamp.as_deref() != Some(TEXT_VERSION);
         if stale_text {
@@ -264,6 +269,59 @@ impl Store {
     /// where coverage is the fraction of query terms the item contains. So an
     /// exact phrase wins outright, a one-word coincidence barely registers.
     pub fn search(&self, query: &str, qvec: Option<&[f32]>, limit: usize) -> Vec<Hit> {
+        // "#tag" words filter by tag; whatever is left is the search itself.
+        let (tags, rest) = split_tags(query);
+        if !tags.is_empty() {
+            let mut hits = if rest.trim().is_empty() { self.tagged(limit * 4) } else { self.search_inner(&rest, qvec, limit * 4) };
+            hits.retain(|h| tags.iter().all(|t| h.tags.split(' ').any(|x| x == t)));
+            hits.truncate(limit);
+            return hits;
+        }
+        let mut hits = self.search_inner(query, qvec, limit);
+        self.attach_tags(&mut hits);
+        hits
+    }
+
+    /// Fill `tags` on hits (one small query each; lists are short).
+    fn attach_tags(&self, hits: &mut [Hit]) {
+        let Ok(mut st) = self.conn.prepare("SELECT tags FROM items WHERE id = ?1") else { return };
+        for h in hits.iter_mut() {
+            let raw: String = st.query_row(params![h.id], |r| r.get(0)).unwrap_or_default();
+            h.tags = raw.split(',').filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ");
+        }
+    }
+
+    /// Set an item's tags from free text ("work, ideas" / "#work #ideas").
+    pub fn set_tags(&mut self, id: i64, text: &str) -> rusqlite::Result<()> {
+        let mut tags: Vec<String> = text
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .map(|t| t.trim_start_matches('#').trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        tags.dedup();
+        let stored = if tags.is_empty() { String::new() } else { format!(",{},", tags.join(",")) };
+        self.conn.execute("UPDATE items SET tags = ?1 WHERE id = ?2", params![stored, id])?;
+        Ok(())
+    }
+
+    pub fn set_cursor(&self, id: i64, row: i64, col: i64) {
+        let _ = self.conn.execute("UPDATE items SET cursor = ?1 WHERE id = ?2", params![format!("{row},{col}"), id]);
+    }
+
+    pub fn cursor_of(&self, id: i64) -> Option<(i64, i64)> {
+        let raw: String = self.conn.query_row("SELECT cursor FROM items WHERE id = ?1", params![id], |r| r.get(0)).ok()?;
+        let (r, c) = raw.split_once(',')?;
+        Some((r.parse().ok()?, c.parse().ok()?))
+    }
+
+    /// Every item carrying at least one tag, newest first.
+    fn tagged(&self, limit: usize) -> Vec<Hit> {
+        let mut hits = self.recent(limit.max(200));
+        hits.retain(|h| !h.tags.is_empty());
+        hits
+    }
+
+    fn search_inner(&self, query: &str, qvec: Option<&[f32]>, limit: usize) -> Vec<Hit> {
         if query.trim().is_empty() {
             return self.recent(limit);
         }
@@ -357,6 +415,7 @@ impl Store {
                             source: r.get(2)?,
                             snippet: r.get::<_, String>(3)?.replace(['\r', '\n'], " "),
                             via: "sem",
+                            tags: String::new(),
                         },
                         c,
                     ))
@@ -752,6 +811,7 @@ impl Store {
                 source: r.get(3)?,
                 snippet: r.get(4)?,
                 via: "kw",
+                tags: String::new(),
             })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -759,6 +819,12 @@ impl Store {
     }
 
     pub fn recent(&self, limit: usize) -> Vec<Hit> {
+        let mut hits = self.recent_inner(limit);
+        self.attach_tags(&mut hits);
+        hits
+    }
+
+    fn recent_inner(&self, limit: usize) -> Vec<Hit> {
         let mut stmt = match self.conn.prepare(
             "SELECT id, title, kind, source, substr(content, 1, 120)
              FROM items ORDER BY added_at DESC, id DESC LIMIT ?1",
@@ -774,6 +840,7 @@ impl Store {
                 source: r.get(3)?,
                 snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "),
                 via: "",
+                tags: String::new(),
             })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -782,13 +849,19 @@ impl Store {
 
     /// The user's own notes (kind "note"), newest first, as list rows.
     pub fn notes(&self, limit: usize) -> Vec<Hit> {
+        let mut hits = self.notes_inner(limit);
+        self.attach_tags(&mut hits);
+        hits
+    }
+
+    fn notes_inner(&self, limit: usize) -> Vec<Hit> {
         let Ok(mut stmt) = self.conn.prepare(
             "SELECT id, title, kind, source, substr(content, 1, 160) FROM items WHERE kind = 'note' ORDER BY added_at DESC, id DESC LIMIT ?1",
         ) else {
             return Vec::new();
         };
         stmt.query_map(params![limit as i64], |r| {
-            Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "), via: "" })
+            Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "), via: "", tags: String::new() })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
@@ -886,4 +959,17 @@ impl Store {
             println!("   {c:.3} {} — {}", title.chars().take(30).collect::<String>(), text.replace('\n', " "));
         }
     }
+}
+
+/// ("#work #ideas rest of query") → (["work","ideas"], "rest of query").
+pub fn split_tags(query: &str) -> (Vec<String>, String) {
+    let mut tags = Vec::new();
+    let mut rest = Vec::new();
+    for w in query.split_whitespace() {
+        match w.strip_prefix('#').filter(|t| !t.is_empty()) {
+            Some(t) => tags.push(t.to_lowercase()),
+            None => rest.push(w),
+        }
+    }
+    (tags, rest.join(" "))
 }

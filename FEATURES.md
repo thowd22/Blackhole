@@ -200,7 +200,7 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 ### 5.6 Rich results — P1
 - **Code blocks**: snippets and previews from code files / fenced ```` ``` ```` blocks render monospace with the language tag, preserving indentation; a hit inside a code block shows the enclosing block, not a one-line fragment.
 - **Rich text formatting**: markdown headings, bold/italics, lists and links render styled in snippets and in an item preview pane, rather than as raw `#`/`*` markup; HTML clippings keep basic structure.
-- **Match highlighting**: the matched terms in a snippet are drawn in the accent colour (FTS5 already marks them; the panel currently strips the markers). — done 2026-09-16 in the preview (query terms highlighted in the accent colour via Neovim `matchadd`); snippets in the list still plain
+- **Match highlighting**: the matched terms in a snippet are drawn in the accent colour (FTS5 already marks them; the panel currently strips the markers). — done 2026-09-16: list snippets draw FTS-marked runs in the accent colour; previews highlight query terms via Neovim `matchadd`
 - **Preview pane**: expand a result (→ or Tab) to read the full item inline with the above formatting, without opening the source app. — done 2026-09-16: Tab shows the hit in a read-only Neovim buffer below the list, filetype from the extension (code and markdown coloured), Esc/Tab returns; needs the bundled nvim
 
 ### 5.6b On-theme scrollbars — P1
@@ -210,7 +210,7 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 
 ### 5.7 Item actions — P1
 - Open, copy, reveal, re-index, delete ("let it escape" — with confirmation). — done 2026-09-16 except re-index: Del asks and a second Del within 5 s forgets
-- Tag / rename display title. — rename done 2026-09-16 (`:Name <title>` while previewing an item, sticky); tags still open
+- Tag / rename display title. — done 2026-09-16: `:Name <title>` (sticky) and `:Tag a, b` on notes and previewed items; tags shown on rows; `#tag` words filter searches in Files and Notes
 
 ### 5.8 Notes tab — built-in editor — P1 (2026-09-16)
 - The panel gets two tabs: **Files** (today's search/ask view) and **Notes**: direct note-taking inside Blackhole. A note is a vault item like any other (searchable, askable, MCP-retrievable) that stays editable; saving is automatic on every pause. — done 2026-09-16 (pixel tab strip, "+" button, notes list above the editor, autosave 600 ms after a pause with re-embedding on a worker, Ctrl+Tab switches tabs, Ctrl+N new, Ctrl+Del forgets; a note found in Files opens in Notes)
@@ -220,7 +220,7 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
   2. A native pixel-styled edit control with an LSP client speaking to external servers (`rust-analyzer`, `marksman`, …): full control of the look, much more work.
   Leaning to (1): it is the only way "LSP support" is honest at this project's size. — done 2026-09-16, option (1): `:w` saves, `:wq`/`:x`/ZZ save and start a new note, `:q` saves and closes, `:new`; titles from the first line (heading marks stripped) or "Note <date time>" when empty, `:Name <title>` for an explicit, sticky name; `src/nvim.rs` runs the stock `nvim.exe` shipped beside the app as `nvim --embed` and renders its grid (ext_linegrid) in the panel's font and palette; line numbers on, markdown by default with treesitter, LSP started for any server on PATH, insert mode for new notes, Esc in normal mode closes the panel, Ctrl+Tab/N/Del remain the panel's. The plain edit control stays as the fallback when nvim.exe is absent.
 - Notes render with §5.6's rich formatting in the Files view and previews; the raw text is what's stored. — previews done 2026-09-16 (Neovim markdown colours)
-- Notes follow-ups — done 2026-09-16: `:Copy`/Ctrl+Shift+C copies the note; `? question` in the Notes search box or `:Ask` answers from the open note only; `:Tidy` rewrites it as clean markdown (undoable); MCP `put` with `kind: "note"`; cursor position remembered per note for the session.
+- Notes follow-ups — done 2026-09-16: `:Copy`/Ctrl+Shift+C copies the note; `? question` in the Notes search box or `:Ask` answers from the open note only; `:Tidy` rewrites it as clean markdown (undoable); MCP `put` with `kind: "note"`; cursor position remembered per note and persisted in the vault; the user's own init.lua/init.vim loaded via a file browser (right-click → Editor) and sourced after Blackhole's; Neovim messages and the command line rendered in the panel's status line (ext_messages/ext_cmdline, cmdheight 0); IME composition window placed at the cursor and surrogate pairs handled.
 
 ---
 

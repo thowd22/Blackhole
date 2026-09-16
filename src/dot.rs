@@ -68,6 +68,8 @@ const MENU_THINK: usize = 13;
 const MENU_VIEW_FILES: usize = 15;
 const MENU_VIEW_NOTES: usize = 16;
 const MENU_NEW_NOTE: usize = 17;
+const MENU_NVIM_CONFIG: usize = 18;
+const MENU_NVIM_BUILTIN: usize = 19;
 pub const MENU_SCREENSHOT: usize = 14;
 
 /// First-run tutorial. Each step waits for the action it describes.
@@ -402,7 +404,7 @@ impl Dot {
             self.set_hidden(false);
         }
         if self.search.is_invalid() {
-            self.search = SearchWin::create(self.hwnd, self.store.clone(), self.embedder.clone(), self.ask.clone(), (self.cfg.panel_w, self.cfg.panel_h), self.cfg.notes_default);
+            self.search = SearchWin::create(self.hwnd, self.store.clone(), self.embedder.clone(), self.ask.clone(), (self.cfg.panel_w, self.cfg.panel_h), self.cfg.notes_default, &self.cfg.nvim_init);
         }
         self.set_mood(Mood::Listening, None);
         SearchWin::show(self.search, self.rect());
@@ -441,6 +443,31 @@ impl Dot {
         self.redraw();
         self.open_search();
         self.tutorial_event(Event::Summoned);
+    }
+
+    /// Standard file dialog for an init.lua / init.vim; starts in %LOCALAPPDATA%\nvim.
+    unsafe fn pick_nvim_config(&self) -> Option<String> {
+        use windows::Win32::UI::Controls::Dialogs::*;
+        let mut file = vec![0u16; 1024];
+        let filter: Vec<u16> = "Neovim config (init.lua, init.vim)\0init.lua;init.vim;*.lua;*.vim\0All files\0*.*\0\0".encode_utf16().collect();
+        let start = crate::util::wide(&dirs::data_local_dir().map(|d| d.join("nvim").display().to_string()).unwrap_or_default());
+        let title = w!("Choose your Neovim config");
+        let mut ofn = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            hwndOwner: self.hwnd,
+            lpstrFilter: PCWSTR(filter.as_ptr()),
+            lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
+            nMaxFile: file.len() as u32,
+            lpstrInitialDir: PCWSTR(start.as_ptr()),
+            lpstrTitle: title,
+            Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+            ..Default::default()
+        };
+        if !GetOpenFileNameW(&mut ofn).as_bool() {
+            return None;
+        }
+        let path = crate::util::from_wide(&file);
+        (!path.is_empty()).then_some(path)
     }
 
     /// Ctrl+Shift+N: come to the mouse and open a fresh note on the Notes tab.
@@ -659,6 +686,11 @@ impl Dot {
         let _ = AppendMenuW(view, MF_STRING | chk(!self.cfg.notes_default), MENU_VIEW_FILES, w!("Files"));
         let _ = AppendMenuW(view, MF_STRING | chk(self.cfg.notes_default), MENU_VIEW_NOTES, w!("Notes"));
         let _ = AppendMenuW(menu, MF_POPUP, view.0 as usize, w!("Default view"));
+        let editor = CreatePopupMenu().unwrap_or_default();
+        let _ = AppendMenuW(editor, MF_STRING, MENU_NVIM_CONFIG, w!("Load Neovim config…"));
+        let builtin = crate::util::wide(&if self.cfg.nvim_init.is_empty() { "Built-in config only".to_string() } else { format!("Built-in config only  (now: {})", self.cfg.nvim_init.rsplit(['\\', '/']).next().unwrap_or("")) });
+        let _ = AppendMenuW(editor, MF_STRING | chk(self.cfg.nvim_init.is_empty()), MENU_NVIM_BUILTIN, PCWSTR(builtin.as_ptr()));
+        let _ = AppendMenuW(menu, MF_POPUP, editor.0 as usize, w!("Editor"));
         let _ = AppendMenuW(menu, MF_STRING | chk(startup::enabled()), MENU_START_LOGIN, w!("Start at login"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
@@ -706,6 +738,23 @@ impl Dot {
                 }
             }
             MENU_NEW_NOTE => self.new_note(),
+            MENU_NVIM_CONFIG => {
+                if let Some(path) = self.pick_nvim_config() {
+                    self.cfg.nvim_init = path;
+                    config::save(&self.cfg);
+                    if !self.search.is_invalid() {
+                        SearchWin::set_nvim_init(self.search, &self.cfg.nvim_init);
+                    }
+                    self.notify_quiet("Neovim config loaded — the editor restarts with it".into());
+                }
+            }
+            MENU_NVIM_BUILTIN => {
+                self.cfg.nvim_init.clear();
+                config::save(&self.cfg);
+                if !self.search.is_invalid() {
+                    SearchWin::set_nvim_init(self.search, "");
+                }
+            }
             MENU_START_LOGIN => startup::set(!startup::enabled()),
             MENU_QUIT => {
                 let _ = DestroyWindow(self.hwnd);

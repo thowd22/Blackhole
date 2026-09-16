@@ -41,9 +41,10 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
 - Left-click: a dark panel appears beside the dot. Results update on every keystroke in about 5 ms —
   keyword matches and semantic matches fused, with a tag showing which kind of match you're looking at.
   **↵** opens the file, **Ctrl+↵** reveals it in Explorer, **Ctrl+C** copies a pasted note, **Del** forgets it
-  (press it twice — the first press asks). **Tab** previews the selected hit in place: the full text with
-  your search terms highlighted and code or markdown coloured by type (the preview is Neovim, read-only), and
-  `:Name new title` there renames any item. The camera button in the panel takes a screenshot.
+  (press it twice — the first press asks). Matched words are highlighted in the result snippets. **Tab**
+  previews the selected hit in place: the full text with your search terms highlighted and code or markdown
+  coloured by type (the preview is Neovim, read-only); `:Name new title` there renames any item and `:Tag`
+  tags it. The camera button in the panel takes a screenshot.
   The panel sizes itself to what it shows; drag the pixel grip in its bottom-right corner to set your own size,
   which is remembered. Closing it keeps the query and answer for next time; **Esc** twice clears them. The
   scrollbars are drawn in the same pixel style as everything else.
@@ -71,7 +72,15 @@ the `#`), or "Note 2026-09-16 15:40" while it's still empty; `:Name Shopping ide
 that name sticks through edits (`:Name` alone goes back to automatic titles). Type `? a question` in the
 Notes search box (or `:Ask …` in the editor) and the model answers from the open note alone; `:Tidy` has it
 rewrite the note as clean markdown without changing a fact (`u` undoes); `:Copy` / Ctrl+Shift+C copies the note.
-Each note remembers where your cursor was. Agents can write notes too: MCP `put` with `kind: "note"`.
+Each note remembers where your cursor was, across restarts. `:Tag work, coffee` tags a note (or a previewed
+item); tags show on the right of each row and `#work` in either search box filters by tag, alone or with
+other words. Agents can write notes too: MCP `put` with `kind: "note"`.
+
+**Your own Neovim config**: right-click → **Editor → Load Neovim config…** opens a file browser; pick your
+`init.lua` or `init.vim` and it is sourced after Blackhole's settings (so yours win), with its folder on
+`runtimepath`/`packpath` so `lua/` modules and packs beside it load. **Built-in config only** switches back.
+Neovim's messages and the `:` command line appear in the panel's status line rather than eating editor rows;
+IME composition and characters outside the BMP (emoji) work.
 
 ## Using it from agents (MCP)
 
