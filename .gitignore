@@ -4,3 +4,8 @@ models/**/*.onnx_data
 models/**/*.gguf
 runtime/*.dll
 target/
+# evaluation data derived from the developer's personal vault — never commit
+eval/*.db*
+eval/questions*.json
+eval/results/
+eval/**/contexts*.json
