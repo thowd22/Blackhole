@@ -16,7 +16,7 @@
 //! fight the control's own repaints — so the bar simply lives outside the control.
 
 use crate::ask::{AskEngine, Job, WM_ASK_DONE, WM_ASK_STATUS, WM_ASK_TOKEN};
-use crate::nvim::{self, WM_NVIM_CHANGED, WM_NVIM_ESCAPE, WM_NVIM_FLUSH};
+use crate::nvim::{self, WM_NVIM_CHANGED, WM_NVIM_CMD, WM_NVIM_ESCAPE, WM_NVIM_FLUSH};
 use crate::embed::Embedder;
 use crate::store::{Hit, Store};
 use crate::util::wide;
@@ -821,7 +821,7 @@ impl SearchWin {
         self.set_editor_text("");
         self.refresh();
         SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(usize::MAX)), None);
-        self.set_status("new note — start typing; saved as you go");
+        self.set_status(if self.nvim.is_some() { "new note — saved as you go · :wq next note · :Name <title> · :q close" } else { "new note — start typing; saved as you go" });
         let _ = InvalidateRect(Some(self.hwnd), None, true);
         let _ = SetFocus(Some(self.editor_hwnd()));
     }
@@ -867,15 +867,67 @@ impl SearchWin {
         self.editing = Some(id);
         self.dirty = false;
         self.set_editor_text(&text);
-        self.set_status(&format!("{} notes   ↵ in the list opens · Ctrl+Del forgets · Ctrl+N new", self.hits.len()));
+        self.set_status(&format!("{} notes   ↵ opens · Ctrl+Del forgets · Ctrl+N new · :Name <title>", self.hits.len()));
         self.invalidate_bar(Ctl::Editor);
     }
 
-    /// Title = first non-empty line, trimmed.
+    /// Automatic title: the first non-empty line without markdown heading marks; a note
+    /// with no text yet is "Note <date> <time>". (`:Name` in the editor overrides this.)
     fn note_title(text: &str) -> String {
-        let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Untitled note");
-        let t: String = line.chars().take(80).collect();
-        t
+        let line = text.lines().map(|l| l.trim().trim_start_matches('#').trim()).find(|l| !l.is_empty());
+        match line {
+            Some(l) => l.chars().take(80).collect(),
+            None => {
+                // Local date/time without a date crate: SYSTEMTIME from the OS.
+                let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+                format!("Note {:04}-{:02}-{:02} {:02}:{:02}", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute)
+            }
+        }
+    }
+
+    /// A command from inside Neovim: `:w`, `:wq`/`:x`/ZZ, `:q`, `:Name <title>`, `:new`.
+    unsafe fn editor_command(&mut self, action: &str, arg: &str) {
+        match action {
+            "write" => {
+                self.dirty = self.dirty || self.editing.is_none();
+                self.flush_note();
+            }
+            "wq" | "new" => {
+                self.dirty = self.dirty || (self.editing.is_none() && !self.editor_text().trim().is_empty());
+                self.flush_note();
+                self.begin_new_note();
+                self.fit(true);
+            }
+            "q" => {
+                self.flush_note();
+                SearchWin::hide(self.hwnd);
+            }
+            "name" => {
+                if self.editing.is_none() {
+                    self.dirty = true;
+                    self.flush_note(); // creates the note so there is something to name
+                }
+                if let Some(id) = self.editing {
+                    let _ = self.store.lock().unwrap().set_note_title(id, arg);
+                    if arg.trim().is_empty() {
+                        // Back to automatic titles: re-derive from the text.
+                        let text = self.editor_text();
+                        let title = Self::note_title(&text);
+                        let _ = self.store.lock().unwrap().update_note(id, &title, &text);
+                    }
+                    self.hits = self.store.lock().unwrap().notes(MAX_NOTES);
+                    SendMessageW(self.list, LB_RESETCONTENT, None, None);
+                    for i in 0..self.hits.len() {
+                        SendMessageW(self.list, LB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(i as isize)));
+                    }
+                    let idx = self.hits.iter().position(|h| h.id == id).unwrap_or(usize::MAX);
+                    SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(idx)), None);
+                    self.set_status(&if arg.trim().is_empty() { "automatic title again".to_string() } else { format!("named \"{}\"", arg.trim()) });
+                    self.layout_children();
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Save the editor's text if it changed: create the item on first use, rewrite it
@@ -1450,6 +1502,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_NVIM_FLUSH => {
             if let Some(s) = state(hwnd) {
                 s.invalidate_bar(Ctl::Editor);
+            }
+            LRESULT(0)
+        }
+        WM_NVIM_CMD => {
+            let text = *Box::from_raw(lparam.0 as *mut String);
+            if let Some(s) = state(hwnd) {
+                let (action, arg) = text.split_once('\t').unwrap_or((&text, ""));
+                s.editor_command(action, arg);
             }
             LRESULT(0)
         }

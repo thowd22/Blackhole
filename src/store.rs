@@ -133,6 +133,8 @@ impl Store {
         }
         // Text pipeline changed (layout-aware PDFs, line breaks kept in chunks): every
         // item re-chunks, and the ingest worker re-extracts PDFs whose file is still around.
+        // Notes named by the user keep their title across saves (migration: older vaults lack the column).
+        let _ = conn.execute("ALTER TABLE items ADD COLUMN custom_title INTEGER NOT NULL DEFAULT 0", []);
         let text_stamp: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'text_version'", [], |r| r.get(0)).optional()?;
         let stale_text = text_stamp.as_deref() != Some(TEXT_VERSION);
         if stale_text {
@@ -799,11 +801,23 @@ impl Store {
     }
 
     /// Rewrite a note's title and text; chunks are dropped so the caller re-embeds it.
+    /// Rewrite a note's text; `title` applies unless the user named the note (`set_note_title`).
     pub fn update_note(&mut self, id: i64, title: &str, content: &str) -> rusqlite::Result<()> {
-        self.conn.execute("UPDATE items SET title = ?1, content = ?2, added_at = ?3 WHERE id = ?4", params![title, content, crate::util::now_secs(), id])?;
+        self.conn.execute(
+            "UPDATE items SET title = CASE WHEN custom_title = 1 THEN title ELSE ?1 END, content = ?2, added_at = ?3 WHERE id = ?4",
+            params![title, content, crate::util::now_secs(), id],
+        )?;
         self.conn.execute("DELETE FROM chunks WHERE item_id = ?1", params![id])?;
         self.conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])?;
         self.index.retain(|e| e.item_id != id);
+        Ok(())
+    }
+
+    /// Name a note explicitly (`:Name` in the editor); an empty name goes back to automatic titles.
+    pub fn set_note_title(&mut self, id: i64, title: &str) -> rusqlite::Result<()> {
+        let custom = !title.trim().is_empty();
+        self.conn.execute("UPDATE items SET title = CASE WHEN ?1 THEN ?2 ELSE title END, custom_title = ?1 WHERE id = ?3", params![custom, title.trim(), id])?;
+        self.conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])?;
         Ok(())
     }
 

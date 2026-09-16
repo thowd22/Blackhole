@@ -62,6 +62,10 @@ hit in Files. Ctrl+Tab switches tabs; right-click → **Default view** picks whi
 The editor is **Neovim** — a real one, with line numbers, markdown highlighting, undo, visual mode, `:`
 commands, and any language server you have installed — drawn in Blackhole's own font and colours so it
 doesn't look like a terminal glued on. New notes open in insert mode; Esc in normal mode closes the panel.
+The file commands mean what you'd hope: `:w` saves, `:wq` / `:x` / `ZZ` save and start a fresh note, `:q`
+saves and closes the panel, `:new` starts another. A note is titled by its first line (a `# Heading` loses
+the `#`), or "Note 2026-09-16 15:40" while it's still empty; `:Name Shopping ideas` names it explicitly and
+that name sticks through edits (`:Name` alone goes back to automatic titles).
 
 ## Using it from agents (MCP)
 

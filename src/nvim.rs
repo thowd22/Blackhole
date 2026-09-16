@@ -31,6 +31,9 @@ pub const WM_NVIM_CHANGED: u32 = 0x8041;
 pub const WM_NVIM_FLUSH: u32 = 0x8042;
 /// Posted to the host's parent: Esc pressed while already in normal mode.
 pub const WM_NVIM_ESCAPE: u32 = 0x8043;
+/// Posted to the host's parent with a boxed String "action\targ": a `:w`/`:wq`/`:q`/`:Name`
+/// from inside Neovim (its init file forwards them over RPC).
+pub const WM_NVIM_CMD: u32 = 0x8044;
 
 const NVIM_VERSION: &str = "0.12.5";
 
@@ -199,6 +202,15 @@ impl Rpc {
                                     if PostMessageW(Some(HWND(host as *mut _)), WM_NVIM_EVENTS, WPARAM(0), LPARAM(boxed as isize)).is_err() {
                                         drop(Box::from_raw(boxed));
                                     }
+                                }
+                            }
+                        } else if method == "blackhole" {
+                            let a = arr[2].as_array().cloned().unwrap_or_default();
+                            let text = format!("{}\t{}", a.first().map(v_str).unwrap_or_default(), a.get(1).map(v_str).unwrap_or_default());
+                            let boxed = Box::into_raw(Box::new(text));
+                            unsafe {
+                                if PostMessageW(Some(HWND(host as *mut _)), WM_NVIM_CMD, WPARAM(0), LPARAM(boxed as isize)).is_err() {
+                                    drop(Box::from_raw(boxed));
                                 }
                             }
                         } else if method == "nvim_buf_lines_event" || method == "nvim_buf_changedtick_event" {
@@ -380,8 +392,26 @@ vim.api.nvim_create_autocmd('FileType', {
     end
   end,
 })
--- A note starts in insert mode when it is empty; <C-s> saves the note (Blackhole autosaves anyway).
-vim.keymap.set({ 'n', 'i' }, '<C-s>', '<Esc>', { silent = true })
+-- Blackhole owns the file side of things. :w saves the note, :wq / :x / ZZ save it and start a
+-- fresh one, :q saves and closes the panel, :Name <title> names the note (":Name" alone goes
+-- back to automatic titles). Notes never have a file name, so the built-ins are redirected.
+local send = function(action, arg) vim.rpcnotify(1, 'blackhole', action, arg or '') end
+vim.api.nvim_create_user_command('BhWrite', function() send('write') end, {})
+vim.api.nvim_create_user_command('BhWriteQuit', function() send('wq') end, {})
+vim.api.nvim_create_user_command('BhQuit', function() send('q') end, {})
+vim.api.nvim_create_user_command('Name', function(o) send('name', o.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('BhNew', function() send('new') end, {})
+local redirect = { w = 'BhWrite', write = 'BhWrite', wq = 'BhWriteQuit', x = 'BhWriteQuit', xit = 'BhWriteQuit',
+  wqa = 'BhWriteQuit', wqall = 'BhWriteQuit', q = 'BhQuit', quit = 'BhQuit', qa = 'BhQuit', qall = 'BhQuit',
+  ['q!'] = 'BhQuit', ['wq!'] = 'BhWriteQuit', ['x!'] = 'BhWriteQuit', new = 'BhNew', enew = 'BhNew' }
+for from, to in pairs(redirect) do
+  local f = from:gsub('!', '')
+  vim.cmd(string.format(
+    "cnoreabbrev <expr> %s (getcmdtype() == ':' && getcmdline() ==# '%s') ? '%s' : '%s'", f, f, to, f))
+end
+vim.keymap.set('n', 'ZZ', '<Cmd>BhWriteQuit<CR>', { silent = true })
+vim.keymap.set('n', 'ZQ', '<Cmd>BhQuit<CR>', { silent = true })
+vim.keymap.set({ 'n', 'i' }, '<C-s>', '<Cmd>BhWrite<CR>', { silent = true })
 "##;
     std::fs::write(&path, lua)?;
     Ok(path)
@@ -712,6 +742,9 @@ impl Host {
     }
 
     fn input(&self, keys: &str) {
+        if std::env::var_os("BLACKHOLE_NVIM_DEBUG").is_some() {
+            crate::util::log(&format!("nvim input {keys:?} mode {}", self.mode));
+        }
         if let Some(rpc) = &self.rpc {
             let _ = rpc.notify("nvim_input", vec![Value::from(keys)]);
         }
@@ -772,6 +805,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_NVIM_CHANGED => {
             // Forwarded to the panel, which decides whether it was a user edit.
             let _ = PostMessageW(Some(GetParent(hwnd).unwrap_or_default()), WM_NVIM_CHANGED, wparam, LPARAM(0));
+            LRESULT(0)
+        }
+        WM_NVIM_CMD => {
+            if PostMessageW(Some(GetParent(hwnd).unwrap_or_default()), WM_NVIM_CMD, WPARAM(0), lparam).is_err() {
+                drop(Box::from_raw(lparam.0 as *mut String));
+            }
             LRESULT(0)
         }
         WM_PAINT => {
