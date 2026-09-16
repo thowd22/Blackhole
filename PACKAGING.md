@@ -30,11 +30,15 @@
 
 Why the LLM is not compiled into the exe: a multi-GB executable is slow for antivirus to scan on every launch, awkward to code-sign, and forces a full re-download on every app update. Keeping it as a sibling file preserves "everything in one download" without those costs.
 
-### Installer
-- Single-file installer (e.g. Inno Setup / NSIS / MSIX) or a portable zip.
-- Options: start at login, vault location.
-- Code-sign the exe and installer (SmartScreen warnings otherwise).
-- Updates: delta-update the exe only; model files are versioned and only replaced when changed.
+### Installer (shipped 2026-09-16)
+- **Inno Setup 6** script `installer/blackhole.iss`, built from WSL by `build-installer.sh` (stages exe + DLLs +
+  model under `dist/stage`, runs `ISCC.exe`). Output `dist/Blackhole-<version>-x64-setup.exe`, ≈2.9 GB; the int4
+  model data is stored uncompressed (it does not compress), everything else lzma2.
+- Per-user install by default (`PrivilegesRequired=lowest`, override to all-users allowed); Start-menu shortcut,
+  optional desktop shortcut and "start at sign-in" task (same HKCU Run value the app's menu manages); closes a
+  running instance on install, kills it on uninstall; asks before deleting the vault on uninstall.
+- The exe carries the pixel-art icon and version info (`build.rs` → mingw `windres`).
+- Still to do: code-signing (SmartScreen), delta updates (exe only; model versioned separately), an MSIX/Store variant.
 
 ## Acceleration
 

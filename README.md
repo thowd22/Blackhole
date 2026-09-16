@@ -51,6 +51,14 @@ Working now:
 
 Not yet: OCR & image captions, GPU/NPU acceleration, panel resizing / rich snippets, MCP server (see FEATURES.md).
 
+## Installing
+
+Download `Blackhole-<version>-x64-setup.exe` (≈2.9 GB: the app, the ONNX Runtime + DirectML runtime and the
+Llama 3.2 3B model) and run it. It installs per user by default (no admin needed), can start at sign-in, and
+puts the dot on your desktop. Your vault lives in `%LOCALAPPDATA%\Blackhole` and survives updates; uninstall
+asks before deleting it. Requires Windows 10 1903+ / Windows 11, x64, any GPU with DirectML (the CPU is used
+otherwise). Build it yourself with `./build-installer.sh` (needs Inno Setup: `winget install JRSoftware.InnoSetup`).
+
 ## Building (from WSL)
 
 ```sh

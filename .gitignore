@@ -1,12 +1,12 @@
 models/**/*.onnx
 models/**/*.onnx.data
-models/**/*.onnx_data
+models/**/*.onnx_data*
 models/**/*.gguf
 runtime/*.dll
 target/
+dist/
 # evaluation data derived from the developer's personal vault — never commit
 eval/*.db*
 eval/questions*.json
 eval/results/
 eval/**/contexts*.json
-eval/.cache/
