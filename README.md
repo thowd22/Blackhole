@@ -19,8 +19,15 @@ Working now:
 - On-device embeddings: bge-small-en-v1.5 (384-dim, CLS-pooled) on **ONNX Runtime + DirectML** (any GPU;
   CPU provider fallback). The runtime DLLs and the model are compiled into the exe; the DLLs are unpacked
   beside it on first run. Items are chunked (~100 words, overlapping), each chunk embedded with its title
-- Hybrid search: keyword + semantic (cosine over chunks), score-fused (keyword weight scales with query-term coverage);
-  results are tagged `≈` (semantic), `≈=` (both) or untagged (keyword)
+- Hybrid search: keyword + semantic (cosine over chunks and one title-only document unit per item),
+  score-fused (keyword weight scales with query-term coverage); English stopwords never count as
+  distinctive terms; results are tagged `≈` (semantic), `≈=` (both) or untagged (keyword)
+- "Not in your vault" gate: ≥2 content words, none anywhere in the vault, no strong semantic match →
+  the panel shows nothing and ask mode answers without calling the LLM (2/2 absent, 0 false absents on
+  dev + held-out question sets)
+- Ask-mode retrieval adds a vault-anchored synonym expansion of the dense query and a cross-encoder
+  reranker (mxbai-rerank-xsmall-v1 int8 on ORT, top-10 candidates, ~110 ms) that decides the top document;
+  18/18 Hit@1 on dev + held-out. Live search stays at ~5 ms/query. Method and numbers: RAG.md §2b
 - Search panel: live results, ↵ open, Ctrl+↵ reveal in Explorer, Ctrl+C copy text, Del forget
 - Ask mode: start a query with `?` and press ↵ — Qwen2.5-1.5B-Instruct as int4 ONNX on **ONNX Runtime**,
   hybrid execution: the prompt pass runs on **DirectML** (the GPU with the most VRAM, picked via DXGI),
@@ -51,6 +58,7 @@ rustup target add x86_64-pc-windows-gnu
 # model files (not committed):
 #   models/bge-small-en-v1.5/{model.onnx,vocab.txt}  from https://huggingface.co/BAAI/bge-small-en-v1.5
 #   models/qwen2.5/tokenizer.json                    from https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct
+#   models/rerank-mxbai-int8/{model.onnx,tokenizer.json} = onnx/model_quantized.onnx + tokenizer.json from https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1
 #   runtime/{onnxruntime.dll,DirectML.dll}           from NuGet Microsoft.ML.OnnxRuntime.DirectML 1.20.1 / Microsoft.AI.DirectML 1.15.4
 ./build.sh            # builds and copies the exe to /mnt/c/Users/<you>/blackhole/
 # Ask mode model (beside the exe): onnx/model_q4.onnx from https://huggingface.co/onnx-community/Qwen2.5-1.5B-Instruct,
@@ -76,6 +84,9 @@ SQLite is bundled. `onnxruntime.dll` + `DirectML.dll` (from the `Microsoft.ML.On
 | `src/chunk.rs` | Paragraph-aware overlapping chunker |
 | `src/runtime.rs` | Unpacks and loads ONNX Runtime (+DirectML) dynamically |
 | `src/embed.rs` | bge-small embedder (ONNX Runtime, DirectML→CPU) + WordPiece tokenizer |
+| `src/rerank.rs` | mxbai cross-encoder reranker (ask mode only) |
+| `src/expand.rs` | Vault-anchored synonym expansion of the dense query (ask mode only) |
+| `eval/harness.py` | Retrieval measurement harness (Hit@k, latency) over a vault snapshot |
 | `src/llm_ort.rs` | Qwen2.5 ONNX generation: DirectML prompt pass + CPU decode, prompt template |
 | `src/gpu.rs` | Picks the DirectML adapter (most dedicated VRAM) via DXGI |
 | `src/bin/ortllm.rs` | Console bench for the LLM path |

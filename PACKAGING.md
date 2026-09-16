@@ -80,6 +80,7 @@ Windows ML (Windows App SDK) ships ONNX Runtime and automatically downloads the 
 | `onnxruntime.dll` (with DirectML EP) | ~20 MB | beside the exe (or embedded and extracted to `%LOCALAPPDATA%\Blackhole\bin` on first run, keeping the single-exe download) |
 | `DirectML.dll` | ~15 MB | same |
 | `bge-small` ONNX (embeddings) | 133 MB fp32 → target int8 ~35 MB | embedded |
+| `mxbai-rerank-xsmall-v1` int8 + tokenizer (ask-mode reranker) | 92 MB | embedded |
 | LLM ONNX int4 (Qwen2.5-1.5B → 3B once GPU is fast) | 1–2 GB | beside the exe, as today |
 
 If the runtime DLL is missing or fails to initialise, the app falls back to the CPU execution provider of the same runtime — no separate code path.

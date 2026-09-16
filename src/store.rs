@@ -311,6 +311,11 @@ impl Store {
             .collect()
     }
 
+    /// Does any item contain this word?
+    pub fn contains_term(&self, term: &str) -> bool {
+        self.items_containing(term) > 0
+    }
+
     /// Number of items whose text contains `term` (FTS5 token match).
     fn items_containing(&self, term: &str) -> i64 {
         self.conn
@@ -372,7 +377,18 @@ impl Store {
     /// in the line *before* the matching one, is still in view), the top
     /// document's opening chunk is always included, and everything is emitted
     /// in document order within a word budget.
-    pub fn context(&self, query: &str, qvec: &[f32], budget_words: usize) -> Vec<(String, String)> {
+    /// Context for grounding an answer, with an optional cross-encoder deciding the top document:
+    /// the cheap pipeline proposes the candidates, the reranker scores the best
+    /// `rerank::CANDIDATES` of them, and the document with the highest logit
+    /// becomes the top document. Documents it never saw keep their cheap order.
+    /// (Rank-fusing the reranker with RRF instead measured a regression.)
+    pub fn context_reranked(
+        &self,
+        query: &str,
+        qvec: &[f32],
+        budget_words: usize,
+        rerank: Option<&dyn Fn(&str, &[String]) -> Option<Vec<f32>>>,
+    ) -> Vec<(String, String)> {
         #[derive(Clone)]
         struct C {
             id: i64,
@@ -424,7 +440,7 @@ impl Store {
         for c in &cands {
             doc_scores.entry(c.item).or_default().push(c.score);
         }
-        let top_item = doc_scores
+        let mut top_item = doc_scores
             .iter()
             .map(|(item, scores)| {
                 let s: f32 = scores.iter().take(3).enumerate().map(|(i, v)| v * [1.0, 0.5, 0.25][i]).sum();
@@ -433,6 +449,40 @@ impl Store {
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(item, _)| item)
             .unwrap_or(cands[0].item);
+        if let Some(rerank) = rerank {
+            // Passage text per candidate; a document unit is scored as "title: opening words".
+            let head: Vec<&C> = cands.iter().take(crate::rerank::CANDIDATES).collect();
+            let passages: Vec<String> = head
+                .iter()
+                .map(|c| {
+                    if c.ord < 0 {
+                        let (title, content): (String, String) = self
+                            .conn
+                            .query_row("SELECT title, content FROM items WHERE id = ?1", params![c.item], |r| Ok((r.get(0)?, r.get(1)?)))
+                            .unwrap_or_default();
+                        format!("{title}: {}", content.split_whitespace().take(crate::rerank::DOC_UNIT_WORDS).collect::<Vec<_>>().join(" "))
+                    } else {
+                        meta.query_row(params![c.id], |r| r.get::<_, String>(2)).unwrap_or_default()
+                    }
+                })
+                .collect();
+            if let Some(logits) = rerank(query, &passages) {
+                let mut best: HashMap<i64, f32> = HashMap::new();
+                for (c, &l) in head.iter().zip(&logits) {
+                    let e = best.entry(c.item).or_insert(f32::NEG_INFINITY);
+                    if l > *e {
+                        *e = l;
+                    }
+                }
+                if let Some((item, _)) = best.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)) {
+                    top_item = *item;
+                }
+                let line: Vec<String> = head.iter().zip(&logits).map(|(c, l)| format!("{l:.2} {}#{}", c.item, c.ord)).collect();
+                crate::util::log(&format!("rerank: {}", line.join(" | ")));
+                // Seeds from the chosen document go first so its evidence fills the budget.
+                cands.sort_by(|a, b| (b.item == top_item).cmp(&(a.item == top_item)).then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)));
+            }
+        }
         let top = cands.iter().find(|c| c.item == top_item).cloned().unwrap_or_else(|| cands[0].clone());
         {
             // Retrieval trace for debugging odd answers (pairs with last_ask.txt).

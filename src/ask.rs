@@ -2,7 +2,9 @@
 //! tokens back to the search panel as window messages.
 
 use crate::embed::Embedder;
+use crate::expand;
 use crate::llm_ort::{Llm, Source};
+use crate::rerank::Reranker;
 use crate::store::Store;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +25,8 @@ const CONTEXT_WORDS: usize = 1400;
 pub struct AskEngine {
     model_path: Option<PathBuf>,
     llm: Mutex<Option<Llm>>,
+    /// Cross-encoder for the ask path; loaded with the LLM, dropped with it.
+    reranker: Mutex<Option<Reranker>>,
     /// A warm-up load is in flight (so repeated clicks don't spawn more).
     warming: AtomicBool,
     store: Arc<Mutex<Store>>,
@@ -36,7 +40,7 @@ pub struct Job {
 
 impl AskEngine {
     pub fn new(model_path: Option<PathBuf>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder>) -> AskEngine {
-        AskEngine { model_path, llm: Mutex::new(None), warming: AtomicBool::new(false), store, embedder }
+        AskEngine { model_path, llm: Mutex::new(None), reranker: Mutex::new(None), warming: AtomicBool::new(false), store, embedder }
     }
 
     /// Drop the loaded model to free its memory. Returns false if a generation
@@ -47,9 +51,27 @@ impl AskEngine {
                 if guard.take().is_some() {
                     crate::util::log("llm unloaded (idle)");
                 }
+                if let Ok(mut r) = self.reranker.try_lock() {
+                    r.take();
+                }
                 true
             }
             Err(_) => false,
+        }
+    }
+
+    /// Load the reranker if it isn't; None if it cannot load (ask degrades to the cheap pipeline).
+    fn ensure_reranker(&self) {
+        let mut r = self.reranker.lock().unwrap();
+        if r.is_none() {
+            let t = Instant::now();
+            match Reranker::load() {
+                Ok(x) => {
+                    crate::util::log(&format!("reranker loaded in {:.2}s", t.elapsed().as_secs_f32()));
+                    *r = Some(x);
+                }
+                Err(e) => crate::util::log(&format!("reranker failed to load: {e}")),
+            }
         }
     }
 
@@ -62,6 +84,7 @@ impl AskEngine {
         }
         let engine = self.clone();
         std::thread::spawn(move || {
+            engine.ensure_reranker();
             let mut guard = engine.llm.lock().unwrap();
             if guard.is_none() {
                 let t = Instant::now();
@@ -118,15 +141,30 @@ impl AskEngine {
 
         post(WM_ASK_STATUS, "reading your files…".into());
         let started = Instant::now();
-        let Ok(qvec) = self.embedder.embed(&question) else {
+        // Dense query = question + vault-anchored synonyms (ask mode only).
+        let expansions: Vec<&str> = {
+            let store = self.store.lock().unwrap();
+            expand::expand(&question, |t| store.contains_term(t))
+        };
+        if !expansions.is_empty() {
+            crate::util::log(&format!("expansion: {expansions:?}"));
+        }
+        let Ok(qvec) = self.embedder.embed(&expand::dense_query(&question, &expansions)) else {
             post(WM_ASK_DONE, "Could not embed the question.".into());
             return;
+        };
+        self.ensure_reranker();
+        let reranker = self.reranker.lock().unwrap();
+        let rerank_fn = |q: &str, passages: &[String]| -> Option<Vec<f32>> {
+            reranker.as_ref().and_then(|r| r.score(q, passages).ok())
         };
         let (absent, chunks) = {
             let store = self.store.lock().unwrap();
             let absent = store.absent(&question, Some(&qvec));
-            (absent, if absent { Vec::new() } else { store.context(&question, &qvec, CONTEXT_WORDS) })
+            let hook: Option<&dyn Fn(&str, &[String]) -> Option<Vec<f32>>> = if reranker.is_some() { Some(&rerank_fn) } else { None };
+            (absent, if absent { Vec::new() } else { store.context_reranked(&question, &qvec, CONTEXT_WORDS, hook) })
         };
+        drop(reranker);
         if absent {
             // None of the question's words occur anywhere in the vault: say so instead of
             // letting the model invent an answer from unrelated excerpts.
