@@ -114,7 +114,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 
 ### 3.6 Screenshot tool — P1 (2026-09-16)
 - **Drag-region only**: a global shortcut (Ctrl+Shift+S) or the panel's camera button dims the screen; drag a rectangle; release swallows it. No full-screen or window modes — one gesture, on purpose. — done 2026-09-16
-- The capture is ingested like a dropped image: PNG stored in the vault, findable by time/title, and OCR'd once §3.3's OCR lands so its text is searchable. A speech bubble confirms ("swallowed a screenshot, 412×188"). — done 2026-09-16
+- The capture is ingested like a dropped image: PNG stored in the vault, findable by time/title, and OCR'd once §3.3's OCR lands so its text is searchable. It is also put on the clipboard (CF_DIB) so it pastes anywhere. A quiet speech bubble confirms for ~2.5 s without moving the dot ("Swallowed a screenshot, 412×188 — it's on the clipboard too"). — done 2026-09-16
 - Esc cancels; multi-monitor and per-monitor DPI respected (capture in physical pixels). — done 2026-09-16
 
 ### 3.4 Storage policy — P1

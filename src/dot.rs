@@ -30,6 +30,9 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 pub const WM_INGEST_DONE: u32 = 0x8004;
 /// Show a notification bubble; lparam = Box<String>. Used by ingest and (later) MCP.
 pub const WM_NOTIFY: u32 = 0x8005;
+/// Like WM_NOTIFY but quiet: no warp to the screen centre, gone after a few seconds
+/// (confirmations of something the user just did, e.g. a screenshot).
+pub const WM_NOTIFY_QUIET: u32 = 0x8017;
 const WM_STARTUP: u32 = 0x8006;
 
 const TIMER_ANIM: usize = 1;
@@ -119,7 +122,8 @@ pub struct Dot {
     dib_bits: *mut u32,
     mem_dc: HDC,
     /// Queued notification texts; one bubble at a time.
-    messages: VecDeque<String>,
+    /// Queued notification text and whether it is "quiet" (no centring, short).
+    messages: VecDeque<(String, bool)>,
     /// True while the visible bubble is a tutorial step.
     tutorial_showing: bool,
     taskbar_created: u32,
@@ -506,7 +510,12 @@ impl Dot {
 
     /// Queue a notification; shown when nothing else is up.
     unsafe fn notify(&mut self, text: String) {
-        self.messages.push_back(text);
+        self.messages.push_back((text, false));
+        self.show_next_message();
+    }
+
+    unsafe fn notify_quiet(&mut self, text: String) {
+        self.messages.push_back((text, true));
         self.show_next_message();
     }
 
@@ -519,18 +528,19 @@ impl Dot {
             // A notification pre-empts a (sticky) tutorial step; the step returns afterwards.
             Bubble::hide(self.bubble);
         }
-        let Some(text) = self.messages.pop_front() else { return };
+        let Some((text, quiet)) = self.messages.pop_front() else { return };
         if self.cfg.hidden {
             self.set_hidden(false);
         }
-        // Warp to the screen centre unless the user is mid-search beside the dot.
-        if self.cfg.center_on_message && !self.search_open() {
+        // Warp to the screen centre unless the user is mid-search beside the dot, or the
+        // message only confirms something they just did here.
+        if self.cfg.center_on_message && !self.search_open() && !quiet {
             self.center();
         }
         self.tutorial_showing = false;
         let unit = self.unit();
-        let timeout = 6000 + 40 * text.len() as u32; // longer texts stay longer
-        Bubble::show(self.bubble, &text, self.rect(), unit, Some(timeout.min(20000)));
+        let timeout = if quiet { 2500 } else { (6000 + 40 * text.len() as u32).min(20000) }; // longer texts stay longer
+        Bubble::show(self.bubble, &text, self.rect(), unit, Some(timeout));
         self.set_mood(Mood::Satisfied, Some(400));
     }
 
@@ -836,10 +846,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
-        WM_NOTIFY => {
+        WM_NOTIFY | WM_NOTIFY_QUIET => {
             let text = *Box::from_raw(lparam.0 as *mut String);
             if let Some(d) = state(hwnd) {
-                d.notify(text);
+                if msg == WM_NOTIFY_QUIET { d.notify_quiet(text) } else { d.notify(text) }
             }
             LRESULT(0)
         }

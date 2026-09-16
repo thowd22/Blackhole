@@ -16,6 +16,10 @@ use std::sync::mpsc::Sender;
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::Foundation::{HANDLE, HGLOBAL};
+use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Ole::CF_DIB;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -290,6 +294,11 @@ impl Overlay {
                 rgb.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
             }
         }
+        // The clipboard gets the same pixels, so a capture can go straight into a chat or
+        // editor. Must happen on this (window) thread; the overlay is still alive here.
+        if let Err(e) = self.copy_to_clipboard(&sel) {
+            crate::util::log(&format!("screenshot: clipboard: {e}"));
+        }
         let tx = self.tx.clone();
         let dot = self.dot.0 as usize;
         std::thread::spawn(move || {
@@ -299,7 +308,7 @@ impl Overlay {
                     // Swallow first so the dot is already digesting when WM_INGEST_DONE lands.
                     let _ = PostMessageW(Some(dot), WM_DROP_SWALLOW, WPARAM(0), LPARAM(0));
                     let _ = tx.send(Input::Files(vec![path]));
-                    notify(dot, format!("Swallowed a screenshot, {cw}\u{d7}{ch}"));
+                    notify(dot, format!("Swallowed a screenshot, {cw}\u{d7}{ch} — it's on the clipboard too"));
                 }
                 Err(e) => {
                     crate::util::log(&format!("screenshot: {e}"));
@@ -313,11 +322,44 @@ impl Overlay {
     unsafe fn close(&mut self) {
         let _ = DestroyWindow(self.hwnd);
     }
+
+    /// CF_DIB (32-bit BGRX, bottom-up) of the selection — the format every Windows
+    /// app pastes; the 0x00RRGGBB pixels of the capture are already BGRX in memory.
+    unsafe fn copy_to_clipboard(&self, sel: &RECT) -> Result<(), String> {
+        let (cw, ch) = (sel.right - sel.left, sel.bottom - sel.top);
+        let header = BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: cw,
+            biHeight: ch, // positive = bottom-up
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: (cw * ch * 4) as u32,
+            ..Default::default()
+        };
+        let bytes = std::mem::size_of::<BITMAPINFOHEADER>() + (cw * ch * 4) as usize;
+        let hmem: HGLOBAL = GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|e| e.to_string())?;
+        let dst = GlobalLock(hmem) as *mut u8;
+        if dst.is_null() {
+            return Err("GlobalLock failed".into());
+        }
+        std::ptr::copy_nonoverlapping(&header as *const _ as *const u8, dst, std::mem::size_of::<BITMAPINFOHEADER>());
+        let px = dst.add(std::mem::size_of::<BITMAPINFOHEADER>()) as *mut u32;
+        for (row, y) in (sel.top..sel.bottom).rev().enumerate() {
+            let src = &self.shot[(y * self.w + sel.left) as usize..(y * self.w + sel.right) as usize];
+            std::ptr::copy_nonoverlapping(src.as_ptr(), px.add(row * cw as usize), cw as usize);
+        }
+        let _ = GlobalUnlock(hmem);
+        OpenClipboard(Some(self.hwnd)).map_err(|e| e.to_string())?;
+        let r = EmptyClipboard().and_then(|_| SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(hmem.0))).map(|_| ()));
+        let _ = CloseClipboard();
+        r.map_err(|e| e.to_string())
+    }
 }
 
 unsafe fn notify(dot: HWND, text: String) {
     let boxed = Box::into_raw(Box::new(text));
-    if PostMessageW(Some(dot), crate::dot::WM_NOTIFY, WPARAM(0), LPARAM(boxed as isize)).is_err() {
+    if PostMessageW(Some(dot), crate::dot::WM_NOTIFY_QUIET, WPARAM(0), LPARAM(boxed as isize)).is_err() {
         drop(Box::from_raw(boxed));
     }
 }
