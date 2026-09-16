@@ -90,6 +90,7 @@ typed casually with typos, three aimed at one-line pasted snippets, decoy-heavy 
 | Retrieval Hit@1, ask (rerank) | 9/9 | 9/9 | 19/26 (73 %) |
 | Absent caught / false absents | 1/1, 0 | 1/1, 0 | 3/4 by the gate (+1 by the model), 0 |
 | **Answers correct, Llama 3.2 3B (shipped)** | 7/9 | 6/9 | **17/26 (65 %)** |
+| Answers correct, same model on the pure-GPU fp16 path (2026-09-16, now default) | 7/9 | 7/9 | 15/26 (58 %) — four flips vs fp32, all numerical noise (one gained, one was a lucky hit on the wrong document, two same-content rewordings) |
 | TTFT / tok/s / peak WS | | | 1.18 s / 7.9 / 7.1 GB |
 
 What the misses have in common (retrieval trace in `eval/results/blind-*.json`):
