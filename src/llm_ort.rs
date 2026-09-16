@@ -36,8 +36,12 @@ enum Family {
 /// Special-token strings that end a turn, per family; resolved to ids from the tokenizer.
 const STOP_TOKENS: &[&str] = &["<|im_end|>", "<|endoftext|>", "<|eot_id|>", "<|end_of_text|>", "<|end|>", "<end_of_turn>", "<eos>"];
 const MAX_NEW_TOKENS: usize = 260;
-/// GPU-resident cache capacity (tokens) for the GPU-decode mode.
+/// GPU-resident cache capacity (tokens) for the GPU-decode mode; BLACKHOLE_KV_CAP overrides.
 const GPU_KV_CAPACITY: usize = 4096;
+
+fn kv_capacity() -> usize {
+    std::env::var("BLACKHOLE_KV_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(GPU_KV_CAPACITY)
+}
 const PREFILL_TIMELINE: &str = "Timeline:\n";
 
 /// An excerpt handed to the model as grounding.
@@ -337,7 +341,7 @@ impl Llm {
     /// growing `present` outputs come back corrupted on DirectML.
     fn device_kv(&self) -> anyhow::Result<Vec<DynValue>> {
         let alloc = self.gpu_alloc.as_ref().ok_or_else(|| anyhow::anyhow!("no GPU allocator"))?;
-        let shape = [1usize, self.kv_heads, GPU_KV_CAPACITY, self.head_dim];
+        let shape = [1usize, self.kv_heads, kv_capacity(), self.head_dim];
         (0..self.layers * 2)
             .map(|_| {
                 Ok(if self.kv_f16 {
@@ -417,32 +421,32 @@ impl Llm {
             if self.wants_position_ids {
                 ok(binding.bind_input("position_ids", &pos))?;
             }
-            if total > GPU_KV_CAPACITY {
-                anyhow::bail!("prompt of {total} tokens exceeds the GPU cache capacity of {GPU_KV_CAPACITY}");
+            if total > kv_capacity() {
+                anyhow::bail!("prompt of {total} tokens exceeds the GPU cache capacity of {}", kv_capacity());
             }
-            // The fixed-capacity buffers are the cache: DirectML's GQA appends the new rows into
-            // them in place (GenAI's shared-buffer convention), so the `present` outputs are
-            // allocated by ORT and ignored, and the same buffers are fed again next step.
+            // GenAI's shared-buffer convention: fixed-capacity cache buffers bound as BOTH past
+            // and present, so GroupQueryAttention writes the new rows in place. bind_input keeps
+            // a reference; bind_output takes the value and hands it back via outputs.remove().
             for (i, kv) in past.iter().enumerate() {
                 ok(binding.bind_input(Self::kv_name(i, "past_key_values"), kv))?;
             }
+            for (i, kv) in past.into_iter().enumerate() {
+                ok(binding.bind_output(Self::kv_name(i, "present"), kv))?;
+            }
             let cpu_mem = ok(MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::Default))?;
-            let gpu_mem = ok(MemoryInfo::new(AllocationDevice::DIRECTML, 0, AllocatorType::Device, MemoryType::Default))?;
             let _ = self.gpu_device;
             ok(binding.bind_output_to_device("logits", &cpu_mem))?;
-            for i in 0..layers * 2 {
-                ok(binding.bind_output_to_device(Self::kv_name(i, "present"), &gpu_mem))?;
-            }
             if dbg {
                 crate::util::log("gpu-decode: bound, running");
             }
-            let outputs = ok(self.cpu.run_binding(&binding))?;
+            let mut outputs = ok(self.cpu.run_binding(&binding))?;
             if dbg {
                 crate::util::log("gpu-decode: ran");
             }
             let next = Self::argmax(&outputs["logits"])?;
-            drop(outputs);
-            drop(binding);
+            let past = (0..layers * 2)
+                .map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output")))
+                .collect::<anyhow::Result<Vec<_>>>()?;
             if dbg {
                 crate::util::log(&format!("gpu-decode: next={next}"));
             }
