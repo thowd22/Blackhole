@@ -375,7 +375,9 @@ impl Llm {
     fn prompt(&self, question: &str, sources: &[Source]) -> String {
         // The timeline scratchpad is prefilled for time/order questions only; telling the
         // model about it in general made it write one for every question.
-        let temporal = Self::is_temporal(question);
+        // With thinking on, the model orders dates in its private reasoning; the visible
+        // Timeline scratchpad is only for direct mode.
+        let temporal = Self::is_temporal(question) && !self.thinking();
         let system = if temporal {
             concat!(
                 "You are Blackhole, a search assistant for the user's own files. Answer from the excerpts provided; do not mention excerpts or their numbers. ",
@@ -397,7 +399,7 @@ impl Llm {
         }
         user.push_str(&format!("Question: {}", question.trim()));
         let mut p = self.chat(system, &user);
-        if temporal && !self.thinking() {
+        if temporal {
             p.push_str(PREFILL_TIMELINE);
         }
         p
