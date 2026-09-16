@@ -78,6 +78,38 @@ Next measurements (in order): a third ~30-question set written blind; per-pair r
 laptop (set `rerank_k` from a measured budget); a ~400-item vault; the absent rule against short queries;
 end-to-end answer quality with the 1.5B (the only thing that can settle chunking).
 
+## 2c. Third, blind question set (2026-09-16) — 30 questions, written by an agent that saw only the vault
+
+26 answerable (12 factual, 5 document, 5 temporal, 4 multi) + 4 absent; two-thirds pure paraphrase, half
+typed casually with typos, three aimed at one-line pasted snippets, decoy-heavy numbers on purpose.
+
+| | dev (18) | held-out (18) | **blind (26)** |
+|---|---|---|---|
+| Retrieval Hit@1, live search | 7/9 | 7/9 | 16/26 (62 %) |
+| Retrieval Hit@3, live search | 9/9 | 9/9 | 24/26 (92 %) |
+| Retrieval Hit@1, ask (rerank) | 9/9 | 9/9 | 19/26 (73 %) |
+| Absent caught / false absents | 1/1, 0 | 1/1, 0 | 3/4 by the gate (+1 by the model), 0 |
+| **Answers correct, Llama 3.2 3B (shipped)** | 7/9 | 6/9 | **17/26 (65 %)** |
+| TTFT / tok/s / peak WS | | | 1.18 s / 7.9 / 7.1 GB |
+
+What the misses have in common (retrieval trace in `eval/results/blind-*.json`):
+1. **One-line pasted snippets lose to the 10 KB customs PDF** (git remote, model id, night-shift title, test
+   note): 4 of the 7 retrieval misses. The document unit is the snippet's own text, so it competes with 22
+   customs chunks on cosine alone; the reranker helped only one of them.
+2. **The customs PDF's decoy numbers**: vessel name (answered with the inland carrier code), duty vs portal
+   charge, declared value — the model grabs a neighbouring field. Whole-document context makes this worse.
+3. **Absent gate** misses questions whose nouns exist in the vault for other reasons ("expire", "date" — passport);
+   the model then refused correctly, so the user-visible result was still right.
+4. Two document-level questions ("proof I sent money", "throwaway sample note") retrieve the wrong document
+   outright — title-only units carry no notion of *what kind* of document an item is.
+
+Takeaway: the earlier 18/18 was partly the sets being kind; 62–73 % top-1 retrieval and 65 % correct answers
+on realistic phrasing is the honest baseline to improve from. Candidates, in order: (a) score short items by
+a length-aware prior or index snippets as their own "document kind" unit; (b) a per-item one-line description
+for the document unit — measured worse when LLM-written on the dev set, but the blind set's document
+questions are exactly what it targets, so re-test; (c) field-aware chunking for forms (the customs PDF) so a
+chunk carries one labelled field, not a row of codes.
+
 ## 3. Scaled-down design for Blackhole
 
 Everything below runs on what we already ship (ONNX Runtime + DirectML, bge-small, Qwen2.5-1.5B) plus one
