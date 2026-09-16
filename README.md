@@ -29,18 +29,18 @@ Working now:
   reranker (mxbai-rerank-xsmall-v1 int8 on ORT, top-10 candidates, ~110 ms) that decides the top document;
   18/18 Hit@1 on dev + held-out. Live search stays at ~5 ms/query. Method and numbers: RAG.md §2b
 - Search panel: live results, ↵ open, Ctrl+↵ reveal in Explorer, Ctrl+C copy text, Del forget
-- Ask mode: start a query with `?` and press ↵ — Qwen2.5-1.5B-Instruct as int4 ONNX on **ONNX Runtime**,
-  hybrid execution: the prompt pass runs on **DirectML** (the GPU with the most VRAM, picked via DXGI),
-  decoding runs on the CPU provider (DirectML's per-op overhead makes it slower for single tokens on this
-  graph). First text in ~1 s for a ~1,400-word context; 10–20 tok/s after. Context = best chunks with
-  neighbours in document order, or the whole document when the top hit is small. Order/time questions get
-  a forced "Timeline:" scratchpad; greedy decoding with a repeated-line stop.
-  The model is optional: the app looks for the largest `*.onnx` next to the exe (or in the vault folder),
-  pre-loads it when the search panel opens (~6 s) and unloads it 60 s after the panel closes.
-  The exact prompt of the last question is written to `%LOCALAPPDATA%\Blackhole\last_ask.txt`.
-  Known limit: the 1.5B model lists dates correctly but often misreads before/after off its own timeline.
-  Qwen2.5-3B (GenAI int4 export) also loads and runs — on CPU only, its GQA kernel fails on DirectML — and
-  wasn't a clear quality win in testing (see PACKAGING.md phase 3); drop a larger `.onnx` beside the exe to try it.
+- Ask mode: start a query with `?` and press ↵ — **Llama 3.2 3B Instruct** (int4 ONNX) on ONNX Runtime,
+  hybrid execution: prompt pass on DirectML (the GPU with the most VRAM, picked via DXGI), decode on the CPU
+  provider. Measured end to end on 18 questions: 14/18 correct (Qwen2.5-1.5B: 9/18), ~1 s to first text,
+  ~7.6 tok/s. Any instruct model dropped beside the exe works if its `tokenizer.json` sits next to it: the
+  chat template (ChatML / Llama 3 / Phi / Gemma) and stop tokens are detected from the tokenizer; fp16 or fp32
+  KV caches are both handled. Exports need `tools/last_logits.py` (+ `gemm_head.py`, `explicit_rotary.py` for
+  GenAI-style graphs — see PACKAGING.md § LLM selection round). The largest `*.onnx` (graph + external data)
+  in the exe folder or its subfolders wins.
+  Context = best chunks with neighbours in document order, or the whole document when the top hit is small.
+  Order/time questions get a forced "Timeline:" scratchpad. Pre-loaded when the panel opens, unloaded 60 s
+  after it closes. The exact prompt of the last question goes to `%LOCALAPPDATA%\Blackhole\last_ask.txt`;
+  `cargo build --release --bin askeval` builds the end-to-end evaluation binary.
 - Tray icon (the sprite) with the same menu; **Show dot** toggles dot visibility, **Start at login**
   writes the per-user Run key, **Center on new message** warps the dot to screen centre for notifications
 - Pixel-art speech bubbles: a 6-step first-run tutorial (each step waits for the action it describes;

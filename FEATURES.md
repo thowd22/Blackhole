@@ -170,6 +170,10 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 - Prefix a query with `?` (or toggle) to have the small model write a short answer from the top chunks, with citations back to the items.
 - Streams the answer into the panel.
 
+#### Ask-mode model (2026-09-15): Llama 3.2 3B Instruct, int4 ONNX, hybrid DirectML/CPU
+- Chosen from Qwen2.5-1.5B/3B, Qwen3-1.7B/4B, Phi-4-mini and Llama 3.2 3B under the rule "same engine, runs on AMD/NVIDIA/Intel GPUs via DirectML, has a Copilot+ NPU story". Table in PACKAGING.md.
+- Follow-ups: GPU-resident decode (`BLACKHOLE_DECODE=gpu`) aborts after the first retrieval — debug; peak working set ~9 GB with two sessions — reduce (fp16 for GPU decode, arena limits); DXGI adapter index differed between runs (0 vs 1) — verify DirectML device ids track it.
+
 #### Ask-mode quality notes (from testing, 2026-09-15)
 - Retrieval is solved for small documents by whole-document context; the remaining errors are the 1.5B model's reasoning (e.g. reading "the job before Maxar" off a correct timeline).
 - Fixes in order of payoff: GPU inference (ONNX Runtime + DirectML, see PACKAGING.md) → run a 3B model at the same latency; then a "thinking" model (Qwen3) — its digit garbling was a candle issue, moot once candle is retired.

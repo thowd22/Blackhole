@@ -61,6 +61,9 @@ pub struct Llm {
     wants_position_ids: bool,
     /// fp16 exports carry the KV cache as float16.
     kv_f16: bool,
+    /// Decode on the GPU too (cache stays resident there); the CPU session is not loaded.
+    gpu_decode: bool,
+    gpu_device: i32,
     pub backend: &'static str,
     #[allow(dead_code)]
     pub name: String,
@@ -117,13 +120,20 @@ pub fn find_model(extra_dir: &Path) -> Option<PathBuf> {
     }
     let mut best: Option<(u64, PathBuf)> = None;
     for d in dirs {
+        // The folder itself and one level of subfolders (one folder per model keeps
+        // a model's graph, external data and tokenizer.json together).
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().map(|x| x.eq_ignore_ascii_case("onnx")).unwrap_or(false) {
-                let size = model_size(&p);
-                if best.as_ref().map(|b| size > b.0).unwrap_or(true) {
-                    best = Some((size, p));
+        let mut places = vec![d.clone()];
+        places.extend(rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+        for place in places {
+            let Ok(rd) = std::fs::read_dir(&place) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().map(|x| x.eq_ignore_ascii_case("onnx")).unwrap_or(false) {
+                    let size = model_size(&p);
+                    if best.as_ref().map(|b| size > b.0).unwrap_or(true) {
+                        best = Some((size, p));
+                    }
                 }
             }
         }
@@ -154,12 +164,16 @@ fn cpu_session(path: &Path) -> anyhow::Result<Session> {
 impl Llm {
     pub fn load(path: &Path) -> anyhow::Result<Llm> {
         let force_cpu = std::env::var_os("BLACKHOLE_CPU").is_some();
-        let cpu = cpu_session(path)?;
+        // BLACKHOLE_DECODE=gpu: decode on DirectML as well and skip the CPU session
+        // entirely (roughly halves RAM; per-token cost is DirectML's dispatch overhead).
+        let want_gpu_decode = std::env::var("BLACKHOLE_DECODE").map(|v| v == "gpu").unwrap_or(false);
         let adapter = if force_cpu { None } else { crate::gpu::preferred() };
+        let mut gpu_device = 0;
         let gpu = match adapter {
             Some(a) if DirectML::default().is_available().unwrap_or(false) => match gpu_session(path, a.index) {
                 Ok(s) => {
                     crate::util::log(&format!("llm: prompt pass on DirectML adapter {} ({}, {} MB)", a.index, a.name, a.vram_mb));
+                    gpu_device = a.index;
                     Some(s)
                 }
                 Err(e) => {
@@ -169,7 +183,10 @@ impl Llm {
             },
             _ => None,
         };
-        let backend = if gpu.is_some() { "DirectML + CPU" } else { "CPU" };
+        let gpu_decode = want_gpu_decode && gpu.is_some();
+        // The CPU session is only needed when it decodes (or when there is no GPU).
+        let cpu = if gpu_decode { gpu_session(path, gpu_device)? } else { cpu_session(path)? };
+        let backend = if gpu_decode { "DirectML" } else if gpu.is_some() { "DirectML + CPU" } else { "CPU" };
         let session = &cpu;
         // Cache geometry from the graph itself: count past_key_values.N.key inputs, read their dims.
         let mut layers = 0;
@@ -206,7 +223,7 @@ impl Llm {
         let eos: Vec<u32> = STOP_TOKENS.iter().filter_map(|t| tok.token_to_id(t)).collect();
         crate::util::log(&format!("llm: {} layout, {family:?} template{}, {} stop tokens, kv {}", if wants_position_ids { "HF" } else { "GenAI" }, if no_think { " (no-think)" } else { "" }, eos.len(), if kv_f16 { "f16" } else { "f32" }));
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Llm { family, no_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, backend, name })
+        Ok(Llm { family, no_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, gpu_decode, gpu_device, backend, name })
     }
 
     fn is_temporal(question: &str) -> bool {
@@ -340,6 +357,31 @@ impl Llm {
         let pos = ok(Tensor::from_array(([1usize, n], (past_len..total).map(|p| p as i64).collect::<Vec<_>>())))?;
         let layers = self.layers;
 
+        if self.gpu_decode {
+            // Cache stays on the GPU between steps; only the logits come back.
+            let mut binding = ok(self.cpu.create_binding())?;
+            ok(binding.bind_input("input_ids", &input_ids))?;
+            ok(binding.bind_input("attention_mask", &mask))?;
+            if self.wants_position_ids {
+                ok(binding.bind_input("position_ids", &pos))?;
+            }
+            for (i, kv) in past.iter().enumerate() {
+                ok(binding.bind_input(Self::kv_name(i, "past_key_values"), kv))?;
+            }
+            let cpu_mem = ok(MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::Default))?;
+            let gpu_mem = ok(MemoryInfo::new(AllocationDevice::DIRECTML, self.gpu_device, AllocatorType::Device, MemoryType::Default))?;
+            ok(binding.bind_output_to_device("logits", &cpu_mem))?;
+            for i in 0..layers * 2 {
+                ok(binding.bind_output_to_device(Self::kv_name(i, "present"), &gpu_mem))?;
+            }
+            let mut outputs = ok(self.cpu.run_binding(&binding))?;
+            let next = Self::argmax(&outputs["logits"])?;
+            let present = (0..layers * 2)
+                .map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output")))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            drop(past);
+            return Ok((next, present));
+        }
         if past_len == 0 {
             if let Some(gpu) = self.gpu.as_mut() {
                 match Self::prompt_pass_gpu(gpu, layers, self.wants_position_ids, &input_ids, &mask, &pos, &past) {

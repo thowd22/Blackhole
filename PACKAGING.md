@@ -114,6 +114,38 @@ If the runtime DLL is missing or fails to initialise, the app falls back to the 
 - **candle CUDA** — NVIDIA-only and needs the CUDA toolkit at build time.
 - **Windows ML (Windows App SDK)** — downloads execution providers at runtime; conflicts with the offline single-download requirement. Revisit if that relaxes.
 
+## LLM selection round (2026-09-15) — same engine, vendor-neutral models only
+
+Constraint: ONNX on ONNX Runtime + DirectML (AMD / NVIDIA / Intel GPUs) with model families that
+Qualcomm, AMD and Intel also ship for Copilot+ NPUs; no CUDA-only exports. Measured end to end with
+`askeval.exe` (real pipeline → LLM) on 18 answerable + 2 absent questions (`eval/questions*.json`).
+
+| Model (int4 ONNX) | Correct | TTFT | tok/s | Peak WS | Disk | Notes |
+|---|---|---|---|---|---|---|
+| Qwen2.5-1.5B-Instruct (shipped before) | 9/18 | 0.72 s | 10.9 | 9.9 GB | 1.7 GB | over-refuses; weak on multi-part questions |
+| Qwen3-1.7B | 9/18 | 0.75 s | 10.1 | 12.6 GB | 2.0 GB | no gain |
+| Phi-4-mini-instruct (Microsoft GPU export, fp16 GQA) | 10/18 | 0.69 s | 8.6 | **5.5 GB** | 3.3 GB | refuses often; lowest memory |
+| **Llama-3.2-3B-Instruct** (fp32, explicit rotary) | **14/18** | 1.05 s | 7.6 | 9.1 GB | 3.2 GB | **chosen** |
+| Llama-3.2-3B-Instruct (fp16, explicit rotary) | 14/18 | 0.63 s | 4.6 (fp16 on CPU) | 8.5 GB | 2.3 GB | GPU-decode candidate |
+| Qwen3-4B (fp16 only export) | 15/18 | 1.10 s | 4.1 (fp16 on CPU) | 8.8 GB | 2.7 GB | best accuracy; NPU support spotty; no fp32 export |
+| Qwen2.5-3B (GenAI CPU export) | mixed | 10–15 s | — | — | 3.0 GB | fp32 GQA fails on DirectML |
+| Phi-4-mini (community q4) | — | — | — | — | 2.6 GB | needs GatherBlockQuantized (ORT ≥ 1.21) |
+
+Findings that generalise:
+- **DirectML's GroupQueryAttention kernel silently returns prompt-independent output when rotary is done inside
+  the op (`do_rotary=1`).** Every GenAI-style export that fails on DirectML shares this; moving rotary to explicit
+  `RotaryEmbedding` nodes (`tools/explicit_rotary.py`) fixes it for fp32 and fp16 alike. Microsoft's own GPU
+  exports already use the explicit form.
+- Runtime `Transpose` of the tied 1.5 GB embedding matrix in the LM head (`tools/gemm_head.py` → `Gemm(transB)`)
+  and full-sequence logits (`tools/last_logits.py`) are both worth removing from any export before use.
+- fp16 exports decode slowly on the CPU provider (4–5 tok/s vs 7–8 fp32): pick fp32 for the hybrid
+  (GPU prompt / CPU decode) or decode on the GPU.
+- Peak working set is dominated by holding two sessions (CPU + DirectML) plus fp32 embedding tables; the
+  GPU-only decode mode (`BLACKHOLE_DECODE=gpu`) exists to trade tok/s for RAM.
+
+Model preparation recipe (all graph-only, no weight rewrite): `last_logits.py` → `gemm_head.py` (if the LM head
+transposes at runtime) → `explicit_rotary.py` (if GQA has `do_rotary=1`) → `trim_gqa.py` (GenAI graphs on ORT 1.20).
+
 ## Windows-specific implementation notes
 
 - **Dot window**: `WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` — transparent, always on top, no taskbar entry, doesn't steal focus. Per-pixel alpha via `UpdateLayeredWindow` or a DirectComposition surface.
