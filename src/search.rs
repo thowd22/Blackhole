@@ -59,6 +59,8 @@ const DEFAULT_W: i32 = 480;
 /// Content sizing never grows the panel past this unless the user dragged it taller.
 const DEFAULT_CAP_H: i32 = 540;
 const MIN_W: i32 = 260;
+/// Widest the panel grows on its own to fit the status line (logical px).
+const MAX_AUTO_W: i32 = 640;
 const MIN_ROWS: i32 = 3;
 const ANSWER_MIN_LINES: i32 = 2;
 const ANSWER_MAX_LINES: i32 = 10;
@@ -310,10 +312,11 @@ impl SearchWin {
         let u = self.unit();
         let mut w = self.px(if self.user_w > 0 { self.user_w } else { DEFAULT_W });
         if self.user_w == 0 {
-            // Default width only: widen so the status line does not clip. A dragged width
-            // is the user's call and wins (the status then ends in an ellipsis).
+            // Default width only: widen so the status line does not clip, within reason — a
+            // long "from A, B, C…" status ends in an ellipsis rather than stretching the panel
+            // across the screen. A dragged width is the user's call and wins.
             let need = self.status_width() + 2 * self.pad() + self.grip_size() + 2 * u;
-            w = w.max(need).min(self.px(1200));
+            w = w.max(need).min(self.px(MAX_AUTO_W));
         }
         let cap = self.px(if self.user_h > 0 { self.user_h } else { DEFAULT_CAP_H });
         let rows = (self.hits.len() as i32).max(MIN_ROWS);

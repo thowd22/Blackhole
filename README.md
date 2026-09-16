@@ -29,15 +29,21 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
 | | **satisfied** | a bright pulse when the item is indexed |
 | | **upset** | a red flicker when a file couldn't be read |
 | <img src="docs/art/listening.gif" width="64"> | **listening** | green while the search panel is open |
+| | **thinking** | the ring breathes and a single speck orbits the halo while the model works on a question |
 
 - The dot floats above every window at whatever size you like. Drag it anywhere; **Ctrl+Shift+Space**
   summons it to your mouse and opens search; press again and it goes home.
 - Drop files or selected text on it, or hit **Ctrl+Shift+V** to swallow whatever is on the clipboard. The ring
   speeds up and specks spiral in while it digests; it pulses when it's done, flickers red if it couldn't read
-  something.
+  something. Every mood change eases over 150 ms rather than snapping.
+- **Ctrl+Shift+S** (or "Take screenshot" in the menu) dims the screen; drag a rectangle and the region is saved
+  as a PNG under `captures\` and swallowed like a dropped image. Esc cancels.
 - Left-click: a dark panel appears beside the dot. Results update on every keystroke in about 5 ms —
   keyword matches and semantic matches fused, with a tag showing which kind of match you're looking at.
   **↵** opens the file, **Ctrl+↵** reveals it in Explorer, **Ctrl+C** copies a pasted note, **Del** forgets it.
+  The panel sizes itself to what it shows; drag the pixel grip in its bottom-right corner to set your own size,
+  which is remembered. Closing it keeps the query and answer for next time; **Esc** twice clears them. The
+  scrollbars are drawn in the same pixel style as everything else.
 - Type `? how much did shipping cost` and press ↵: a second box streams the answer, the results below show
   what it drew on, and the status line tells you which documents it read and how long it took. If none of
   your words appear anywhere in the vault it says so instead of inventing something.
@@ -111,7 +117,8 @@ unanswerable questions score as high as real ones — the lexical test could.
    (~1,300 tokens, about a second) runs on a dynamic-shape DirectML session; decoding runs on a second,
    *static-shape* session that DirectML compiles into a single fused operator, so each token is one dispatch
    (~9 ms, 100+ tok/s) instead of 400. Both share one fixed-capacity KV cache that never leaves the GPU;
-   tokens stream into the panel as they're produced. The model is pre-loaded the moment you open
+   tokens stream into the panel as they're produced (three pixel dots blink in the answer box until the first
+  one lands). The model is pre-loaded the moment you open
    the panel and unloaded 60 s after you close it, so RAM is only spent while you're actually asking.
 
 The exact prompt of your last question is written to `%LOCALAPPDATA%\Blackhole\last_ask.txt`, and
@@ -237,7 +244,8 @@ portable exe zip, the installer in <2 GiB parts, checksums.
 | `src/sprite.rs` | Procedural 32×32 pixel-art renderer |
 | `src/bubble.rs` | Pixel-art speech bubbles |
 | `src/mcp.rs` | MCP server (HTTP on localhost) and the `--mcp` stdio bridge |
-| `src/search.rs` | Search panel: live results, ask box, keyboard handling |
+| `src/search.rs` | Search panel: live results, ask box, keyboard handling, content-fit sizing, pixel scrollbars |
+| `src/screenshot.rs` | Drag-region screenshot overlay (Ctrl+Shift+S) |
 | `src/tray.rs`, `src/startup.rs` | Tray icon; start-at-sign-in |
 | `src/drop.rs` | OLE drop target and clipboard reading |
 | `src/ingest.rs`, `src/chunk.rs` | Extraction, chunking, embedding on the worker thread |
@@ -252,8 +260,8 @@ portable exe zip, the installer in <2 GiB parts, checksums.
 
 ## Roadmap
 
-CI/CD → search-panel polish (auto-resize, on-theme scrollbars, rich
-snippets) → OCR for images and scanned PDFs → Copilot+ NPU providers → code signing. Details and the
+Rich snippets in the panel → OCR for images, screenshots and scanned PDFs → Copilot+ NPU providers →
+code signing. Details and the
 reasoning behind each in [FEATURES.md](FEATURES.md).
 
 ## Licence notes
