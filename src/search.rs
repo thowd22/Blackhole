@@ -971,7 +971,11 @@ impl SearchWin {
             if let Some(hit) = self.selected() {
                 let id = hit.id;
                 let ft = Self::filetype_of(hit);
-                let text = self.store.lock().unwrap().content(id).unwrap_or_default();
+                let mut text = self.store.lock().unwrap().content(id).unwrap_or_default();
+                // Where the thing itself lives, so ↵ / a click has an obvious target.
+                if let Some(p) = self.store.lock().unwrap().open_path(id) {
+                    text = format!("→ {p}\n\n{text}");
+                }
                 let raw = self.query_text();
                 let q = Self::question_of(&raw).unwrap_or(&raw);
                 let terms: Vec<String> = q.split(|c: char| !c.is_alphanumeric()).filter(|t| t.len() >= 2).map(str::to_string).collect();
@@ -1501,7 +1505,8 @@ impl SearchWin {
             let _ = SetFocus(Some(self.editor_hwnd()));
             return;
         }
-        match (&hit.source, reveal) {
+        let open = self.store.lock().unwrap().open_path(hit.id);
+        match (&open, reveal) {
             (Some(path), true) => {
                 let args = wide(&format!("/select,\"{path}\""));
                 ShellExecuteW(None, w!("open"), w!("explorer.exe"), PCWSTR(args.as_ptr()), None, SW_SHOWNORMAL);

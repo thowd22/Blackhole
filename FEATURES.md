@@ -121,7 +121,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 ### 3.4 Storage policy — P1
 - Choose per install: **copy** dropped files into the Blackhole vault, or **reference** the original path.
 - Default: copy for clipboard/text/images (there is no original), reference for files, with an option to always copy.
-- Deduplicate by content hash.
+- Deduplicate by content hash. — 2026-09-16: files (images, PDFs) dedupe by their bytes; a re-dropped file is re-extracted anyway and the item's text is updated when it changed. Images and PDFs are always copied into `<data>\files\` (`items.stored`), the original path stays as `source`; opening prefers the original while it exists. Clipboard bitmaps are saved as PNG and swallowed like dropped images.
 
 ### 3.5 Feedback — P0
 - Swallow animation on drop; processing animation while indexing; done pulse.

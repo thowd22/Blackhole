@@ -20,11 +20,17 @@ pub struct Extracted {
     pub kind: &'static str,
     pub source: Option<String>,
     pub content: String,
+    /// sha256 of the file bytes for images/PDFs: identity independent of what OCR read.
+    pub bytes_hash: Option<String>,
+    /// Blackhole's own copy of the file (images/PDFs), so it can always be opened.
+    pub stored: Option<String>,
 }
 
 /// Outcome of one batch, reported back to the dot.
 pub struct Report {
     pub added: usize,
+    /// Same file again, but its text came out differently (better OCR, edited PDF): rewritten.
+    pub updated: usize,
     pub duplicates: usize,
     pub failed: usize,
     /// One line per failure, e.g. "scan.pdf: could not read PDF".
@@ -47,7 +53,50 @@ pub fn extract_text(text: &str) -> Extracted {
         kind: "text",
         source: None,
         content: truncate(text, MAX_CONTENT).to_string(),
+        bytes_hash: None,
+        stored: None,
     }
+}
+
+fn sha_hex(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    format!("{:x}", h.finalize())
+}
+
+/// Keep our own copy of an image/PDF under `<data dir>\files\<hash>.<ext>` unless the
+/// file already lives in the data dir (screenshots, pasted images). Returns the copy's path.
+fn stored_copy(path: &Path, bytes: &[u8], hash: &str, ext: &str) -> Option<String> {
+    let data = crate::config::data_dir();
+    if path.starts_with(&data) {
+        return Some(path.display().to_string());
+    }
+    let dir = data.join("files");
+    std::fs::create_dir_all(&dir).ok()?;
+    let dest = dir.join(format!("{}.{ext}", &hash[..24]));
+    if !dest.exists() {
+        std::fs::write(&dest, bytes).ok()?;
+    }
+    Some(dest.display().to_string())
+}
+
+/// A PNG (e.g. a pasted clipboard bitmap) written into the vault's files folder.
+pub fn store_png(rgb: &[u8], w: u32, h: u32, stem: &str) -> Result<PathBuf, String> {
+    let dir = crate::config::data_dir().join("files");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut path = dir.join(format!("{stem}.png"));
+    let mut n = 1;
+    while path.exists() {
+        n += 1;
+        path = dir.join(format!("{stem} ({n}).png"));
+    }
+    let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut writer = enc.write_header().map_err(|e| e.to_string())?;
+    writer.write_image_data(rgb).map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 pub fn extract_file(path: &Path) -> Result<Extracted, String> {
@@ -65,8 +114,13 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
         return Err(format!("{name}: folders are not supported yet"));
     }
 
+    let mut bytes_hash = None;
+    let mut stored = None;
     let (kind, content): (&'static str, String) = if ext == "pdf" {
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
+        let hash = sha_hex(&bytes);
+        stored = stored_copy(path, &bytes, &hash, "pdf");
+        bytes_hash = Some(hash);
         // Layout-aware first (forms, tables); plain stream order if that fails.
         let mut text = match crate::pdf_layout::extract(&bytes) {
             Ok(t) if !t.trim().is_empty() => t,
@@ -86,17 +140,22 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
         ("file", String::from_utf8_lossy(&bytes).into_owned())
     } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
-        // OCR: the picture's words become its text (PP-OCR on the GPU, ~0.5 s).
+        // OCR: the picture's words become its text (PP-OCR on the GPU, ~0.5 s). The file's
+        // bytes are the item's identity, so the same picture dropped again is recognised
+        // even if the OCR reads it differently — and then its text is refreshed.
+        let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
+        let hash = sha_hex(&bytes);
+        let stored = stored_copy(path, &bytes, &hash, if ext == "png" { "png" } else { "jpg" });
         let title = capture_title(path).unwrap_or_else(|| name.clone());
         let text = crate::ocr::read_file(path).unwrap_or_default();
         let content = if text.trim().is_empty() { title.clone() } else { format!("{title}\n\n{text}") };
-        return Ok(Extracted { content: truncate(&content, MAX_CONTENT).to_string(), title, kind: "image", source });
+        return Ok(Extracted { content: truncate(&content, MAX_CONTENT).to_string(), title, kind: "image", source, bytes_hash: Some(hash), stored });
     } else if matches!(ext.as_str(), "gif" | "webp" | "bmp") {
         // OCR / captioning lands with the model work; for now images are findable by name.
         if let Some(title) = capture_title(path) {
             // Our own screenshot (see screenshot.rs): "Screenshot 2026-09-16 14-03-22 412×188".
             // The title doubles as the content until OCR makes the pixels searchable.
-            return Ok(Extracted { content: title.clone(), title, kind: "image", source });
+            return Ok(Extracted { content: title.clone(), title, kind: "image", source, bytes_hash: None, stored: None });
         }
         ("image", String::new())
     } else {
@@ -109,7 +168,7 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
     if content.trim().is_empty() {
         content = name.clone();
     }
-    Ok(Extracted { title: name, kind, source, content })
+    Ok(Extracted { title: name, kind, source, content, bytes_hash, stored })
 }
 
 /// Title for a PNG the screenshot tool wrote under `<data dir>\captures`; None for any other file.
@@ -134,6 +193,11 @@ pub fn hash_of(e: &Extracted) -> String {
     let mut h = Sha256::new();
     h.update(e.kind.as_bytes());
     h.update(b"\0");
+    if let Some(b) = &e.bytes_hash {
+        // Files with bytes: the bytes are the identity, not the path or the extracted text.
+        h.update(b.as_bytes());
+        return format!("{:x}", h.finalize());
+    }
     if let Some(s) = &e.source {
         h.update(s.as_bytes());
     }
@@ -169,6 +233,9 @@ pub fn run(rx: Receiver<Input>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder
             let path = Path::new(&source);
             if let Ok(e) = extract_file(path) {
                 if store.lock().unwrap().update_content(id, &e.content).is_ok() {
+                    if let Some(s) = &e.stored {
+                        store.lock().unwrap().set_stored(id, s);
+                    }
                     redone += 1;
                 }
             }
@@ -182,7 +249,7 @@ pub fn run(rx: Receiver<Input>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder
     }
 
     while let Ok(input) = rx.recv() {
-        let mut report = Report { added: 0, duplicates: 0, failed: 0, errors: Vec::new() };
+        let mut report = Report { added: 0, updated: 0, duplicates: 0, failed: 0, errors: Vec::new() };
         let extracted: Vec<Result<Extracted, String>> = match input {
             Input::Text(t) => vec![Ok(extract_text(&t))],
             Input::Files(paths) => paths.iter().map(|p| extract_file(p)).collect(),
@@ -191,13 +258,27 @@ pub fn run(rx: Receiver<Input>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder
             match e {
                 Ok(e) => {
                     let hash = hash_of(&e);
-                    let added = store.lock().unwrap().add(&e.title, e.kind, e.source.as_deref(), &e.content, &hash, now_secs());
+                    let added = store.lock().unwrap().add_stored(&e.title, e.kind, e.source.as_deref(), &e.content, &hash, now_secs(), e.stored.as_deref());
                     match added {
                         Ok(Some(id)) => {
                             report.added += 1;
                             embed_item(&store, &embedder, id, &e.title, &e.content);
                         }
-                        Ok(None) => report.duplicates += 1,
+                        Ok(None) => {
+                            // Seen before. The extraction still ran (OCR may have improved, a PDF
+                            // may have been edited in place): rewrite the text if it changed.
+                            let existing = store.lock().unwrap().id_by_hash(&hash);
+                            let changed = existing.map(|id| store.lock().unwrap().content(id).as_deref() != Some(e.content.as_str())).unwrap_or(false);
+                            match existing {
+                                Some(id) if changed => {
+                                    if store.lock().unwrap().update_note(id, &e.title, &e.content).is_ok() {
+                                        embed_item(&store, &embedder, id, &e.title, &e.content);
+                                        report.updated += 1;
+                                    }
+                                }
+                                _ => report.duplicates += 1,
+                            }
+                        }
                         Err(err) => {
                             report.failed += 1;
                             report.errors.push(format!("{}: {err}", e.title));

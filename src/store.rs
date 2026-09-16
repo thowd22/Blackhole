@@ -140,6 +140,8 @@ impl Store {
         // Tags (stored as ",a,b," for LIKE matching) and the note's last cursor "row,col".
         let _ = conn.execute("ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT ''", []);
         let _ = conn.execute("ALTER TABLE items ADD COLUMN cursor TEXT NOT NULL DEFAULT ''", []);
+        // Blackhole's own copy of a dropped image/PDF (source may move or vanish).
+        let _ = conn.execute("ALTER TABLE items ADD COLUMN stored TEXT NOT NULL DEFAULT ''", []);
         let text_stamp: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'text_version'", [], |r| r.get(0)).optional()?;
         let stale_text = text_stamp.as_deref() != Some(TEXT_VERSION);
         if stale_text {
@@ -228,9 +230,23 @@ impl Store {
         hash: &str,
         added_at: i64,
     ) -> rusqlite::Result<Option<i64>> {
+        self.add_stored(title, kind, source, content, hash, added_at, None)
+    }
+
+    /// `stored`: path of Blackhole's own copy of the file, if one was made.
+    pub fn add_stored(
+        &self,
+        title: &str,
+        kind: &str,
+        source: Option<&str>,
+        content: &str,
+        hash: &str,
+        added_at: i64,
+        stored: Option<&str>,
+    ) -> rusqlite::Result<Option<i64>> {
         let n = self.conn.execute(
-            "INSERT OR IGNORE INTO items (title, kind, source, content, hash, added_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![title, kind, source, content, hash, added_at],
+            "INSERT OR IGNORE INTO items (title, kind, source, content, hash, added_at, stored) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![title, kind, source, content, hash, added_at, stored.unwrap_or("")],
         )?;
         Ok((n > 0).then(|| self.conn.last_insert_rowid()))
     }
@@ -435,6 +451,23 @@ impl Store {
             .map(|e| (cosine(qvec, &e.vec), e.chunk_id))
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))?;
         self.conn.query_row("SELECT text FROM chunks WHERE id = ?1 AND ord >= 0", params![best.1], |r| r.get(0)).ok()
+    }
+
+    /// Where to open an item: the original path while it exists, else Blackhole's copy.
+    pub fn open_path(&self, id: i64) -> Option<String> {
+        let (source, stored): (Option<String>, String) = self
+            .conn
+            .query_row("SELECT source, stored FROM items WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .ok()?;
+        match source {
+            Some(s) if std::path::Path::new(&s).exists() => Some(s),
+            _ if !stored.is_empty() && std::path::Path::new(&stored).exists() => Some(stored),
+            other => other,
+        }
+    }
+
+    pub fn set_stored(&self, id: i64, stored: &str) {
+        let _ = self.conn.execute("UPDATE items SET stored = ?1 WHERE id = ?2", params![stored, id]);
     }
 
     pub fn id_by_hash(&self, hash: &str) -> Option<i64> {

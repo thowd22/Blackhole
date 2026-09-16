@@ -9,7 +9,7 @@ use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, POINTL, WPARAM};
 use windows::Win32::System::Com::{IDataObject, FORMATETC, DVASPECT_CONTENT, TYMED_HGLOBAL};
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard};
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
-use windows::Win32::System::Ole::{IDropTarget, IDropTarget_Impl, ReleaseStgMedium, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE};
+use windows::Win32::System::Ole::{IDropTarget, IDropTarget_Impl, ReleaseStgMedium, CF_DIB, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE};
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
@@ -69,6 +69,50 @@ unsafe fn text_from_hglobal(h: HGLOBAL) -> Option<String> {
     Some(s)
 }
 
+/// CF_DIB → RGB rows (top-down). Handles the common 24/32-bit uncompressed layouts.
+unsafe fn dib_to_rgb(h: HGLOBAL) -> Option<(Vec<u8>, u32, u32)> {
+    let p = GlobalLock(h) as *const u8;
+    if p.is_null() {
+        return None;
+    }
+    let size = GlobalSize(h);
+    let bytes = std::slice::from_raw_parts(p, size);
+    let result = (|| {
+        if bytes.len() < 40 {
+            return None;
+        }
+        let u32_at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+        let i32_at = |o: usize| i32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+        let hdr = u32_at(0) as usize;
+        let (w, h_signed) = (i32_at(4), i32_at(8));
+        let bpp = u16::from_le_bytes(bytes[14..16].try_into().unwrap()) as usize;
+        let compression = u32_at(16);
+        let colors_used = u32_at(32) as usize;
+        if w <= 0 || h_signed == 0 || !(bpp == 24 || bpp == 32) || !(compression == 0 || compression == 3) {
+            return None;
+        }
+        let (w, hgt) = (w as usize, h_signed.unsigned_abs() as usize);
+        let bottom_up = h_signed > 0;
+        // BI_BITFIELDS masks follow a 40-byte header; V4/V5 headers carry them inside.
+        let offset = hdr + if compression == 3 && hdr < 52 { 12 } else { 0 } + colors_used * 4;
+        let stride = (w * bpp / 8 + 3) / 4 * 4;
+        if bytes.len() < offset + stride * hgt {
+            return None;
+        }
+        let mut rgb = Vec::with_capacity(w * hgt * 3);
+        for row in 0..hgt {
+            let src_row = if bottom_up { hgt - 1 - row } else { row };
+            let line = &bytes[offset + src_row * stride..offset + src_row * stride + w * bpp / 8];
+            for px in line.chunks(bpp / 8) {
+                rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+            }
+        }
+        Some((rgb, w as u32, hgt as u32))
+    })();
+    let _ = GlobalUnlock(h);
+    result
+}
+
 /// Pull files or text out of a data object (drag-and-drop source).
 pub fn read_data_object(obj: &IDataObject) -> Option<Input> {
     unsafe {
@@ -107,6 +151,18 @@ pub fn read_clipboard(owner: HWND) -> Option<Input> {
                 let text = text_from_hglobal(HGLOBAL(h.0))?;
                 if !text.trim().is_empty() {
                     return Some(Input::Text(text));
+                }
+            }
+            // A copied picture (snipping tool, browser "copy image"): saved as PNG in the
+            // vault's files folder and swallowed like a dropped image, OCR included.
+            if IsClipboardFormatAvailable(CF_DIB.0 as u32).is_ok() {
+                let h = GetClipboardData(CF_DIB.0 as u32).ok()?;
+                if let Some((rgb, w, hgt)) = dib_to_rgb(HGLOBAL(h.0)) {
+                    let t = windows::Win32::System::SystemInformation::GetLocalTime();
+                    let stem = format!("Pasted image {:04}-{:02}-{:02} {:02}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+                    if let Ok(path) = crate::ingest::store_png(&rgb, w, hgt, &stem) {
+                        return Some(Input::Files(vec![path]));
+                    }
                 }
             }
             None

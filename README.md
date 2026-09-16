@@ -129,6 +129,11 @@ run; nothing is linked at build time, so the app cross-compiles from Linux with 
    benchmark of terminals, tables, chat and UI text, ~0.5 s per image on the GPU, with the same row/column
    assembly as PDFs so a table comes out as ` | `-separated columns. A **scanned PDF** (no text layer) has
    its page images pulled out and OCR'd the same way. Other files are indexed by name and metadata.
+   Images and PDFs are identified by their bytes, and Blackhole keeps its own copy under
+   `%LOCALAPPDATA%\Blackhole\files\` — so ↵ on a hit opens the picture or PDF even if the original moved,
+   and the preview's first line shows where it lives. Drop the same picture again and it is still read (OCR
+   only gets better): if the text differs the item is updated, otherwise it's just "already swallowed".
+   Ctrl+Shift+V with a picture on the clipboard swallows it too.
 2. **Chunking.** Each document is split into ~100-word chunks with a 20-word overlap, paragraph-aware, and
    line breaks survive inside a chunk — a résumé's job headers and a form's rows only mean something as lines
    (flattening them cost the model three answers in the eval).

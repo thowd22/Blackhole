@@ -535,6 +535,11 @@ impl Dot {
         for e in report.errors {
             self.notify(format!("Couldn't swallow that: {e}"));
         }
+        if report.updated > 0 {
+            self.notify_quiet(if report.updated == 1 { "Already had that one — its text was re-read and updated".into() } else { format!("Already had {} of those — their text was re-read and updated", report.updated) });
+        } else if report.duplicates > 0 && report.added == 0 {
+            self.notify_quiet("Already swallowed that one".into());
+        }
         let n = self.store.lock().unwrap().count();
         tray::set_tip(self.hwnd, &format!("Blackhole — {n} items inside"));
     }

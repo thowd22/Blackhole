@@ -216,7 +216,7 @@ fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
             }
         }
         ingest::embed_item(&ctx.store, &ctx.embedder, id, title.unwrap_or(&auto), text);
-        let report = ingest::Report { added: 1, duplicates: 0, failed: 0, errors: Vec::new() };
+        let report = ingest::Report { added: 1, updated: 0, duplicates: 0, failed: 0, errors: Vec::new() };
         post(ctx.hwnd, crate::dot::WM_INGEST_DONE, Box::into_raw(Box::new(report)) as isize);
         return Ok(json!({ "id": id, "title": title.unwrap_or(&auto), "kind": "note", "words": text.split_whitespace().count(), "duplicate": false }).to_string());
     }
@@ -235,15 +235,23 @@ fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
     }
     post(ctx.hwnd, crate::drop::WM_DROP_SWALLOW, 0);
     let hash = ingest::hash_of(&e);
-    let added = ctx.store.lock().unwrap().add(&e.title, e.kind, e.source.as_deref(), &e.content, &hash, crate::util::now_secs()).map_err(|e| e.to_string())?;
+    let added = ctx.store.lock().unwrap().add_stored(&e.title, e.kind, e.source.as_deref(), &e.content, &hash, crate::util::now_secs(), e.stored.as_deref()).map_err(|e| e.to_string())?;
     let (id, duplicate) = match added {
         Some(id) => {
             ingest::embed_item(&ctx.store, &ctx.embedder, id, &e.title, &e.content);
             (id, false)
         }
-        None => (ctx.store.lock().unwrap().id_by_hash(&hash).unwrap_or(0), true),
+        None => {
+            // Same bytes as before: keep one item, but refresh its text if the read changed.
+            let id = ctx.store.lock().unwrap().id_by_hash(&hash).unwrap_or(0);
+            let changed = id != 0 && ctx.store.lock().unwrap().content(id).as_deref() != Some(e.content.as_str());
+            if changed && ctx.store.lock().unwrap().update_note(id, &e.title, &e.content).is_ok() {
+                ingest::embed_item(&ctx.store, &ctx.embedder, id, &e.title, &e.content);
+            }
+            (id, true)
+        }
     };
-    let report = ingest::Report { added: usize::from(!duplicate), duplicates: usize::from(duplicate), failed: 0, errors: Vec::new() };
+    let report = ingest::Report { added: usize::from(!duplicate), updated: 0, duplicates: usize::from(duplicate), failed: 0, errors: Vec::new() };
     post(ctx.hwnd, crate::dot::WM_INGEST_DONE, Box::into_raw(Box::new(report)) as isize);
     Ok(json!({ "id": id, "title": e.title, "kind": e.kind, "words": e.content.split_whitespace().count(), "duplicate": duplicate }).to_string())
 }
