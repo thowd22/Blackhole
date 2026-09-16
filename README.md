@@ -1,6 +1,6 @@
 # Blackhole
 
-<p align="center"><img src="installer/blackhole-256.png" width="128" alt="Blackhole"></p>
+<p align="center"><img src="docs/art/hero.gif" width="256" alt="Blackhole idling, getting hungry, digesting a drop and pulsing when done"></p>
 
 **A tiny pixel-art black hole that eats your files and answers questions about them — entirely on your PC.**
 
@@ -15,6 +15,20 @@ Issues and PRs are welcome — https://github.com/thowd22/Blackhole
 ---
 
 ## What it feels like
+
+<p align="center"><img src="docs/art/moods.png" alt="The six moods: idle, hungry, digesting, satisfied, upset, listening"></p>
+
+The dot is a 32×32 sprite drawn procedurally every frame — no image files, just a ring of hot pixels
+around an event horizon, a purple accretion smear, and specks that orbit and fall in. It has six moods:
+
+| | mood | when |
+|---|---|---|
+| <img src="docs/art/idle.gif" width="64"> | **idle** | drifting at half speed, specks in slow orbit |
+| | **hungry** | something is being dragged over it — the ring brightens and leans toward the cursor |
+| <img src="docs/art/digesting.gif" width="64"> | **digesting** | swallowing a drop: the ring spins up, orange, and specks are pulled in one by one |
+| | **satisfied** | a bright pulse when the item is indexed |
+| | **upset** | a red flicker when a file couldn't be read |
+| <img src="docs/art/listening.gif" width="64"> | **listening** | green while the search panel is open |
 
 - The dot floats above every window at whatever size you like. Drag it anywhere; **Ctrl+Shift+Space**
   summons it to your mouse and opens search; press again and it goes home.
@@ -185,6 +199,7 @@ cargo build --release --bin askeval   # end-to-end evaluation binary
 | `src/bin/askeval.rs`, `eval/harness.py` | End-to-end and retrieval evaluation |
 | `tools/*.py` | Model preparation (last-token logits, Gemm head, explicit rotary, shrink, repack, GQA trim) |
 | `installer/`, `build-installer.sh` | Inno Setup script, icon, model licences |
+| `docs/art/` | The sprite rendered to PNG/GIF for this README (real output of `sprite.rs`, 4×/8× nearest-neighbour) |
 
 ## Roadmap
 
