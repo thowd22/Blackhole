@@ -232,12 +232,17 @@ The temporal `Timeline:` prefill is skipped when thinking — the model does tha
 |---|---|---|---|---|---|---|
 | Llama 3.2 3B, direct (shipped before) | 31/44 | 6/6 | 0.9 s | 100 tok/s | 3.8 GB | 2.3 GB |
 | Qwen3-4B, direct | 29/44 | 6/6 | 2.1 s* | 47 tok/s | 5.5 GB | 2.7 GB |
-| **Qwen3-4B, think ≤256** | **35/44** (36: one right answer failed the regex) | 6/6 | 5.8 s | 50 tok/s | 5.4 GB | 2.7 GB |
+| **Qwen3-4B, think ≤128** | **36/44 (82 %)** | 6/6 | 5.0 s | 41–50 tok/s | 5.5–7.7 GB | 2.7 GB |
+| Qwen3-4B, think ≤256 | 35/44 (36: one right answer failed the regex) | 6/6 | 5.8 s | 50 tok/s | 5.4 GB | 2.7 GB |
+| Qwen3-4B, think ≤512 | 35/44 | 6/6 | 7.4 s | 49 tok/s | 5.6 GB | 2.7 GB |
 
 *after the band fix below; 7 s before it. Qwen3 direct refuses more often than Llama on the same
 contexts (9 "I couldn't find that" with the right document), which thinking mostly cures. What the
 thinking flipped: the timeline/ordering questions (q08, h07 and friends), the multi-field customs
-questions (b25, q04's sibling), the decoy misreads (b12 stays). 23 of 54 thinks hit the 256 budget.
+questions (b25, q04's sibling), the decoy misreads (b12 stays). 23 of 54 thinks hit the 256 budget, yet
+128 scores the same or better: the model needs a short pass to order dates or pick the right field, not a
+long one. Default budget 128; the right-click menu's "Think before answering" turns it off (direct mode,
+~2 s to first text, fewer correct answers).
 
 ### DirectML GroupQueryAttention has a slow band — pad the prompt past it
 

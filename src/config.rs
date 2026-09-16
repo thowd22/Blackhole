@@ -18,6 +18,9 @@ pub struct Config {
     /// First-run tutorial progress; see `dot::TUTORIAL`.
     #[serde(default)]
     pub tutorial_step: u8,
+    /// Let the model reason before answering (models with a think mode; ~5 s extra).
+    #[serde(default = "yes")]
+    pub think: bool,
 }
 
 fn yes() -> bool {
@@ -26,7 +29,7 @@ fn yes() -> bool {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0 }
+        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true }
     }
 }
 

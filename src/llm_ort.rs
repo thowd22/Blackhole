@@ -41,9 +41,17 @@ const MAX_NEW_TOKENS: usize = 260;
 /// Thinking budget in tokens for models with a `<think>` mode (Qwen3); 0 = answer
 /// directly. `BLACKHOLE_THINK` overrides. When the budget runs out the think block is
 /// closed for the model and it answers from what it has.
-const THINK_BUDGET: usize = 0;
+const THINK_BUDGET: usize = 128;
+/// Runtime switch (the right-click menu's "Think before answering"); env still overrides.
+static THINK_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub fn set_thinking(on: bool) {
+    THINK_ENABLED.store(on, Ordering::Relaxed);
+}
 fn think_budget() -> usize {
-    std::env::var("BLACKHOLE_THINK").ok().and_then(|v| v.parse().ok()).unwrap_or(THINK_BUDGET)
+    if let Some(b) = std::env::var("BLACKHOLE_THINK").ok().and_then(|v| v.parse().ok()) {
+        return b;
+    }
+    if THINK_ENABLED.load(Ordering::Relaxed) { THINK_BUDGET } else { 0 }
 }
 /// GPU-resident cache capacity (tokens) for the GPU-decode mode; BLACKHOLE_KV_CAP overrides.
 const GPU_KV_CAPACITY: usize = 4096;

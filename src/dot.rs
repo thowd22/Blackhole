@@ -52,6 +52,7 @@ const MENU_QUIT: usize = 9;
 const MENU_START_LOGIN: usize = 10;
 const MENU_TUTORIAL: usize = 11;
 const MENU_SIZE_XL: usize = 12;
+const MENU_THINK: usize = 13;
 
 /// First-run tutorial. Each step waits for the action it describes.
 pub const TUTORIAL: &[&str] = &[
@@ -120,6 +121,7 @@ impl Dot {
             };
             RegisterClassW(&wc);
             let cfg = config::load();
+            crate::llm_ort::set_thinking(cfg.think);
             let dot = Box::new(Dot {
                 hwnd: HWND::default(),
                 search: HWND::default(),
@@ -523,6 +525,7 @@ impl Dot {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING | chk(!self.cfg.hidden), MENU_SHOW_DOT, w!("Show dot"));
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.center_on_message), MENU_CENTER_MSG, w!("Center on new message"));
+        let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.think), MENU_THINK, w!("Think before answering"));
         let _ = AppendMenuW(menu, MF_STRING | chk(startup::enabled()), MENU_START_LOGIN, w!("Start at login"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
@@ -554,6 +557,11 @@ impl Dot {
             }
             MENU_CENTER_MSG => {
                 self.cfg.center_on_message = !self.cfg.center_on_message;
+                config::save(&self.cfg);
+            }
+            MENU_THINK => {
+                self.cfg.think = !self.cfg.think;
+                crate::llm_ort::set_thinking(self.cfg.think);
                 config::save(&self.cfg);
             }
             MENU_START_LOGIN => startup::set(!startup::enabled()),
