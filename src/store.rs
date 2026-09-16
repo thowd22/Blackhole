@@ -6,7 +6,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Bump when extraction or chunking changes in a way stored text should follow.
+pub const TEXT_VERSION: &str = "2";
+
 pub struct Store {
+    /// Set at open when the stored text predates the current extraction/chunking.
+    pub stale_text: bool,
     conn: Connection,
     /// All chunk vectors, kept in memory for brute-force cosine search.
     index: Vec<VecEntry>,
@@ -126,7 +131,15 @@ impl Store {
             conn.execute("DELETE FROM chunks", [])?;
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('embed_model', ?1)", params![MODEL_ID])?;
         }
-        let mut store = Store { conn, index: Vec::new() };
+        // Text pipeline changed (layout-aware PDFs, line breaks kept in chunks): every
+        // item re-chunks, and the ingest worker re-extracts PDFs whose file is still around.
+        let text_stamp: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'text_version'", [], |r| r.get(0)).optional()?;
+        let stale_text = text_stamp.as_deref() != Some(TEXT_VERSION);
+        if stale_text {
+            conn.execute("DELETE FROM chunks", [])?;
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('text_version', ?1)", params![TEXT_VERSION])?;
+        }
+        let mut store = Store { conn, index: Vec::new(), stale_text };
         store.load_index()?;
         Ok(store)
     }
@@ -173,6 +186,24 @@ impl Store {
 
     /// Items that were swallowed before embeddings existed, whose embedding was
     /// interrupted, or that predate document units — used to backfill on startup.
+    /// Items of one kind with their source paths, for re-extraction.
+    pub fn items_with_source(&self, kind: &str) -> Vec<(i64, String)> {
+        let Ok(mut st) = self.conn.prepare("SELECT id, source FROM items WHERE kind = ?1 AND source IS NOT NULL") else {
+            return Vec::new();
+        };
+        st.query_map(params![kind], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// Replace an item's text (chunks are dropped; the ingest worker re-embeds it).
+    pub fn update_content(&mut self, id: i64, content: &str) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE items SET content = ?1 WHERE id = ?2", params![content, id])?;
+        self.conn.execute("DELETE FROM chunks WHERE item_id = ?1", params![id])?;
+        // items_fts is an external-content table; updates need a rebuild.
+        self.conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])?;
+        self.index.retain(|e| e.item_id != id);
+        Ok(())
+    }
+
     pub fn unembedded(&self) -> Vec<(i64, String, String)> {
         self.conn
             .prepare("SELECT id, title, content FROM items WHERE id NOT IN (SELECT DISTINCT item_id FROM chunks WHERE ord = -1) ORDER BY id")
@@ -195,6 +226,28 @@ impl Store {
             params![title, kind, source, content, hash, added_at],
         )?;
         Ok((n > 0).then(|| self.conn.last_insert_rowid()))
+    }
+
+    /// One line per item — title and opening words — newest first, for questions
+    /// about the files themselves ("which document is proof I paid").
+    pub fn catalog(&self, max: usize) -> String {
+        let Ok(mut st) = self.conn.prepare("SELECT title, kind, content FROM items ORDER BY added_at DESC LIMIT ?1") else {
+            return String::new();
+        };
+        let Ok(rows) = st.query_map(params![max as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))) else {
+            return String::new();
+        };
+        let mut out = String::new();
+        for (title, kind, content) in rows.flatten() {
+            let opening: String = content.split_whitespace().take(14).collect::<Vec<_>>().join(" ");
+            let same = opening.starts_with(title.trim_end_matches('…')) || title.starts_with(&opening);
+            if same || opening.is_empty() {
+                out.push_str(&format!("- {title} [{kind}]\n"));
+            } else {
+                out.push_str(&format!("- {title} [{kind}]: {opening}…\n"));
+            }
+        }
+        out
     }
 
     pub fn count(&self) -> i64 {
@@ -351,6 +404,13 @@ impl Store {
         qvec.map(|v| self.best_cosine(v) < ABSENT_MAX_COSINE).unwrap_or(true)
     }
 
+    /// Does any distinctive term of `text` occur in the vault? (Used so a model
+    /// rewrite that lands on a literal word — "git" for "ssh checkout address" —
+    /// can override the absent gate.)
+    pub fn any_term_present(&self, text: &str) -> bool {
+        content_terms(text).iter().any(|t| self.items_containing(t) > 0)
+    }
+
     /// Fraction of the query's terms each of the given items matches.
     fn term_coverage(&self, query: &str, ids: impl Iterator<Item = i64>) -> HashMap<i64, f32> {
         let tokens: Vec<String> = fts_tokens(query);
@@ -390,6 +450,7 @@ impl Store {
     pub fn context_reranked(
         &self,
         query: &str,
+        aux_query: &str,
         qvec: &[f32],
         budget_words: usize,
         rerank: Option<&dyn Fn(&str, &[String]) -> Option<Vec<f32>>>,
@@ -401,27 +462,68 @@ impl Store {
             ord: i64,
             words: usize,
             score: f32,
+            /// Contains one of the query's distinctive terms literally.
+            literal: bool,
         }
-        let mut scored: Vec<(f32, i64)> = self.index.iter().map(|e| (cosine(qvec, &e.vec), e.chunk_id)).collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(40);
+        let mut all: Vec<(f32, i64)> = self.index.iter().map(|e| (cosine(qvec, &e.vec), e.chunk_id)).collect();
+        all.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         // Distinctive query terms (names, numbers, jargon) that embeddings blur:
         // weight each by how rare it is across the vault, so "list", "with" or
         // "dates" don't drag random chunks up.
         let n_items = self.count().max(1) as f32;
-        let terms: Vec<(String, f32)> = content_terms(query)
-            .into_iter()
+        let own = content_terms(query);
+        let mut terms: Vec<(String, f32)> = own
+            .iter()
             .filter_map(|t| {
-                let docs = self.items_containing(&t);
+                let docs = self.items_containing(t);
                 let frac = docs as f32 / n_items;
                 // Present in more than a third of items: not distinctive.
-                (frac <= 0.34).then(|| (t, 0.08 * (1.0 - frac)))
+                (frac <= 0.34).then(|| (t.clone(), 0.08 * (1.0 - frac)))
             })
             .collect();
+        // Model-written rewrites of the question count half: useful when they land
+        // on a literal word, not trusted enough to outvote the user's own words.
+        for t in content_terms(aux_query) {
+            if own.contains(&t) || terms.iter().any(|(x, _)| *x == t) {
+                continue;
+            }
+            let frac = self.items_containing(&t) as f32 / n_items;
+            if frac > 0.0 && frac <= 0.34 {
+                terms.push((t, 0.04 * (1.0 - frac)));
+            }
+        }
+        // Candidates: the 40 nearest by cosine, plus every chunk that literally
+        // contains a distinctive term. A rare name in one chunk of a long document
+        // ("raytheon" in a résumé) can sit far down the cosine list and would
+        // otherwise never be seen by the boost or the reranker.
+        let mut scored: Vec<(f32, i64)> = all.iter().take(40).copied().collect();
+        if !terms.is_empty() {
+            let mut literal: HashMap<i64, f32> = HashMap::new();
+            if let Ok(mut st) = self.conn.prepare("SELECT id, text FROM chunks") {
+                if let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
+                    for (id, text) in rows.flatten() {
+                        let lower = text.to_lowercase();
+                        if terms.iter().any(|(t, _)| lower.contains(t.as_str())) {
+                            if let Some(&(c, _)) = all.iter().find(|&&(_, cid)| cid == id) {
+                                literal.insert(id, c);
+                            }
+                        }
+                    }
+                }
+            }
+            for (id, c) in literal {
+                if !scored.iter().any(|&(_, cid)| cid == id) {
+                    scored.push((c, id));
+                }
+            }
+        }
         let Ok(mut meta) = self.conn.prepare("SELECT item_id, ord, text FROM chunks WHERE id = ?1") else {
             return Vec::new();
         };
+        // Terms rare enough (in at most two items) to act like proper nouns: a whole-word
+        // hit on one of these earns the reranker bonus; "repo" inside "repositories" does not.
+        let rare: Vec<&str> = own.iter().filter(|t| self.items_containing(t) <= 2 && self.items_containing(t) > 0).map(|t| t.as_str()).collect();
         let mut cands: Vec<C> = scored
             .iter()
             .filter_map(|&(c, id)| {
@@ -430,7 +532,8 @@ impl Store {
                     .map(|(item, ord, text)| {
                         let lower = text.to_lowercase();
                         let boost: f32 = terms.iter().filter(|(t, _)| lower.contains(t.as_str())).map(|(_, w)| *w).sum();
-                        C { id, item, ord, words: text.split_whitespace().count(), score: c + boost }
+                        let literal = !rare.is_empty() && lower.split(|ch: char| !ch.is_alphanumeric()).any(|w| rare.contains(&w));
+                        C { id, item, ord, words: text.split_whitespace().count(), score: c + boost, literal }
                     })
             })
             .collect();
@@ -456,7 +559,17 @@ impl Store {
             .unwrap_or(cands[0].item);
         if let Some(rerank) = rerank {
             // Passage text per candidate; a document unit is scored as "title: opening words".
-            let head: Vec<&C> = cands.iter().take(crate::rerank::CANDIDATES).collect();
+            // Chunks that literally contain a rare query word always get a hearing from the
+            // reranker (up to 3), even when their cosine sits below the cut: "raytheon" in
+            // one résumé chunk versus a form that is near everything.
+            let mut head: Vec<&C> = cands.iter().take(crate::rerank::CANDIDATES).collect();
+            let literal: Vec<&C> = cands.iter().filter(|c| c.literal && !head.iter().any(|h| h.id == c.id)).take(3).collect();
+            for l in literal {
+                if head.len() >= crate::rerank::CANDIDATES {
+                    head.pop();
+                }
+                head.push(l);
+            }
             let passages: Vec<String> = head
                 .iter()
                 .map(|c| {
@@ -474,6 +587,9 @@ impl Store {
             if let Some(logits) = rerank(query, &passages) {
                 let mut best: HashMap<i64, f32> = HashMap::new();
                 for (c, &l) in head.iter().zip(&logits) {
+                    // The cross-encoder is weak on rare proper nouns ("raytheon" lost by 0.05
+                    // to a form that is near everything); a literal hit gets a small bonus.
+                    let l = if c.literal { l + 0.5 } else { l };
                     let e = best.entry(c.item).or_insert(f32::NEG_INFINITY);
                     if l > *e {
                         *e = l;
@@ -532,14 +648,15 @@ impl Store {
         let (n_chunks, raw_words): (i64, i64) = self
             .conn
             .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(length(text) - length(replace(text, ' ', '')) + 1), 0) FROM chunks WHERE item_id = ?1 AND ord >= 0",
+                "SELECT COUNT(*), COALESCE(SUM(length(text) - length(replace(replace(text, ' ', ''), char(10), '')) + 1), 0) FROM chunks WHERE item_id = ?1 AND ord >= 0",
                 params![top.item],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap_or((0, 0));
         // Consecutive chunks share OVERLAP_WORDS, which the merge below removes again.
         let doc_words = (raw_words as usize).saturating_sub(crate::chunk::OVERLAP_WORDS * (n_chunks.max(1) as usize - 1));
-        if n_chunks > 0 && doc_words <= budget_words {
+        let whole = n_chunks > 0 && doc_words <= budget_words;
+        if whole {
             let Ok(mut all) = self.conn.prepare("SELECT id, ord, text FROM chunks WHERE item_id = ?1 AND ord >= 0 ORDER BY ord") else {
                 return Vec::new();
             };
@@ -554,7 +671,11 @@ impl Store {
         try_add(top.item, 0, &mut chosen, &mut used);
         for c in &cands {
             let _ = c.id;
-            let _ = c.words;
+            // With the whole top document in, a stray one-line note from elsewhere is
+            // more likely a decoy ("DevOps Engineer, Night Shift" next to a résumé).
+            if whole && c.item != top.item && c.words < 15 {
+                continue;
+            }
             if !try_add(c.item, c.ord, &mut chosen, &mut used) {
                 continue;
             }
@@ -565,9 +686,10 @@ impl Store {
             }
         }
 
-        // Emit in document order, merging runs of consecutive chunks into one block.
+        // Emit the chosen document first, then the rest, each in document order, merging
+        // runs of consecutive chunks into one block.
         let mut list: Vec<(i64, i64, String)> = chosen.into_values().collect();
-        list.sort_by_key(|(item, ord, _)| (*item, *ord));
+        list.sort_by_key(|(item, ord, _)| (*item != top.item, *item, *ord));
         let Ok(mut title_of) = self.conn.prepare("SELECT title FROM items WHERE id = ?1") else {
             return Vec::new();
         };
@@ -578,10 +700,7 @@ impl Store {
             if contiguous {
                 if let Some(block) = out.last_mut() {
                     // Chunks overlap by their first OVERLAP words; drop that prefix.
-                    let skip = crate::chunk::OVERLAP_WORDS;
-                    let tail: Vec<&str> = text.split_whitespace().skip(skip).collect();
-                    block.1.push(' ');
-                    block.1.push_str(&tail.join(" "));
+                    block.1.push_str(crate::chunk::skip_words(&text, crate::chunk::OVERLAP_WORDS));
                 }
             } else {
                 let title: String = title_of.query_row(params![item], |r| r.get(0)).unwrap_or_default();

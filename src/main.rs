@@ -11,6 +11,7 @@ mod embed;
 mod expand;
 mod drop;
 mod ingest;
+mod pdf_layout;
 mod gpu;
 mod llm_ort;
 mod rerank;

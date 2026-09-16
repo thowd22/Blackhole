@@ -149,10 +149,28 @@ impl AskEngine {
         if !expansions.is_empty() {
             crate::util::log(&format!("expansion: {expansions:?}"));
         }
-        let Ok(qvec) = self.embedder.embed(&expand::dense_query(&question, &expansions)) else {
+        let Ok(mut qvec) = self.embedder.embed(&expand::dense_query(&question, &expansions)) else {
             post(WM_ASK_DONE, "Could not embed the question.".into());
             return;
         };
+        // Multi-query: the model rewrites the question into the words a file would
+        // contain; their embeddings are folded into the query vector (question weighted
+        // double) and their literal terms feed the boost and the absent gate.
+        let rewrites = if std::env::var("BLACKHOLE_REWRITE").map(|v| v == "1").unwrap_or(false) { llm.search_terms(&question) } else { Vec::new() };
+        if !rewrites.is_empty() {
+            crate::util::log(&format!("rewrites: {rewrites:?}"));
+            let mut acc: Vec<f32> = qvec.iter().map(|v| v * 2.0).collect();
+            for r in &rewrites {
+                if let Ok(v) = self.embedder.embed(r) {
+                    for (a, b) in acc.iter_mut().zip(v) {
+                        *a += b;
+                    }
+                }
+            }
+            let norm = acc.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
+            qvec = acc.iter().map(|v| v / norm).collect();
+        }
+        let aux = rewrites.join(" ");
         self.ensure_reranker();
         let reranker = self.reranker.lock().unwrap();
         let rerank_fn = |q: &str, passages: &[String]| -> Option<Vec<f32>> {
@@ -160,9 +178,9 @@ impl AskEngine {
         };
         let (absent, chunks) = {
             let store = self.store.lock().unwrap();
-            let absent = store.absent(&question, Some(&qvec));
+            let absent = store.absent(&question, Some(&qvec)) && !store.any_term_present(&aux);
             let hook: Option<&dyn Fn(&str, &[String]) -> Option<Vec<f32>>> = if reranker.is_some() { Some(&rerank_fn) } else { None };
-            (absent, if absent { Vec::new() } else { store.context_reranked(&question, &qvec, CONTEXT_WORDS, hook) })
+            (absent, if absent { Vec::new() } else { store.context_reranked(&question, &aux, &qvec, CONTEXT_WORDS, hook) })
         };
         drop(reranker);
         if absent {
@@ -175,6 +193,13 @@ impl AskEngine {
         if chunks.is_empty() {
             post(WM_ASK_DONE, "Nothing inside yet — drop something on me first.".into());
             return;
+        }
+        let mut chunks = chunks;
+        if Llm::is_document_question(&question) {
+            let cat = self.store.lock().unwrap().catalog(30);
+            if !cat.is_empty() {
+                chunks.push(("List of everything in the vault".to_string(), cat));
+            }
         }
         let sources: Vec<Source> = chunks.iter().map(|(t, x)| Source { title: t, text: x }).collect();
         // Leave a trace of what the model saw, for debugging odd answers.

@@ -334,6 +334,16 @@ impl Llm {
         Ok(Llm { family, no_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, gpu_decode, has_logit_index, seq, gpu_device, gpu_alloc, backend, name })
     }
 
+    /// Questions about the files themselves rather than their contents: "which
+    /// document…", "is there a note…", "do I have a paper about…".
+    pub fn is_document_question(question: &str) -> bool {
+        let q = question.to_lowercase();
+        let words: Vec<&str> = q.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        let noun = words.iter().any(|w| matches!(*w, "file" | "files" | "doc" | "docs" | "document" | "documents" | "paper" | "papers" | "note" | "notes" | "pdf" | "pdfs" | "snippet" | "receipt"));
+        let ask = q.starts_with("which") || q.starts_with("what file") || q.starts_with("is there") || q.starts_with("do i have") || q.starts_with("are there") || q.contains("which file") || q.contains("which doc");
+        noun && ask
+    }
+
     fn is_temporal(question: &str) -> bool {
         let q = question.to_lowercase();
         ["before", "after", "previous", "prior", "next", "recent", "latest", "first", "last", "earliest", "newest", "oldest", "when", "order", "current"]
@@ -349,13 +359,15 @@ impl Llm {
             concat!(
                 "You are Blackhole, a search assistant for the user's own files. Answer from the excerpts provided; do not mention excerpts or their numbers. ",
                 "The question is about order or time: first list every relevant entry with its dates from newest to oldest under 'Timeline:', then answer on a new line starting with 'Answer:', reading the answer off the timeline. ",
-                "Only if the excerpts contain nothing relevant, reply: I couldn't find that in your files.",
+                "If none of the excerpts answers the question, reply exactly: I couldn't find that in your files.",
             )
         } else {
             concat!(
                 "You are Blackhole, a search assistant for the user's own files. Answer from the excerpts provided; do not mention excerpts or their numbers. ",
                 "Answer directly in one or two plain sentences, quoting names, numbers and dates exactly as written. ",
-                "Only if the excerpts contain nothing relevant, reply: I couldn't find that in your files.",
+                "If asked which file or document contains something, name it by its exact title, then give the key facts from it that answer the question. ",
+                "Forms and tables appear as rows with ' | ' between columns; a label's value is in the same column of the next row. ",
+                "If none of the excerpts answers the question, reply exactly: I couldn't find that in your files.",
             )
         };
         let mut user = String::new();
@@ -363,7 +375,15 @@ impl Llm {
             user.push_str(&format!("Excerpt {} (from {}):\n{}\n\n", i + 1, s.title, s.text.trim()));
         }
         user.push_str(&format!("Question: {}", question.trim()));
+        let mut p = self.chat(system, &user);
+        if temporal {
+            p.push_str(PREFILL_TIMELINE);
+        }
+        p
+    }
 
+    /// One system + user turn in this model family's chat template, ready for the assistant.
+    fn chat(&self, system: &str, user: &str) -> String {
         let mut p = match self.family {
             Family::ChatMl => format!("<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n"),
             Family::Llama3 => format!(
@@ -376,10 +396,38 @@ impl Llm {
         if self.no_think {
             p.push_str("<think>\n\n</think>\n\n");
         }
-        if temporal {
-            p.push_str(PREFILL_TIMELINE);
-        }
         p
+    }
+
+    /// Alternative search queries for retrieval: the words a file would literally
+    /// contain for what the user asked colloquially ("ssh checkout address" →
+    /// "git clone url", "github repository"). ~0.3 s on the GPU; empty on failure.
+    pub fn search_terms(&mut self, question: &str) -> Vec<String> {
+        let system = concat!(
+            "You write search queries over a person's own files: documents, receipts, résumés, notes, code snippets, saved links. ",
+            "Given a question, write 3 short alternative search queries, one per line, using the literal words, names, formats or jargon such a file would actually contain. ",
+            "Output only the three queries.",
+        );
+        let prompt = self.chat(system, &format!("Question: {}", question.trim()));
+        let out = match self.generate(prompt, None, 48, &AtomicBool::new(false), |_| {}) {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        let q_lower = question.to_lowercase();
+        let mut terms: Vec<String> = Vec::new();
+        for line in out.lines() {
+            let t = line.trim().trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '-' | '*' | '•' | '.' | ')' | ' ')).trim_matches(|c| matches!(c, '"' | '`' | '\'')).trim();
+            let tl = t.to_lowercase();
+            // Preambles ("Here are three alternative search queries:") and echoes of the question.
+            if t.is_empty() || t.ends_with(':') || tl.contains("search quer") || t.split_whitespace().count() > 10 || tl == q_lower || terms.iter().any(|x| x == t) {
+                continue;
+            }
+            terms.push(t.to_string());
+            if terms.len() == 3 {
+                break;
+            }
+        }
+        terms
     }
 
     fn kv_name(i: usize, prefix: &str) -> String {
@@ -594,9 +642,23 @@ impl Llm {
         question: &str,
         sources: &[Source],
         cancel: &AtomicBool,
-        mut on_token: impl FnMut(&str),
+        on_token: impl FnMut(&str),
     ) -> anyhow::Result<String> {
         let prompt = self.prompt(question, sources);
+        let prefill = Self::is_temporal(question).then_some(PREFILL_TIMELINE);
+        self.generate(prompt, prefill, MAX_NEW_TOKENS, cancel, on_token)
+    }
+
+    /// Greedy generation from a finished prompt; `prefill` is text already in the
+    /// prompt that counts as output (echoed to `on_token` first).
+    fn generate(
+        &mut self,
+        prompt: String,
+        prefill: Option<&str>,
+        max_new: usize,
+        cancel: &AtomicBool,
+        mut on_token: impl FnMut(&str),
+    ) -> anyhow::Result<String> {
         let enc = self.tok.encode(prompt, false).map_err(|e| anyhow::anyhow!("{e}"))?;
         let prompt_ids: Vec<u32> = enc.get_ids().to_vec();
         if std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some() {
@@ -606,9 +668,9 @@ impl Llm {
         }
 
         let mut out = String::new();
-        if Self::is_temporal(question) {
-            on_token(PREFILL_TIMELINE);
-            out.push_str(PREFILL_TIMELINE);
+        if let Some(pre) = prefill {
+            on_token(pre);
+            out.push_str(pre);
         }
 
         let mut past = if self.gpu_decode { self.device_kv()? } else { self.empty_past()? };
@@ -628,7 +690,7 @@ impl Llm {
         // Decode the whole sequence each step and emit the new suffix: decoding a
         // slice of tokens on its own drops/adds leading spaces ("7. 73").
         let mut emitted = String::new();
-        for _ in 0..MAX_NEW_TOKENS {
+        for _ in 0..max_new {
             if cancel.load(Ordering::Relaxed) || self.eos.contains(&next) {
                 break;
             }

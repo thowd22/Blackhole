@@ -111,6 +111,39 @@ for the document unit — measured worse when LLM-written on the dev set, but th
 questions are exactly what it targets, so re-test; (c) field-aware chunking for forms (the customs PDF) so a
 chunk carries one labelled field, not a row of codes.
 
+## 2d. Accuracy round on the GPU path (2026-09-16) — what moved 29/44 to 31/44 + 6/6, Hit@1 33 → 37/44
+
+All 44 questions (dev + held-out + blind), Llama 3.2 3B fp16 on the static-shape DirectML path, one run per
+configuration, each run ~4 min. Run-to-run noise is ±1–2 answers (the same config flips b17/b19/b21 between
+runs), so only steps that moved several questions are called wins.
+
+| Step | Answers | Hit@1 | Absent | Verdict |
+|---|---|---|---|---|
+| Baseline (fp16 GPU decode) | 29/44 | 33 | 6/6 | |
+| Layout-aware PDF extraction (`src/pdf_layout.rs`) + every chunk that literally contains a rare query word joins the candidate set | 29/44 | 33 | 6/6 | different misses: q04/b19/b21 gained, q07/q08 lost — the résumé lost its paragraph breaks |
+| + paragraph breaks kept in layout text, `logit`-free prompt hint for document questions, LLM query rewrites ON | 26/44 | 28 | 5/6 | **rewrites hurt**: the 3B prefixes "Here are three alternative search queries:" and writes generic terms ("Ship's log entry"); off by default (`BLACKHOLE_REWRITE=1` to test) |
+| same, rewrites OFF | 27/44 | 34 | 6/6 | retrieval up; model now *refuses* on the right document (h01, b10, b26) |
+| + no refusal clause, 2000-word budget, vault catalog for document questions | 28/44 | 20* | 6/6 | **2000 words backfired**: a second document enters the context and the model answers from it; peak WS 9.9 GB. (*Hit@1 mis-measured: whole-doc blocks were emitted after other items.) |
+| budget back to 1400, overprint dedupe fixed ("Norton Lil y") | 30/44 | 33 | 6/6 | |
+| **+ line breaks preserved inside chunks and merged blocks** (`chunk.rs`) | **32/44** | 33 | 5/6 | the big one: the model had been reading a résumé and a form as one run-on line. Refusal clause gone → one absent question answered |
+| + literal-hit chunks always reach the reranker, decoy one-liners skipped in whole-doc mode, synonyms (employed/ssh/repo…), precise refusal clause back | 31/44 | 33 | 6/6 | ties E on correct+absent (37) |
+| + reranker bonus for literal hits (substring), top document emitted first, "newest first" timeline | 28/44 | 35 | 6/6 | substring "repo" matched "repositories" and stole two questions; the timeline wording made ordering worse |
+| **+ bonus only for whole-word hits on rare terms (≤2 items); timeline wording reverted — shipped** | **31/44** | **37/44 (84 %)** | **6/6** | |
+
+What the shipped configuration still misses (13): three timeline questions where the 3B lists the résumé's
+jobs oldest-first and reads the top line (q08/h07/b20 — the same three with the old extractor were right by
+luck of ordering); three multi-hop customs questions (b23–b25: two documents or two fields of the form);
+"which file has my career history" (h06 — the reranker prefers CONCEPT.md); the colloquial one-liners
+(b09 git remote, b11 "model identifier with a reasoning setting" — no lexical overlap and a 3B rewrite makes
+it worse); b12/b14 decoys; h09 wants the vehicle named; b17 the model refuses on the right note.
+
+Retrieval is no longer the bottleneck (84 % top-1, 6/6 absent); the model's reading of forms and ordering
+is. Three things measured *not* to help at this scale, so nobody re-tries them blind: LLM multi-query
+rewriting with a 3B, a wider context budget, and prompt wording about timeline order. What should move the
+remaining third: a stronger reader now that decode is 100 tok/s (Qwen3-4B fp16 on the same path, ~1 GB more),
+and cell-aware form extraction (the PDF's stroked boxes are available from `pdf-extract`'s `stroke` callback,
+so a label and its value can be paired by cell instead of by row).
+
 ## 3. Scaled-down design for Blackhole
 
 Everything below runs on what we already ship (ONNX Runtime + DirectML, bge-small, Qwen2.5-1.5B) plus one

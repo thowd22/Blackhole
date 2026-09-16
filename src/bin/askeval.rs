@@ -18,6 +18,7 @@
 #[path = "../rerank.rs"] mod rerank;
 #[path = "../llm_ort.rs"] mod llm_ort;
 #[path = "../ingest.rs"] mod ingest;
+#[path = "../pdf_layout.rs"] mod pdf_layout;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -82,12 +83,28 @@ fn main() -> anyhow::Result<()> {
                 let s = store.lock().unwrap();
                 expand::expand(&q.question, |t| s.contains_term(t))
             };
-            let qvec = embedder.embed(&expand::dense_query(&q.question, &expansions))?;
+            let mut qvec = embedder.embed(&expand::dense_query(&q.question, &expansions))?;
+            let t_rw = Instant::now();
+            let rewrites = if std::env::var("BLACKHOLE_REWRITE").map(|v| v == "1").unwrap_or(false) { llm.search_terms(&q.question) } else { Vec::new() };
+            let rewrite_s = t_rw.elapsed().as_secs_f32();
+            if !rewrites.is_empty() {
+                let mut acc: Vec<f32> = qvec.iter().map(|v| v * 2.0).collect();
+                for r in &rewrites {
+                    if let Ok(v) = embedder.embed(r) {
+                        for (a, b) in acc.iter_mut().zip(v) {
+                            *a += b;
+                        }
+                    }
+                }
+                let norm = acc.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
+                qvec = acc.iter().map(|v| v / norm).collect();
+            }
+            let aux = rewrites.join(" ");
             let (absent, chunks) = {
                 let s = store.lock().unwrap();
-                let absent = s.absent(&q.question, Some(&qvec));
+                let absent = s.absent(&q.question, Some(&qvec)) && !s.any_term_present(&aux);
                 let hook = |qq: &str, ps: &[String]| reranker.score(qq, ps).ok();
-                (absent, if absent { Vec::new() } else { s.context_reranked(&q.question, &qvec, 1400, Some(&hook)) })
+                (absent, if absent { Vec::new() } else { s.context_reranked(&q.question, &aux, &qvec, 1400, Some(&hook)) })
             };
             let is_absent_q = q.kind == "absent" || q.expected_items.is_empty();
             let top_title = chunks.first().map(|c| c.0.clone()).unwrap_or_default();
@@ -95,10 +112,26 @@ fn main() -> anyhow::Result<()> {
                 let s = store.lock().unwrap();
                 q.expected_items.iter().any(|id| s.title_of(*id).map(|t| t == top_title).unwrap_or(false))
             };
+            let mut chunks = chunks;
+            if llm_ort::Llm::is_document_question(&q.question) {
+                let cat = store.lock().unwrap().catalog(30);
+                if !cat.is_empty() {
+                    chunks.push(("List of everything in the vault".to_string(), cat));
+                }
+            }
             let (answer, ttft, tps) = if absent {
                 ("[absent gate] That isn't in your vault.".to_string(), 0.0, 0.0)
             } else {
                 let sources: Vec<llm_ort::Source> = chunks.iter().map(|(t, x)| llm_ort::Source { title: t, text: x }).collect();
+                if std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some() {
+                    // What the model saw, per question, beside the exe (personal data: never committed).
+                    let mut dump = format!("Q: {}\n\n", q.question);
+                    for (i, (t, x)) in chunks.iter().enumerate() {
+                        dump.push_str(&format!("--- [{}] {t} ({} words)\n{x}\n\n", i + 1, x.split_whitespace().count()));
+                    }
+                    let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
+                    let _ = std::fs::write(dir.join(format!("context-{}.txt", q.id)), dump);
+                }
                 let t0 = Instant::now();
                 let mut first: Option<f32> = None;
                 let mut pieces = 0;
@@ -129,6 +162,9 @@ fn main() -> anyhow::Result<()> {
             }
             let flat: String = answer.replace('\n', " ⏎ ").chars().take(150).collect();
             println!("{} {} [{}] doc:{} ttft {:.1}s {:.0}tok/s | {}", if ok { "✓" } else { "✗" }, q.id, q.kind, if top_hit { "✓" } else { "✗" }, ttft, tps, flat);
+            if !rewrites.is_empty() {
+                println!("   rewrites ({rewrite_s:.2}s): {rewrites:?}");
+            }
             use std::io::Write;
             let _ = std::io::stdout().flush();
             if std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some() {

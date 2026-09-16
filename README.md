@@ -55,9 +55,14 @@ run; nothing is linked at build time, so the app cross-compiles from Linux with 
 
 ### Swallowing
 
-1. **Extraction.** Text and code files are read directly; PDFs go through a pure-Rust extractor; other files
-   are indexed by name and metadata for now (OCR is on the roadmap).
-2. **Chunking.** Each document is split into ~100-word chunks with a 20-word overlap, paragraph-aware.
+1. **Extraction.** Text and code files are read directly. PDFs go through a pure-Rust, *layout-aware*
+   extractor (`src/pdf_layout.rs`): glyphs are re-assembled into rows and columns from their page positions,
+   so a customs form comes out as `IMPORTING CARRIER | FROM PORT OF` over `TRANQUIL ACE | KOBE, JA` instead
+   of stream-order soup, and fake-bold overprints are collapsed. Other files are indexed by name and metadata
+   for now (OCR is on the roadmap).
+2. **Chunking.** Each document is split into ~100-word chunks with a 20-word overlap, paragraph-aware, and
+   line breaks survive inside a chunk — a résumé's job headers and a form's rows only mean something as lines
+   (flattening them cost the model three answers in the eval).
 3. **Embedding.** Every chunk — prefixed with its document's title — becomes a 384-dimensional vector from
    **bge-small-en-v1.5**, run on the GPU. One extra vector per document holds just the *title*: a
    whole-document handle that lets "which file has my career history" match `Resume.pdf` when no single
@@ -140,10 +145,10 @@ binary (`askeval`) that runs the actual pipeline and checks answers against rege
 
 | | Live search | Ask mode |
 |---|---|---|
-| Right document first | 62 % | 73 % |
+| Right document first | 62 % | **84 %** |
 | Right document in top 3 | 92 % | 88 % |
-| "Not in your vault" | 4/4, no false alarms | |
-| Correct answers (Llama 3.2 3B) | | **65 %** |
+| "Not in your vault" | 4/4, no false alarms | 6/6 |
+| Correct answers (Llama 3.2 3B) | | **70 %** (31/44) |
 | Latency | 5 ms | ~1.1 s to first text, ~105 tok/s |
 
 The full story — what was tried, what won, what lost and why (bigger embedders lost; LLM chunk enrichment

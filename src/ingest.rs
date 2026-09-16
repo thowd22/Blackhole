@@ -67,8 +67,11 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
 
     let (kind, content): (&'static str, String) = if ext == "pdf" {
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
-        let text = pdf_extract::extract_text_from_mem(&bytes)
-            .map_err(|e| format!("{name}: could not read PDF ({e})"))?;
+        // Layout-aware first (forms, tables); plain stream order if that fails.
+        let text = match crate::pdf_layout::extract(&bytes) {
+            Ok(t) if !t.trim().is_empty() => t,
+            _ => pdf_extract::extract_text_from_mem(&bytes).map_err(|e| format!("{name}: could not read PDF ({e})"))?,
+        };
         ("pdf", text)
     } else if TEXT_EXTS.contains(&ext.as_str()) {
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
@@ -117,6 +120,22 @@ pub fn embed_item(store: &Mutex<Store>, embedder: &Embedder, item_id: i64, title
 
 /// Worker loop. `notify` is called after each batch with the outcome.
 pub fn run(rx: Receiver<Input>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder>, notify: impl Fn(Report)) {
+    // Stored PDF text predates the current extractor: read the files again where they
+    // still exist (missing ones keep their old text and just re-chunk).
+    let stale = store.lock().unwrap().stale_text;
+    if stale {
+        let pdfs = store.lock().unwrap().items_with_source("pdf");
+        let mut redone = 0;
+        for (id, source) in pdfs {
+            let path = Path::new(&source);
+            if let Ok(e) = extract_file(path) {
+                if store.lock().unwrap().update_content(id, &e.content).is_ok() {
+                    redone += 1;
+                }
+            }
+        }
+        crate::util::log(&format!("text pipeline changed: re-extracted {redone} PDFs, re-chunking everything"));
+    }
     // Items from before embeddings existed (or interrupted runs) get vectors now.
     let backlog = store.lock().unwrap().unembedded();
     for (id, title, content) in backlog {
