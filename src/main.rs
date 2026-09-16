@@ -17,6 +17,7 @@ mod llm_ort;
 mod mcp;
 mod rerank;
 mod runtime;
+mod screenshot;
 mod search;
 mod sprite;
 mod startup;

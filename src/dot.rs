@@ -44,6 +44,7 @@ const ACTIVE_MS: u32 = 50;
 const TRANSITION_MS: u32 = 150;
 const HOTKEY_SUMMON: i32 = 1;
 const HOTKEY_PASTE: i32 = 2;
+const HOTKEY_SHOT: i32 = 3;
 
 const MENU_SEARCH: usize = 1;
 const MENU_PASTE: usize = 2;
@@ -58,6 +59,7 @@ const MENU_START_LOGIN: usize = 10;
 const MENU_TUTORIAL: usize = 11;
 const MENU_SIZE_XL: usize = 12;
 const MENU_THINK: usize = 13;
+const MENU_SCREENSHOT: usize = 14;
 
 /// First-run tutorial. Each step waits for the action it describes.
 pub const TUTORIAL: &[&str] = &[
@@ -463,6 +465,12 @@ impl Dot {
         }
     }
 
+    /// Drag-region capture; the overlay posts WM_DROP_SWALLOW and WM_NOTIFY back when done.
+    unsafe fn screenshot(&mut self) {
+        let unit = self.unit();
+        crate::screenshot::start(self.hwnd, self.tx.clone(), unit);
+    }
+
     unsafe fn swallow(&mut self) {
         self.pending += 1;
         self.set_mood(Mood::Digesting, None);
@@ -609,6 +617,7 @@ impl Dot {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, MENU_SEARCH, w!("Search\tCtrl+Shift+Space"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_PASTE, w!("Swallow clipboard\tCtrl+Shift+V"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SCREENSHOT, w!("Take screenshot\tCtrl+Shift+S"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_VAULT, w!("Open vault folder"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_TUTORIAL, w!("Show tutorial"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
@@ -636,6 +645,7 @@ impl Dot {
         match id {
             MENU_SEARCH => self.open_search(),
             MENU_PASTE => self.paste_clipboard(),
+            MENU_SCREENSHOT => self.screenshot(),
             MENU_VAULT => {
                 let dir = wide(&config::data_dir().display().to_string());
                 ShellExecuteW(None, w!("open"), PCWSTR(dir.as_ptr()), None, None, SW_SHOWNORMAL);
@@ -689,6 +699,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             d.drop_target = Some(target);
             let _ = RegisterHotKey(Some(hwnd), HOTKEY_SUMMON, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_SPACE.0 as u32);
             let _ = RegisterHotKey(Some(hwnd), HOTKEY_PASTE, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_V.0 as u32);
+            let _ = RegisterHotKey(Some(hwnd), HOTKEY_SHOT, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_S.0 as u32);
             SetTimer(Some(hwnd), TIMER_ANIM, IDLE_MS, None);
             let n = d.store.lock().unwrap().count();
             tray::add(hwnd, &format!("Blackhole — {n} items inside"));
@@ -783,6 +794,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 match wparam.0 as i32 {
                     HOTKEY_SUMMON => d.summon(),
                     HOTKEY_PASTE => d.paste_clipboard(),
+                    HOTKEY_SHOT => d.screenshot(),
                     _ => {}
                 }
             }
@@ -875,6 +887,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = RevokeDragDrop(hwnd);
                 let _ = UnregisterHotKey(Some(hwnd), HOTKEY_SUMMON);
                 let _ = UnregisterHotKey(Some(hwnd), HOTKEY_PASTE);
+                let _ = UnregisterHotKey(Some(hwnd), HOTKEY_SHOT);
                 tray::remove(hwnd);
                 config::save(&d.cfg);
                 if !d.search.is_invalid() {

@@ -78,6 +78,11 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
         ("file", String::from_utf8_lossy(&bytes).into_owned())
     } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") {
         // OCR / captioning lands with the model work; for now images are findable by name.
+        if let Some(title) = capture_title(path) {
+            // Our own screenshot (see screenshot.rs): "Screenshot 2026-09-16 14-03-22 412×188".
+            // The title doubles as the content until OCR makes the pixels searchable.
+            return Ok(Extracted { content: title.clone(), title, kind: "image", source });
+        }
         ("image", String::new())
     } else {
         // Unknown binary: keep it findable by name and metadata only.
@@ -90,6 +95,24 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
         content = name.clone();
     }
     Ok(Extracted { title: name, kind, source, content })
+}
+
+/// Title for a PNG the screenshot tool wrote under `<data dir>\captures`; None for any other file.
+fn capture_title(path: &Path) -> Option<String> {
+    let dir = crate::config::data_dir().join("captures");
+    if path.parent() != Some(dir.as_path()) {
+        return None;
+    }
+    let stem = path.file_stem()?.to_string_lossy();
+    // Width and height straight from the IHDR chunk (bytes 16..24, big-endian).
+    let mut head = [0u8; 24];
+    std::io::Read::read_exact(&mut std::fs::File::open(path).ok()?, &mut head).ok()?;
+    if &head[..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let w = u32::from_be_bytes(head[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(head[20..24].try_into().ok()?);
+    Some(format!("Screenshot {stem} {w}\u{d7}{h}"))
 }
 
 pub fn hash_of(e: &Extracted) -> String {
