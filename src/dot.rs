@@ -8,7 +8,7 @@ use crate::config::{self, Config};
 use crate::drop::{self, DropTarget, WM_DROP_ENTER, WM_DROP_LEAVE, WM_DROP_SWALLOW};
 use crate::embed::Embedder;
 use crate::ingest::{Input, Report};
-use crate::search::{SearchWin, WM_ASK_STARTED, WM_SEARCH_CLOSED};
+use crate::search::{SearchWin, WM_ASK_STARTED, WM_PANEL_RESIZED, WM_SEARCH_CLOSED};
 use crate::sprite::{self, Mood, SIZE};
 use crate::startup;
 use crate::store::Store;
@@ -296,7 +296,7 @@ impl Dot {
             self.set_hidden(false);
         }
         if self.search.is_invalid() {
-            self.search = SearchWin::create(self.hwnd, self.store.clone(), self.embedder.clone(), self.ask.clone());
+            self.search = SearchWin::create(self.hwnd, self.store.clone(), self.embedder.clone(), self.ask.clone(), (self.cfg.panel_w, self.cfg.panel_h));
         }
         self.set_mood(Mood::Listening, None);
         SearchWin::show(self.search, self.rect());
@@ -754,6 +754,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_ASK_STARTED => {
             if let Some(d) = state(hwnd) {
                 d.tutorial_event(Event::Asked);
+            }
+            LRESULT(0)
+        }
+        WM_PANEL_RESIZED => {
+            if let Some(d) = state(hwnd) {
+                d.cfg.panel_w = wparam.0 as i32;
+                d.cfg.panel_h = lparam.0 as i32;
+                config::save(&d.cfg);
             }
             LRESULT(0)
         }
