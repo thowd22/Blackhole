@@ -45,6 +45,8 @@ const TRANSITION_MS: u32 = 150;
 const HOTKEY_SUMMON: i32 = 1;
 const HOTKEY_PASTE: i32 = 2;
 const HOTKEY_SHOT: i32 = 3;
+/// Ctrl+Shift+S was taken; the screenshot key is Ctrl+Alt+S (menu label follows).
+static SHOT_KEY_ALT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 const MENU_SEARCH: usize = 1;
 const MENU_PASTE: usize = 2;
@@ -617,7 +619,8 @@ impl Dot {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, MENU_SEARCH, w!("Search\tCtrl+Shift+Space"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_PASTE, w!("Swallow clipboard\tCtrl+Shift+V"));
-        let _ = AppendMenuW(menu, MF_STRING, MENU_SCREENSHOT, w!("Take screenshot\tCtrl+Shift+S"));
+        let shot_label = crate::util::wide(if SHOT_KEY_ALT.load(std::sync::atomic::Ordering::Relaxed) { "Take screenshot\tCtrl+Alt+S" } else { "Take screenshot\tCtrl+Shift+S" });
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SCREENSHOT, PCWSTR(shot_label.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, MENU_VAULT, w!("Open vault folder"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_TUTORIAL, w!("Show tutorial"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
@@ -697,9 +700,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let target = DropTarget::new(hwnd, d.tx.clone());
             let _ = RegisterDragDrop(hwnd, &target);
             d.drop_target = Some(target);
-            let _ = RegisterHotKey(Some(hwnd), HOTKEY_SUMMON, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_SPACE.0 as u32);
-            let _ = RegisterHotKey(Some(hwnd), HOTKEY_PASTE, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_V.0 as u32);
-            let _ = RegisterHotKey(Some(hwnd), HOTKEY_SHOT, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_S.0 as u32);
+            // A hotkey another program already owns fails silently otherwise; say so in the
+            // log (and, for the screenshot key, offer the fallback the menu shows).
+            for (id, vk, name) in [(HOTKEY_SUMMON, VK_SPACE, "Ctrl+Shift+Space"), (HOTKEY_PASTE, VK_V, "Ctrl+Shift+V"), (HOTKEY_SHOT, VK_S, "Ctrl+Shift+S")] {
+                if RegisterHotKey(Some(hwnd), id, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, vk.0 as u32).is_err() {
+                    crate::util::log(&format!("hotkey {name} is taken by another program"));
+                    if id == HOTKEY_SHOT && RegisterHotKey(Some(hwnd), HOTKEY_SHOT, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, vk.0 as u32).is_ok() {
+                        crate::util::log("screenshot hotkey registered as Ctrl+Alt+S instead");
+                        SHOT_KEY_ALT.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
             SetTimer(Some(hwnd), TIMER_ANIM, IDLE_MS, None);
             let n = d.store.lock().unwrap().count();
             tray::add(hwnd, &format!("Blackhole — {n} items inside"));

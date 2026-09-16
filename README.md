@@ -36,7 +36,7 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
 - Drop files or selected text on it, or hit **Ctrl+Shift+V** to swallow whatever is on the clipboard. The ring
   speeds up and specks spiral in while it digests; it pulses when it's done, flickers red if it couldn't read
   something. Every mood change eases over 150 ms rather than snapping.
-- **Ctrl+Shift+S** (or "Take screenshot" in the menu) dims the screen; drag a rectangle and the region is saved
+- **Ctrl+Shift+S** (Ctrl+Alt+S if another program already owns that key — the menu shows which; or "Take screenshot" in the menu) dims the screen; drag a rectangle and the region is saved
   as a PNG under `captures\` and swallowed like a dropped image. Esc cancels.
 - Left-click: a dark panel appears beside the dot. Results update on every keystroke in about 5 ms —
   keyword matches and semantic matches fused, with a tag showing which kind of match you're looking at.

@@ -70,7 +70,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - Paste clipboard directly into Blackhole without dragging (ingest the current clipboard contents).
 - Open search from anywhere without moving the dot.
 - **Ctrl+Shift+N — summon to mouse and open a new note** (2026-09-16): the dot warps to the cursor, the panel opens on the Notes tab with an empty note ready to type into (see §5.8).
-- **Screenshot shortcut** (2026-09-16): see §3.6; a global shortcut (default Ctrl+Shift+S) and a panel button start a drag-region capture. — done 2026-09-16
+- **Screenshot shortcut** (2026-09-16): see §3.6; a global shortcut (default Ctrl+Shift+S, falling back to Ctrl+Alt+S when another program owns it — logged, and the menu label follows) and a panel button start a drag-region capture. — done 2026-09-16
 
 ### 2.5 System tray icon — P1
 - A tray icon (pixel black hole) so the app has a home when the dot is hidden, for start-at-login setup, and so Windows has somewhere to put it.
