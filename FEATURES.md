@@ -193,9 +193,9 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 - Simple filters: images / text / files / this week.
 
 ### 5.5 Panel sizing — P1
-- **Resize to content**: the panel grows/shrinks to fit what it shows — result count, answer length, note height — up to a cap, instead of a fixed number of empty rows. Animated (§1.3 pace rule).
-- **Corner drag**: a pixel-art grip in the bottom-right corner; dragging it resizes the panel. The dragged size is saved to the config and restored on the next start; it becomes the cap for content-based resizing until dragged again.
-- **Restore the previous view** (2026-09-16): clicking away closes the panel but keeps its state — query text, results, streamed answer, open note, scroll position, size. The next open shows exactly what was there; Esc twice (or a new query) clears it.
+- **Resize to content**: the panel grows/shrinks to fit what it shows — result count, answer length, note height — up to a cap, instead of a fixed number of empty rows. Animated (§1.3 pace rule). — done 2026-09-16
+- **Corner drag**: a pixel-art grip in the bottom-right corner; dragging it resizes the panel. The dragged size is saved to the config and restored on the next start; it becomes the cap for content-based resizing until dragged again. — done 2026-09-16
+- **Restore the previous view** (2026-09-16): clicking away closes the panel but keeps its state — query text, results, streamed answer, open note, scroll position, size. The next open shows exactly what was there; Esc twice (or a new query) clears it. — done 2026-09-16
 
 ### 5.6 Rich results — P1
 - **Code blocks**: snippets and previews from code files / fenced ```` ``` ```` blocks render monospace with the language tag, preserving indentation; a hit inside a code block shows the enclosing block, not a one-line fragment.
@@ -204,7 +204,7 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 - **Preview pane**: expand a result (→ or Tab) to read the full item inline with the above formatting, without opening the source app.
 
 ### 5.6b On-theme scrollbars — P1
-- The stock Windows scrollbars (grey, rounded, anti-aliased) break the pixel look on the result list and the answer box. Replace them app-wide with custom-drawn pixel-art scrollbars: dark track, 1-unit orange border, blocky thumb, no arrows (or 1-unit stepped arrows), sized in the same integer units as the dot.
+- The stock Windows scrollbars (grey, rounded, anti-aliased) break the pixel look on the result list and the answer box. Replace them app-wide with custom-drawn pixel-art scrollbars: dark track, 1-unit orange border, blocky thumb, no arrows (or 1-unit stepped arrows), sized in the same integer units as the dot. — done 2026-09-16
 - Applies to every scrollable surface: results list, answer box, future preview pane and settings; long speech-bubble messages that overflow should scroll the same way.
 - Implementation: hide the native bars (`ShowScrollBar(..., FALSE)` / owner-draw the controls) and paint the bar in the parent, handling drag, wheel and keyboard so behaviour matches the native control.
 
