@@ -34,8 +34,9 @@ Working now:
   provider. Measured end to end on 18 questions: 14/18 correct (Qwen2.5-1.5B: 9/18), ~1 s to first text,
   ~7.6 tok/s. Any instruct model dropped beside the exe works if its `tokenizer.json` sits next to it: the
   chat template (ChatML / Llama 3 / Phi / Gemma) and stop tokens are detected from the tokenizer; fp16 or fp32
-  KV caches are both handled. Exports need `tools/last_logits.py` (+ `gemm_head.py`, `explicit_rotary.py` for
-  GenAI-style graphs — see PACKAGING.md § LLM selection round). The largest `*.onnx` (graph + external data)
+  KV caches are both handled. Exports go through `tools/last_logits.py` → `gemm_head.py` → `explicit_rotary.py` →
+  `shrink_embeddings.py` → `repack.py` (PACKAGING.md § LLM selection round and § Memory); the shipped Llama is
+  2.7 GB on disk and peaks at ~6 GB of RAM while answering. The largest `*.onnx` (graph + external data)
   in the exe folder or its subfolders wins.
   Context = best chunks with neighbours in document order, or the whole document when the top hit is small.
   Order/time questions get a forced "Timeline:" scratchpad. Pre-loaded when the panel opens, unloaded 60 s

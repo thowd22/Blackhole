@@ -129,6 +129,11 @@ fn main() -> anyhow::Result<()> {
             }
             let flat: String = answer.replace('\n', " ⏎ ").chars().take(150).collect();
             println!("{} {} [{}] doc:{} ttft {:.1}s {:.0}tok/s | {}", if ok { "✓" } else { "✗" }, q.id, q.kind, if top_hit { "✓" } else { "✗" }, ttft, tps, flat);
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            if std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some() {
+                util::log(&format!("answer {}: {}", q.id, flat));
+            }
         }
     }
     let answerable = n - absent_total;

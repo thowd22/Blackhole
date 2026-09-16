@@ -8,8 +8,8 @@
 //! this dynamic-shape graph makes it slower than the CPU for single tokens.
 //! The cache produced by the GPU pass is bound straight to CPU memory.
 
-use ort::ep::{DirectML, ExecutionProvider};
-use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
+use ort::ep::{DirectML, ExecutionProvider, CPU};
+use ort::memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::Session;
 use ort::value::{DynValue, Tensor};
 use std::borrow::Cow;
@@ -36,6 +36,8 @@ enum Family {
 /// Special-token strings that end a turn, per family; resolved to ids from the tokenizer.
 const STOP_TOKENS: &[&str] = &["<|im_end|>", "<|endoftext|>", "<|eot_id|>", "<|end_of_text|>", "<|end|>", "<end_of_turn>", "<eos>"];
 const MAX_NEW_TOKENS: usize = 260;
+/// GPU-resident cache capacity (tokens) for the GPU-decode mode.
+const GPU_KV_CAPACITY: usize = 4096;
 const PREFILL_TIMELINE: &str = "Timeline:\n";
 
 /// An excerpt handed to the model as grounding.
@@ -64,6 +66,9 @@ pub struct Llm {
     /// Decode on the GPU too (cache stays resident there); the CPU session is not loaded.
     gpu_decode: bool,
     gpu_device: i32,
+    /// Owns the GPU cache buffers' memory; must outlive them (freeing through a
+    /// dropped allocator crashes), so it lives as long as the model.
+    gpu_alloc: Option<Allocator>,
     pub backend: &'static str,
     #[allow(dead_code)]
     pub name: String,
@@ -149,15 +154,34 @@ pub fn dml_provider(device: i32) -> DirectML {
     DirectML::default().with_device_id(device)
 }
 
+/// Memory knobs, comma-separated in BLACKHOLE_LLM_OPTS: `arena0` (no CPU arena),
+/// `prepack0` (no weight prepacking), `pattern0` (no memory pattern), `devinit`
+/// (initializers allocated on the device for the DirectML session).
+fn opt(name: &str) -> bool {
+    std::env::var("BLACKHOLE_LLM_OPTS").map(|v| v.split(',').any(|o| o.trim() == name)).unwrap_or(false)
+}
+
 fn gpu_session(path: &Path, device: i32) -> anyhow::Result<Session> {
     let b = ok(Session::builder())?;
     let b = ok(b.with_execution_providers([dml_provider(device).build().error_on_failure()]))?;
     let mut b = ok(b.with_memory_pattern(false))?;
+    if opt("devinit") {
+        b = ok(b.with_device_allocated_initializers())?;
+    }
     ok(b.commit_from_file(path))
 }
 
 fn cpu_session(path: &Path) -> anyhow::Result<Session> {
     let mut b = ok(Session::builder())?;
+    if opt("arena0") {
+        b = ok(b.with_execution_providers([CPU::default().with_arena_allocator(false).build()]))?;
+    }
+    if opt("prepack0") {
+        b = ok(b.with_prepacking(false))?;
+    }
+    if opt("pattern0") {
+        b = ok(b.with_memory_pattern(false))?;
+    }
     ok(b.commit_from_file(path))
 }
 
@@ -186,6 +210,12 @@ impl Llm {
         let gpu_decode = want_gpu_decode && gpu.is_some();
         // The CPU session is only needed when it decodes (or when there is no GPU).
         let cpu = if gpu_decode { gpu_session(path, gpu_device)? } else { cpu_session(path)? };
+        let gpu_alloc = if gpu_decode {
+            let mem = ok(MemoryInfo::new(AllocationDevice::DIRECTML, 0, AllocatorType::Device, MemoryType::Default))?;
+            Some(ok(Allocator::new(&cpu, mem))?)
+        } else {
+            None
+        };
         let backend = if gpu_decode { "DirectML" } else if gpu.is_some() { "DirectML + CPU" } else { "CPU" };
         let session = &cpu;
         // Cache geometry from the graph itself: count past_key_values.N.key inputs, read their dims.
@@ -223,7 +253,7 @@ impl Llm {
         let eos: Vec<u32> = STOP_TOKENS.iter().filter_map(|t| tok.token_to_id(t)).collect();
         crate::util::log(&format!("llm: {} layout, {family:?} template{}, {} stop tokens, kv {}", if wants_position_ids { "HF" } else { "GenAI" }, if no_think { " (no-think)" } else { "" }, eos.len(), if kv_f16 { "f16" } else { "f32" }));
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Llm { family, no_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, gpu_decode, gpu_device, backend, name })
+        Ok(Llm { family, no_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, gpu_decode, gpu_device, gpu_alloc, backend, name })
     }
 
     fn is_temporal(question: &str) -> bool {
@@ -301,6 +331,24 @@ impl Llm {
         Ok(pick(shape, data))
     }
 
+    /// Fixed-capacity KV buffers on the GPU, bound as both `past` and `present`
+    /// every step (GenAI's shared-buffer convention). DirectML's
+    /// GroupQueryAttention writes the new rows in place; separately allocated,
+    /// growing `present` outputs come back corrupted on DirectML.
+    fn device_kv(&self) -> anyhow::Result<Vec<DynValue>> {
+        let alloc = self.gpu_alloc.as_ref().ok_or_else(|| anyhow::anyhow!("no GPU allocator"))?;
+        let shape = [1usize, self.kv_heads, GPU_KV_CAPACITY, self.head_dim];
+        (0..self.layers * 2)
+            .map(|_| {
+                Ok(if self.kv_f16 {
+                    ok(Tensor::<half::f16>::new(alloc, shape))?.into_dyn()
+                } else {
+                    ok(Tensor::<f32>::new(alloc, shape))?.into_dyn()
+                })
+            })
+            .collect()
+    }
+
     fn empty_past(&self) -> anyhow::Result<Vec<DynValue>> {
         let shape = [1usize, self.kv_heads, 0, self.head_dim];
         (0..self.layers * 2)
@@ -358,6 +406,10 @@ impl Llm {
         let layers = self.layers;
 
         if self.gpu_decode {
+            let dbg = std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some();
+            if dbg {
+                crate::util::log(&format!("gpu-decode step: n={n} past_len={past_len} past_values={}", past.len()));
+            }
             // Cache stays on the GPU between steps; only the logits come back.
             let mut binding = ok(self.cpu.create_binding())?;
             ok(binding.bind_input("input_ids", &input_ids))?;
@@ -365,22 +417,36 @@ impl Llm {
             if self.wants_position_ids {
                 ok(binding.bind_input("position_ids", &pos))?;
             }
+            if total > GPU_KV_CAPACITY {
+                anyhow::bail!("prompt of {total} tokens exceeds the GPU cache capacity of {GPU_KV_CAPACITY}");
+            }
+            // The fixed-capacity buffers are the cache: DirectML's GQA appends the new rows into
+            // them in place (GenAI's shared-buffer convention), so the `present` outputs are
+            // allocated by ORT and ignored, and the same buffers are fed again next step.
             for (i, kv) in past.iter().enumerate() {
                 ok(binding.bind_input(Self::kv_name(i, "past_key_values"), kv))?;
             }
             let cpu_mem = ok(MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::Default))?;
-            let gpu_mem = ok(MemoryInfo::new(AllocationDevice::DIRECTML, self.gpu_device, AllocatorType::Device, MemoryType::Default))?;
+            let gpu_mem = ok(MemoryInfo::new(AllocationDevice::DIRECTML, 0, AllocatorType::Device, MemoryType::Default))?;
+            let _ = self.gpu_device;
             ok(binding.bind_output_to_device("logits", &cpu_mem))?;
             for i in 0..layers * 2 {
                 ok(binding.bind_output_to_device(Self::kv_name(i, "present"), &gpu_mem))?;
             }
-            let mut outputs = ok(self.cpu.run_binding(&binding))?;
+            if dbg {
+                crate::util::log("gpu-decode: bound, running");
+            }
+            let outputs = ok(self.cpu.run_binding(&binding))?;
+            if dbg {
+                crate::util::log("gpu-decode: ran");
+            }
             let next = Self::argmax(&outputs["logits"])?;
-            let present = (0..layers * 2)
-                .map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output")))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            drop(past);
-            return Ok((next, present));
+            drop(outputs);
+            drop(binding);
+            if dbg {
+                crate::util::log(&format!("gpu-decode: next={next}"));
+            }
+            return Ok((next, past));
         }
         if past_len == 0 {
             if let Some(gpu) = self.gpu.as_mut() {
@@ -434,7 +500,7 @@ impl Llm {
             out.push_str(PREFILL_TIMELINE);
         }
 
-        let past = self.empty_past()?;
+        let past = if self.gpu_decode { self.device_kv()? } else { self.empty_past()? };
         let (mut next, mut past) = self.step(&prompt_ids, 0, past)?;
         let mut len = prompt_ids.len();
         let mut generated: Vec<u32> = Vec::new();
@@ -467,6 +533,9 @@ impl Llm {
             next = n;
             past = p;
             len += 1;
+        }
+        if std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some() {
+            crate::util::log(&format!("llm out ({} tokens): {}", generated.len(), out.replace('\n', " ⏎ ").chars().take(200).collect::<String>()));
         }
         Ok(out)
     }

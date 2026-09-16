@@ -146,6 +146,29 @@ Findings that generalise:
 Model preparation recipe (all graph-only, no weight rewrite): `last_logits.py` → `gemm_head.py` (if the LM head
 transposes at runtime) → `explicit_rotary.py` (if GQA has `do_rotary=1`) → `trim_gqa.py` (GenAI graphs on ORT 1.20).
 
+## Memory (2026-09-16): what the ask-mode footprint is made of, and what moved it
+
+Measured with `askeval.exe` (peak working set, Llama 3.2 3B int4, hybrid DirectML prompt / CPU decode):
+
+| Change | Peak WS | Decode | Verdict |
+|---|---|---|---|
+| as shipped (two sessions, fp32 tied embedding matrix) | 8.7 GB | 7.0 tok/s | baseline |
+| CPU memory arena off (`arena0`) | 8.2 GB | 5.2 tok/s | not worth −25 % speed |
+| weight prepacking off (`prepack0`) | 6.6 GB | **0.3 tok/s** | never — MatMulNBits needs packed weights |
+| memory pattern off / device-allocated initializers | 8.7 GB | — | no effect |
+| **embedding → fp16 Gather + Cast, LM head → int4 MatMulNBits** (`tools/shrink_embeddings.py`) | **6.1 GB** | **8.4 tok/s** | shipped; disk 3.25 → 2.73 GB after `tools/repack.py` |
+| GPU-resident decode, no CPU session (`BLACKHOLE_DECODE=gpu`) | 3.7 GB | 5–6 tok/s | **parked**: decodes garbage — DirectML's GQA kernel needs GenAI's cache convention (fixed-capacity buffers + its own seqlens handling), which neither "growing present" nor "shared past/present" reproduced; an allocator-lifetime crash on this path is fixed |
+
+Where the remaining ~6 GB goes: the DirectML session keeps ~2.5 GB of host memory alongside VRAM, the CPU
+session holds the int4 weights plus their prepacked copies (~2.5 GB), embeddings + reranker ~0.6 GB, the rest
+is KV cache and arenas. Next steps in order of payoff: make the GPU-resident decode correct (removes the CPU
+session on GPU machines, → ~3.7 GB), or an ORT upgrade whose GQA/`GatherBlockQuantized` support lets the
+embedding itself be int4 (another ~0.75 GB).
+
+Model preparation recipe, in order: `last_logits.py` → `gemm_head.py` → `explicit_rotary.py` (GQA exports with
+`do_rotary=1`) → `shrink_embeddings.py` → `repack.py` (one data file, dead bytes dropped). All graph edits are
+streaming/low-memory and never rewrite the int4 weights.
+
 ## Windows-specific implementation notes
 
 - **Dot window**: `WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` — transparent, always on top, no taskbar entry, doesn't steal focus. Per-pixel alpha via `UpdateLayeredWindow` or a DirectComposition surface.

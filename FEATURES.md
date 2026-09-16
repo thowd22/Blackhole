@@ -172,7 +172,7 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 
 #### Ask-mode model (2026-09-15): Llama 3.2 3B Instruct, int4 ONNX, hybrid DirectML/CPU
 - Chosen from Qwen2.5-1.5B/3B, Qwen3-1.7B/4B, Phi-4-mini and Llama 3.2 3B under the rule "same engine, runs on AMD/NVIDIA/Intel GPUs via DirectML, has a Copilot+ NPU story". Table in PACKAGING.md.
-- Follow-ups: GPU-resident decode (`BLACKHOLE_DECODE=gpu`) aborts after the first retrieval — debug; peak working set ~9 GB with two sessions — reduce (fp16 for GPU decode, arena limits); DXGI adapter index differed between runs (0 vs 1) — verify DirectML device ids track it.
+- Memory (2026-09-16): peak working set 8.7 → 6.1 GB and decode 7.0 → 8.4 tok/s by shrinking the tied embedding matrix (fp16 embedding lookup, int4 LM head); disk 3.25 → 2.73 GB after repack. GPU-resident decode (would reach ~3.7 GB) is parked: its crash is fixed but DirectML's GQA cache convention is not yet reproduced. Details in PACKAGING.md § Memory.
 
 #### Ask-mode quality notes (from testing, 2026-09-15)
 - Retrieval is solved for small documents by whole-document context; the remaining errors are the 1.5B model's reasoning (e.g. reading "the job before Maxar" off a correct timeline).
