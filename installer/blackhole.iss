@@ -49,9 +49,9 @@ Source: "..\dist\stage\blackhole.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "blackhole.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\stage\onnxruntime.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\stage\DirectML.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\stage\llama-3.2-3b\model_q4f16.onnx"; DestDir: "{app}\llama-3.2-3b"; Flags: ignoreversion
-Source: "..\dist\stage\llama-3.2-3b\model_q4f16.onnx.data"; DestDir: "{app}\llama-3.2-3b"; Flags: ignoreversion nocompression
-Source: "..\dist\stage\llama-3.2-3b\tokenizer.json"; DestDir: "{app}\llama-3.2-3b"; Flags: ignoreversion
+Source: "..\dist\stage\qwen3-4b\model_q4f16.onnx"; DestDir: "{app}\qwen3-4b"; Flags: ignoreversion
+Source: "..\dist\stage\qwen3-4b\model_q4f16.onnx.data"; DestDir: "{app}\qwen3-4b"; Flags: ignoreversion nocompression
+Source: "..\dist\stage\qwen3-4b\tokenizer.json"; DestDir: "{app}\qwen3-4b"; Flags: ignoreversion
 Source: "..\dist\stage\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 Source: "..\dist\stage\LICENSE-MODELS.txt"; DestDir: "{app}"; Flags: ignoreversion
 

@@ -47,7 +47,7 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
 
 ## How it works
 
-Everything below runs inside one 275 MB executable plus a 2.3 GB model folder. There is exactly one
+Everything below runs inside one 275 MB executable plus a 2.7 GB model folder. There is exactly one
 inference engine in the whole app — **ONNX Runtime**, driven through **DirectML** so the same binary uses an
 AMD, NVIDIA or Intel GPU, and the same models run on the Copilot+ NPU providers (Qualcomm QNN, AMD Ryzen AI,
 Intel OpenVINO) when those land. The engine DLLs are compiled into the exe and unpacked beside it on first
@@ -102,7 +102,12 @@ unanswerable questions score as high as real ones — the lexical test could.
    *whole* thing; otherwise it gets the best chunks with their neighbours, in document order, up to ~1,400
    words. Questions about order or time get a forced `Timeline:` scratchpad — small models list dates
    correctly far more often than they reason about them in one shot.
-4. **Generation**: **Llama 3.2 3B Instruct**, int4, on ONNX Runtime, entirely on the GPU. The prompt pass
+4. **Generation**: **Qwen3-4B**, int4, on ONNX Runtime, entirely on the GPU — and it *thinks first*: the
+   prompt opens a `<think>` block, the model reasons privately for up to 128 tokens (ordering dates, picking
+   the right field of a form), then `</think>` is forced if it's still going and the answer streams. That
+   short pass took correct answers from 70 % to 82 % on the blind sets; 256 or 512 tokens scored no
+   better, so it stays short (~3 s). "Think before answering" in the right-click menu turns it off for
+   ~2 s direct answers. The prompt pass
    (~1,300 tokens, about a second) runs on a dynamic-shape DirectML session; decoding runs on a second,
    *static-shape* session that DirectML compiles into a single fused operator, so each token is one dispatch
    (~9 ms, 100+ tok/s) instead of 400. Both share one fixed-capacity KV cache that never leaves the GPU;
@@ -148,8 +153,9 @@ binary (`askeval`) that runs the actual pipeline and checks answers against rege
 | Right document first | 62 % | **84 %** |
 | Right document in top 3 | 92 % | 88 % |
 | "Not in your vault" | 4/4, no false alarms | 6/6 |
-| Correct answers (Llama 3.2 3B) | | **70 %** (31/44) |
-| Latency | 5 ms | ~1.1 s to first text, ~105 tok/s |
+| Correct answers, Qwen3-4B thinking | | **82 %** (36/44) |
+| Correct answers, direct (no thinking) | | 66–70 % (Qwen3-4B 29/44, Llama 3.2 3B 31/44) |
+| Latency | 5 ms | ~5 s to first text with thinking (~2 s without), ~50 tok/s |
 
 The full story — what was tried, what won, what lost and why (bigger embedders lost; LLM chunk enrichment
 lost; RRF lost out of sample; the reranker and title units won) — is in [RAG.md](RAG.md). Model selection,
@@ -160,21 +166,23 @@ the DirectML findings and the memory work are in [PACKAGING.md](PACKAGING.md).
 - **One engine, vendor-neutral.** ONNX Runtime + DirectML covers every consumer GPU from one binary, and the
   identical model files are what the NPU vendors ship. No CUDA, no llama.cpp, no per-vendor builds.
 - **Small models, strong pipeline.** A 33M-parameter embedder plus a 22M reranker beat a bigger embedder
-  alone in our tests, as the literature predicts. The 3B chat model was chosen over 1.5B and 4B candidates on
-  measured answers, speed and memory, not parameter count.
+  alone in our tests, as the literature predicts. The 4B model with a short thinking budget was chosen over
+  1.5B, 3B and 8B-class candidates on measured answers, speed and memory, not parameter count — and 128
+  thinking tokens beat 512, measured.
 - **Pixel art on purpose.** The dot is a procedurally rendered 32×32 sprite scaled with nearest-neighbour, drawn
   into a per-pixel-alpha layered window; the bubbles and panel match. It should feel like a desktop sticker,
   not an app.
-- **Honest about limits.** A 3B model misreads "before/after" off its own correct timeline sometimes, decoy-heavy
-  forms trip it, and one-line notes get buried under big PDFs in search. Those are the open items below.
+- **Honest about limits.** A 4B model still misses a multi-hop question across two fields of a form, and
+  colloquial questions with no word in common with a one-line note can't be retrieved. Those are the open
+  items below; RAG.md records every step that was measured, including the ones that made things worse.
 
 ## Installing
 
-Download `Blackhole-<version>-x64-setup.exe` (≈2.5 GB: app + ONNX Runtime/DirectML + Llama 3.2 3B) and run
+Download `Blackhole-<version>-x64-setup.exe` (≈2.9 GB: app + ONNX Runtime/DirectML + Qwen3-4B) and run
 it. Per-user install by default (no admin), optional start-at-sign-in and desktop shortcut. Your vault in
 `%LOCALAPPDATA%\Blackhole` survives updates; uninstall asks before deleting it. Requires Windows 10 1903+ /
 Windows 11 x64; any GPU with DirectML (the CPU is used otherwise, more slowly). While answering, the app uses
-about 3.7 GB of RAM and ~5 GB of VRAM (weights are held by both GPU sessions); with no GPU it falls back to the
+about 5.5 GB of RAM and ~6 GB of VRAM (weights are held by both GPU sessions); with no GPU it falls back to the
 CPU for everything at a few tokens per second.
 
 ## Building (from WSL)
@@ -187,7 +195,7 @@ rustup target add x86_64-pc-windows-gnu
 #   models/rerank-mxbai-int8/{model.onnx,tokenizer.json}  mixedbread-ai/mxbai-rerank-xsmall-v1 (onnx/model_quantized.onnx)
 #   models/qwen2.5/tokenizer.json                         Qwen/Qwen2.5-1.5B-Instruct (built-in fallback tokenizer)
 #   runtime/{onnxruntime.dll,DirectML.dll}                NuGet Microsoft.ML.OnnxRuntime.DirectML 1.20.1 / Microsoft.AI.DirectML 1.15.4
-#   models/llama-3.2-3b/                                  onnx-community/Llama-3.2-3B-Instruct model_q4 → tools/ pipeline → repack
+#   models/qwen3-4b/                                      onnx-community/Qwen3-4B-ONNX model_q4f16 → tools/ pipeline → repack
 ./build.sh             # cross-compiles and deploys over the installed app
 ./build-installer.sh   # stages exe + runtime + model and runs Inno Setup (winget install JRSoftware.InnoSetup)
 cargo build --release --bin askeval   # end-to-end evaluation binary
@@ -226,5 +234,5 @@ reasoning behind each in [FEATURES.md](FEATURES.md).
 
 ## Licence notes
 
-Blackhole bundles Llama 3.2 3B Instruct (Meta, Llama 3.2 Community License — "Built with Llama"), bge-small
+Blackhole bundles Qwen3-4B (Alibaba Cloud, Apache-2.0), bge-small
 (MIT), mxbai-rerank-xsmall (Apache-2.0) and ONNX Runtime + DirectML (Microsoft). See `installer/LICENSE-MODELS.txt`.

@@ -144,6 +144,27 @@ remaining third: a stronger reader now that decode is 100 tok/s (Qwen3-4B fp16 o
 and cell-aware form extraction (the PDF's stroked boxes are available from `pdf-extract`'s `stroke` callback,
 so a label and its value can be paired by cell instead of by row).
 
+## 2e. Reasoning (2026-09-16): Qwen3-4B with a 128-token thinking budget — 31 → 36/44
+
+Same 44 questions and retrieval as §2d. A model that reasons before answering was the obvious lever for the
+ordering and multi-field misses, and the GPU path made it affordable (50 tok/s → a 128-token think costs
+~3 s). Qwen3-4B (hybrid think mode, budgetable, DirectML/NPU family) against Llama 3.2 3B:
+
+| | Answers | Absent | To first text |
+|---|---|---|---|
+| Llama 3.2 3B, direct | 31/44 | 6/6 | 0.9 s |
+| Qwen3-4B, direct | 29/44 (refuses more) | 6/6 | 2.1 s |
+| **Qwen3-4B, think ≤128 — shipped** | **36/44 (82 %)** | 6/6 | 5.0 s |
+| Qwen3-4B, think ≤256 | 35/44 (+1 right answer the regex rejected) | 6/6 | 5.8 s |
+| Qwen3-4B, think ≤512 | 35/44 | 6/6 | 7.4 s |
+
+What flipped: the résumé ordering questions (q08, h07, b20-class), the customs multi-field questions (q04,
+b25), several decoys. Still missing: b23/b24 (two documents *and* arithmetic), h09 (must name the vehicle),
+b09/b11/b12 (retrieval of one-liners with no lexical overlap), b22 (refusal). The budget curve is flat past
+128: the model needs a short pass to order dates or pick a field, not a long one. A DirectML quirk found on
+the way (prompt passes 8–14 s when the prompt is 45–64 % of the cache capacity) and its fix are in
+PACKAGING.md.
+
 ## 3. Scaled-down design for Blackhole
 
 Everything below runs on what we already ship (ONNX Runtime + DirectML, bge-small, Qwen2.5-1.5B) plus one

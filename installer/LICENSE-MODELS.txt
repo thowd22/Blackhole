@@ -1,9 +1,9 @@
 Bundled models and runtime
 
-- Llama 3.2 3B Instruct (int4 ONNX), Meta Platforms, Inc. — Llama 3.2 Community License.
-  https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/LICENSE
-  "Built with Llama". Export: onnx-community/Llama-3.2-3B-Instruct, graph-edited by Blackhole's
-  tools (last-token logits, explicit rotary, fp16 embedding, int4 LM head).
+- Qwen3-4B (int4 weights, fp16 activations, ONNX), Alibaba Cloud / Qwen team — Apache-2.0.
+  https://huggingface.co/Qwen/Qwen3-4B/blob/main/LICENSE
+  Export: onnx-community/Qwen3-4B-ONNX (model_q4f16), graph-edited by Blackhole's tools
+  (last-token logits via Gather, Gemm LM head, single data file).
 - bge-small-en-v1.5 (embeddings), BAAI — MIT.
 - mxbai-rerank-xsmall-v1 (reranker), Mixedbread — Apache-2.0.
 - ONNX Runtime + DirectML, Microsoft — MIT (onnxruntime), Microsoft Software License (DirectML redistributable).
