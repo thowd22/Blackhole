@@ -17,6 +17,10 @@ pub const WM_BUBBLE_CLICKED: u32 = 0x8030;
 pub const WM_BUBBLE_EXPIRED: u32 = 0x8031;
 
 const TIMER_DISMISS: usize = 1;
+/// Steps the fade-in / fade-out (§1.3 pace rule: ~150 ms, stepped).
+const TIMER_FADE: usize = 2;
+const FADE_STEPS: i32 = 4;
+const FADE_STEP_MS: u32 = 40;
 const MAX_TEXT_UNITS: i32 = 130; // wrap width in sprite units (× pixel scale)
 
 const BG: u32 = 0x00_18_0C_1E; // dark violet
@@ -37,6 +41,13 @@ pub struct Bubble {
     font: HFONT,
     /// The × close box, in window coordinates.
     close: RECT,
+    /// Where the rendered bubble sits when fully shown, and whether it is above the dot.
+    pos: POINT,
+    size: WSIZE,
+    above: bool,
+    /// Fade progress 0..=FADE_STEPS (FADE_STEPS = fully shown) and its direction.
+    fade: i32,
+    fading_out: bool,
 }
 
 unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut Bubble> {
@@ -65,6 +76,11 @@ impl Bubble {
                 dc: HDC::default(),
                 font: HFONT::default(),
                 close: RECT::default(),
+                pos: POINT::default(),
+                size: WSIZE::default(),
+                above: true,
+                fade: 0,
+                fading_out: false,
             });
             let ptr = Box::into_raw(b);
             CreateWindowExW(
@@ -89,21 +105,65 @@ impl Bubble {
         b.anchor = anchor;
         b.unit = unit.max(1);
         b.sticky = timeout_ms.is_none();
+        // Pop in from the dot: a few alpha steps while it slides into place. A
+        // bubble caught mid fade-out just turns around.
+        if !IsWindowVisible(hwnd).as_bool() {
+            b.fade = 0;
+        }
+        b.fading_out = false;
         b.render_and_place();
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        SetTimer(Some(hwnd), TIMER_FADE, FADE_STEP_MS, None);
         let _ = KillTimer(Some(hwnd), TIMER_DISMISS);
         if let Some(ms) = timeout_ms {
             SetTimer(Some(hwnd), TIMER_DISMISS, ms, None);
         }
     }
 
+    /// Fade out, then hide. Reads as hidden (`is_visible`) straight away.
     pub unsafe fn hide(hwnd: HWND) {
         let _ = KillTimer(Some(hwnd), TIMER_DISMISS);
-        let _ = ShowWindow(hwnd, SW_HIDE);
+        let Some(b) = state(hwnd) else { return };
+        if !IsWindowVisible(hwnd).as_bool() || b.fading_out {
+            return;
+        }
+        b.fading_out = true;
+        SetTimer(Some(hwnd), TIMER_FADE, FADE_STEP_MS, None);
     }
 
     pub unsafe fn is_visible(hwnd: HWND) -> bool {
-        IsWindowVisible(hwnd).as_bool()
+        IsWindowVisible(hwnd).as_bool() && state(hwnd).is_some_and(|b| !b.fading_out)
+    }
+
+    /// One fade step; hides the window once a fade-out completes.
+    unsafe fn fade_step(&mut self) {
+        self.fade = if self.fading_out { self.fade - 1 } else { self.fade + 1 };
+        if self.fade <= 0 {
+            self.fade = 0;
+            self.fading_out = false;
+            let _ = KillTimer(Some(self.hwnd), TIMER_FADE);
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+            return;
+        }
+        if self.fade >= FADE_STEPS {
+            self.fade = FADE_STEPS;
+            let _ = KillTimer(Some(self.hwnd), TIMER_FADE);
+        }
+        self.present();
+    }
+
+    /// Push the rendered DIB to the screen at the current fade step: alpha
+    /// rises in FADE_STEPS steps while the bubble slides one unit per step
+    /// away from the dot into its final place.
+    unsafe fn present(&self) {
+        let remaining = FADE_STEPS - self.fade;
+        let slide = remaining * self.unit * if self.above { 1 } else { -1 };
+        let pos = POINT { x: self.pos.x, y: self.pos.y + slide };
+        let alpha = (255 * self.fade / FADE_STEPS) as u8;
+        let src = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 };
+        let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), pos.x, pos.y, self.size.cx, self.size.cy, SWP_NOACTIVATE);
+        let _ = UpdateLayeredWindow(self.hwnd, None, Some(&pos), Some(&self.size), Some(self.dc), Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
     }
 
     /// The dot moved: follow it.
@@ -273,12 +333,10 @@ impl Bubble {
             }
         }
 
-        let pos = POINT { x, y };
-        let size = WSIZE { cx: w, cy: h };
-        let src = POINT { x: 0, y: 0 };
-        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
-        let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
-        let _ = UpdateLayeredWindow(self.hwnd, None, Some(&pos), Some(&size), Some(self.dc), Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
+        self.pos = POINT { x, y };
+        self.size = WSIZE { cx: w, cy: h };
+        self.above = above;
+        self.present();
     }
 }
 
@@ -292,7 +350,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            if let Some(b) = state(hwnd) {
+            if let Some(b) = state(hwnd).filter(|b| !b.fading_out) {
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let c = b.close;
@@ -308,6 +366,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let dot = b.dot;
                 Bubble::hide(hwnd);
                 let _ = PostMessageW(Some(dot), WM_BUBBLE_EXPIRED, WPARAM(0), LPARAM(0));
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_FADE => {
+            if let Some(b) = state(hwnd) {
+                b.fade_step();
             }
             LRESULT(0)
         }

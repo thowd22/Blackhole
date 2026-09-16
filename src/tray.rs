@@ -15,7 +15,7 @@ const TRAY_ID: u32 = 1;
 /// Build an HICON from the idle sprite (32×32 ARGB).
 unsafe fn make_icon() -> HICON {
     let mut px = vec![0u32; SIZE * SIZE];
-    sprite::render(&mut px, 0, 0.0, Mood::Idle);
+    sprite::render(&mut px, &sprite::Anim::still(Mood::Idle));
     // Un-premultiply so the icon's straight-alpha ARGB is right.
     for p in px.iter_mut() {
         let a = *p >> 24;
