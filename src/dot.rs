@@ -8,8 +8,8 @@ use crate::config::{self, Config};
 use crate::drop::{self, DropTarget, WM_DROP_ENTER, WM_DROP_LEAVE, WM_DROP_SWALLOW};
 use crate::embed::Embedder;
 use crate::ingest::{Input, Report};
-use crate::search::{SearchWin, WM_ASK_STARTED, WM_SEARCH_CLOSED};
-use crate::sprite::{self, Mood, SIZE};
+use crate::search::{SearchWin, WM_ASK_FIRST_TOKEN, WM_ASK_STARTED, WM_SEARCH_CLOSED};
+use crate::sprite::{self, Anim, Mood, SIZE, SPECK_SIZE};
 use crate::startup;
 use crate::store::Store;
 use crate::tray::{self, WM_TRAY};
@@ -36,7 +36,12 @@ const TIMER_ANIM: usize = 1;
 /// Unload the LLM this long after the search panel closes.
 const TIMER_UNLOAD: usize = 2;
 const UNLOAD_AFTER_MS: u32 = 60_000;
-const FRAME_MS: u32 = 90;
+/// Animation tick while nothing but the ring is moving (idle, listening…).
+const IDLE_MS: u32 = 90;
+/// Faster tick while specks or a mood transition are on screen (~20 fps).
+const ACTIVE_MS: u32 = 50;
+/// Every mood change eases over this long — fast but visible, never a snap.
+const TRANSITION_MS: u32 = 150;
 const HOTKEY_SUMMON: i32 = 1;
 const HOTKEY_PASTE: i32 = 2;
 
@@ -83,9 +88,16 @@ pub struct Dot {
     embedder: Arc<Embedder>,
     ask: Arc<AskEngine>,
     drop_target: Option<IDropTarget>,
-    frame: u32,
+    /// App start; sprite motion runs on milliseconds since then.
+    t0: Instant,
+    last_tick: Instant,
+    /// Current animation timer period (IDLE_MS or ACTIVE_MS).
+    tick_ms: u32,
     phase: f32,
     mood: Mood,
+    /// The mood being eased away from, and when the change happened.
+    prev_mood: Mood,
+    mood_since: Instant,
     mood_until: Option<Instant>,
     pending: usize,
     /// Position before the last summon / centring, so it can go back.
@@ -95,6 +107,10 @@ pub struct Dot {
     drag_origin: POINT,
     win_origin: POINT,
     pixels: Vec<u32>,
+    /// 64×64 half-pixel speck overlay, composited over `pixels` at scale time.
+    specks: Vec<u32>,
+    /// What was last pushed to the screen, so identical frames cost nothing.
+    shown: (Vec<u32>, Vec<u32>),
     dib: HBITMAP,
     dib_bits: *mut u32,
     mem_dc: HDC,
@@ -107,6 +123,13 @@ pub struct Dot {
 
 unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut Dot> {
     (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Dot).as_mut()
+}
+
+/// Source-over of two premultiplied BGRA pixels.
+fn blend_over(dst: u32, src: u32) -> u32 {
+    let inv = 255 - (src >> 24);
+    let ch = |shift: u32| ((src >> shift) & 255) + ((dst >> shift) & 255) * inv / 255;
+    ch(24) << 24 | ch(16) << 16 | ch(8) << 8 | ch(0)
 }
 
 impl Dot {
@@ -131,9 +154,13 @@ impl Dot {
                 embedder,
                 ask,
                 drop_target: None,
-                frame: 0,
+                t0: Instant::now(),
+                last_tick: Instant::now(),
+                tick_ms: IDLE_MS,
                 phase: 0.0,
                 mood: Mood::Idle,
+                prev_mood: Mood::Idle,
+                mood_since: Instant::now(),
                 mood_until: None,
                 pending: 0,
                 home: None,
@@ -142,6 +169,8 @@ impl Dot {
                 drag_origin: POINT::default(),
                 win_origin: POINT::default(),
                 pixels: vec![0; SIZE * SIZE],
+                specks: vec![0; SPECK_SIZE * SPECK_SIZE],
+                shown: (Vec::new(), Vec::new()),
                 dib: HBITMAP::default(),
                 dib_bits: std::ptr::null_mut(),
                 mem_dc: HDC::default(),
@@ -188,6 +217,7 @@ impl Dot {
             let _ = DeleteObject(self.dib.into());
             let _ = DeleteDC(self.mem_dc);
         }
+        self.shown = (Vec::new(), Vec::new());
         let bi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -213,17 +243,32 @@ impl Dot {
         if self.dib_bits.is_null() {
             return;
         }
-        sprite::render(&mut self.pixels, self.frame, self.phase, self.mood);
+        let anim = self.anim();
+        sprite::render(&mut self.pixels, &anim);
+        let specks = sprite::render_specks(&mut self.specks, &anim);
+        if self.shown.0 == self.pixels && self.shown.1 == self.specks {
+            return; // nothing moved since the last frame
+        }
+        self.shown.0.clone_from(&self.pixels);
+        self.shown.1.clone_from(&self.specks);
 
-        // Nearest-neighbour upscale straight into the DIB.
+        // Nearest-neighbour upscale straight into the DIB; the speck overlay
+        // is sampled at twice the sprite resolution and composited on top.
         let mul = (side as usize) / SIZE;
         let dst = std::slice::from_raw_parts_mut(self.dib_bits, (side * side) as usize);
         for y in 0..side as usize {
             let sy = y / mul;
             let row = &self.pixels[sy * SIZE..sy * SIZE + SIZE];
+            let over = &self.specks[(y * 2 / mul) * SPECK_SIZE..(y * 2 / mul + 1) * SPECK_SIZE];
             let out = &mut dst[y * side as usize..(y + 1) * side as usize];
             for (x, px) in out.iter_mut().enumerate() {
                 *px = row[x / mul];
+                if specks {
+                    let s = over[x * 2 / mul];
+                    if s >> 24 != 0 {
+                        *px = blend_over(*px, s);
+                    }
+                }
             }
         }
 
@@ -236,26 +281,75 @@ impl Dot {
     }
 
     fn set_mood(&mut self, mood: Mood, for_ms: Option<u64>) {
-        self.mood = mood;
         self.mood_until = for_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
+        self.change_mood(mood);
+    }
+
+    /// Switch moods, easing from the current one over TRANSITION_MS.
+    fn change_mood(&mut self, mood: Mood) {
+        if mood == self.mood {
+            return;
+        }
+        let now = Instant::now();
+        let elapsed = now - self.mood_since;
+        let full = Duration::from_millis(TRANSITION_MS as u64);
+        // Going straight back mid-transition (drag in, drag out): run the same
+        // ease in reverse from where it is rather than restarting.
+        self.mood_since = if mood == self.prev_mood && elapsed < full { now - (full - elapsed) } else { now };
+        self.prev_mood = self.mood;
+        self.mood = mood;
+    }
+
+    /// The mood to fall back to when a temporary one ends.
+    unsafe fn base_mood(&self) -> Mood {
+        if self.pending > 0 {
+            Mood::Digesting
+        } else if self.search_open() {
+            Mood::Listening
+        } else {
+            Mood::Idle
+        }
+    }
+
+    /// Eased progress of the current mood transition; 1 once it is over.
+    fn blend(&self) -> f32 {
+        let t = self.mood_since.elapsed().as_millis() as f32 / TRANSITION_MS as f32;
+        if t >= 1.0 { 1.0 } else { t * t * (3.0 - 2.0 * t) }
+    }
+
+    fn anim(&self) -> Anim {
+        Anim {
+            t_ms: self.t0.elapsed().as_millis() as u32,
+            phase: self.phase,
+            mood: self.mood,
+            prev: self.prev_mood,
+            blend: self.blend(),
+        }
     }
 
     unsafe fn tick(&mut self) {
-        self.frame = self.frame.wrapping_add(1);
-        self.phase = (self.phase + 0.12 * sprite::speed(self.mood)) % (std::f32::consts::TAU * 30.0);
+        // Advance the ring by wall-clock time so its speed doesn't depend on the tick rate.
+        let now = Instant::now();
+        let dt = (now - self.last_tick).as_millis().min(250) as f32 / IDLE_MS as f32;
+        self.last_tick = now;
+        let blend = self.blend();
+        let speed = sprite::speed(self.prev_mood) + (sprite::speed(self.mood) - sprite::speed(self.prev_mood)) * blend;
+        self.phase = (self.phase + 0.12 * speed * dt) % (std::f32::consts::TAU * 30.0);
         if let Some(t) = self.mood_until {
-            if Instant::now() >= t {
+            if now >= t {
                 self.mood_until = None;
-                self.mood = if self.pending > 0 {
-                    Mood::Digesting
-                } else if self.search_open() {
-                    Mood::Listening
-                } else {
-                    Mood::Idle
-                };
+                let base = self.base_mood();
+                self.change_mood(base);
             }
         }
         self.redraw();
+        // Tick fast only while specks or a transition are moving; idle stays cheap.
+        let busy = sprite::has_specks(self.mood) || self.blend() < 1.0;
+        let want = if busy { ACTIVE_MS } else { IDLE_MS };
+        if want != self.tick_ms {
+            self.tick_ms = want;
+            SetTimer(Some(self.hwnd), TIMER_ANIM, want, None);
+        }
     }
 
     unsafe fn rect(&self) -> RECT {
@@ -595,7 +689,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             d.drop_target = Some(target);
             let _ = RegisterHotKey(Some(hwnd), HOTKEY_SUMMON, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_SPACE.0 as u32);
             let _ = RegisterHotKey(Some(hwnd), HOTKEY_PASTE, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_V.0 as u32);
-            SetTimer(Some(hwnd), TIMER_ANIM, FRAME_MS, None);
+            SetTimer(Some(hwnd), TIMER_ANIM, IDLE_MS, None);
             let n = d.store.lock().unwrap().count();
             tray::add(hwnd, &format!("Blackhole — {n} items inside"));
             d.redraw();
@@ -734,7 +828,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_SEARCH_CLOSED => {
             if let Some(d) = state(hwnd) {
-                if d.mood == Mood::Listening {
+                if matches!(d.mood, Mood::Listening | Mood::Thinking) {
                     d.set_mood(Mood::Idle, None);
                 }
                 // Panel closed: let the LLM go after a minute of not being needed.
@@ -753,7 +847,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_ASK_STARTED => {
             if let Some(d) = state(hwnd) {
+                // Breathe while the model reads and reasons; the first token ends it.
+                if d.search_open() {
+                    d.set_mood(Mood::Thinking, None);
+                }
                 d.tutorial_event(Event::Asked);
+            }
+            LRESULT(0)
+        }
+        WM_ASK_FIRST_TOKEN => {
+            if let Some(d) = state(hwnd) {
+                if d.mood == Mood::Thinking {
+                    let base = d.base_mood();
+                    d.set_mood(base, None);
+                }
             }
             LRESULT(0)
         }

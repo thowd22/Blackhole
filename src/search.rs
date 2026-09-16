@@ -21,6 +21,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub const WM_SEARCH_CLOSED: u32 = 0x8010;
 pub const WM_ASK_STARTED: u32 = 0x8014;
+/// Posted to the dot once per question when the first answer token (or the end) arrives.
+pub const WM_ASK_FIRST_TOKEN: u32 = 0x8015;
 
 const ID_EDIT: usize = 100;
 const ID_LIST: usize = 101;
@@ -185,6 +187,7 @@ impl SearchWin {
     unsafe fn cancel_job(&mut self) {
         if let Some(j) = self.job.take() {
             j.cancel.store(true, Ordering::Relaxed);
+            let _ = PostMessageW(Some(self.dot), WM_ASK_FIRST_TOKEN, WPARAM(0), LPARAM(0)); // stop the dot's thinking
         }
     }
 
@@ -212,6 +215,9 @@ impl SearchWin {
         }
         match msg {
             WM_ASK_TOKEN => {
+                if self.answer_text.is_empty() {
+                    let _ = PostMessageW(Some(self.dot), WM_ASK_FIRST_TOKEN, WPARAM(0), LPARAM(0));
+                }
                 self.answer_text.push_str(&text);
                 let _ = SetWindowTextW(self.answer, PCWSTR(wide(&self.answer_text).as_ptr()));
                 let len = self.answer_text.encode_utf16().count();
@@ -220,6 +226,7 @@ impl SearchWin {
             }
             WM_ASK_STATUS => self.set_status(&text),
             WM_ASK_DONE => {
+                let _ = PostMessageW(Some(self.dot), WM_ASK_FIRST_TOKEN, WPARAM(0), LPARAM(0));
                 if self.answer_text.is_empty() {
                     let _ = SetWindowTextW(self.answer, PCWSTR(wide(&text).as_ptr()));
                     self.set_status("");
