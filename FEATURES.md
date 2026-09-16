@@ -34,6 +34,8 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 | Error | Ring flickers red for a moment |
 | Search open | Ring holds steady and slightly brighter |
 
+- **Animation pace rule (2026-09-16)**: every transition (mood change, panel open/close, bubble in/out, resize) is animated — fast but visible, ~120–180 ms, eased, still stepped on the pixel grid; nothing snaps and nothing lingers.
+- **Thinking animation** (2026-09-16): while the LLM is reasoning or generating, the dot shows it — ring pulses in a slow "breathing" rhythm with a single bright speck orbiting once per second, and the answer box shows a pixel ellipsis that ticks; both stop the instant the first answer token streams. Replaces the static "thinking over N excerpts…" line as the primary signal (the line stays as detail).
 - **Smoother particle motion** (digesting state): the specks currently jump pixel to pixel at the sprite's 32×32 grid and ~11 fps. Smooth them by moving along sub-pixel paths and rendering with 2×2 "half-pixel" steps at the output scale (still snapped to the pixel-art grid, just a finer one), easing velocity along the spiral, and raising the animation tick to ~20 fps only while particles are on screen.
 
 ### 1.4 Opacity & unobtrusiveness — P1
@@ -67,6 +69,8 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - Show/hide the dot.
 - Paste clipboard directly into Blackhole without dragging (ingest the current clipboard contents).
 - Open search from anywhere without moving the dot.
+- **Ctrl+Shift+N — summon to mouse and open a new note** (2026-09-16): the dot warps to the cursor, the panel opens on the Notes tab with an empty note ready to type into (see §5.8).
+- **Screenshot shortcut** (2026-09-16): see §3.6; a global shortcut (default Ctrl+Shift+S) and a panel button start a drag-region capture.
 
 ### 2.5 System tray icon — P1
 - A tray icon (pixel black hole) so the app has a home when the dot is hidden, for start-at-login setup, and so Windows has somewhere to put it.
@@ -74,6 +78,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - Closing/hiding the dot never quits; quitting is explicit from the tray or dot menu.
 
 ### 2.6 Right-click menu — P1
+- **Default view** submenu (2026-09-16): *Notes* or *Files* — which tab the panel opens on (left-click and Ctrl+Shift+Space). Ctrl+Shift+N always opens Notes.
 - Paste from clipboard
 - Open search
 - Recent items
@@ -106,6 +111,11 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 | HTML / URLs dropped from a browser | Fetch & extract readable text | P1 |
 | Audio | Transcription via small on-device model | P2 |
 | Anything else | Metadata + filename + any extractable strings | P0 |
+
+### 3.6 Screenshot tool — P1 (2026-09-16)
+- **Drag-region only**: a global shortcut (Ctrl+Shift+S) or the panel's camera button dims the screen; drag a rectangle; release swallows it. No full-screen or window modes — one gesture, on purpose.
+- The capture is ingested like a dropped image: PNG stored in the vault, findable by time/title, and OCR'd once §3.3's OCR lands so its text is searchable. A speech bubble confirms ("swallowed a screenshot, 412×188").
+- Esc cancels; multi-monitor and per-monitor DPI respected (capture in physical pixels).
 
 ### 3.4 Storage policy — P1
 - Choose per install: **copy** dropped files into the Blackhole vault, or **reference** the original path.
@@ -183,8 +193,9 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 - Simple filters: images / text / files / this week.
 
 ### 5.5 Panel sizing — P1
-- **Auto-resize after a search**: the panel grows/shrinks to fit the result count (up to a cap) instead of always showing a fixed number of empty rows.
-- **Drag-resizable**: grab any edge/corner to resize; the size is remembered per user. Row count and snippet width follow the panel size.
+- **Resize to content**: the panel grows/shrinks to fit what it shows — result count, answer length, note height — up to a cap, instead of a fixed number of empty rows. Animated (§1.3 pace rule).
+- **Corner drag**: a pixel-art grip in the bottom-right corner; dragging it resizes the panel. The dragged size is saved to the config and restored on the next start; it becomes the cap for content-based resizing until dragged again.
+- **Restore the previous view** (2026-09-16): clicking away closes the panel but keeps its state — query text, results, streamed answer, open note, scroll position, size. The next open shows exactly what was there; Esc twice (or a new query) clears it.
 
 ### 5.6 Rich results — P1
 - **Code blocks**: snippets and previews from code files / fenced ```` ``` ```` blocks render monospace with the language tag, preserving indentation; a hit inside a code block shows the enclosing block, not a one-line fragment.
@@ -200,6 +211,15 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 ### 5.7 Item actions — P1
 - Open, copy, reveal, re-index, delete ("let it escape" — with confirmation).
 - Tag / rename display title.
+
+### 5.8 Notes tab — built-in editor — P1 (2026-09-16)
+- The panel gets two tabs: **Files** (today's search/ask view) and **Notes**: direct note-taking inside Blackhole. A note is a vault item like any other (searchable, askable, MCP-retrievable) that stays editable; saving is automatic on every pause.
+- Ctrl+Shift+N summons the dot and opens a fresh note; the right-click **Default view** picks which tab opens otherwise (§2.6).
+- **Editor with LSP support**: the goal is a real editor, not a text box — syntax highlighting, completion and diagnostics for code snippets, markdown for prose. Options, to decide when this is built:
+  1. **Package Neovim**: ship `nvim` (≈10 MB, MIT) and embed it — either a terminal control hosting `nvim --embed`/`--headless` over its msgpack-RPC UI protocol, drawn with the panel's pixel font (the "external UI" route Neovim supports natively), or launch it in a Windows Terminal/ConHost window positioned over the panel. Gives LSP, treesitter, the user's own config for free; the cost is a modal editor for non-vim users (a `-u` starter config with insert-mode defaults mitigates that).
+  2. A native pixel-styled edit control with an LSP client speaking to external servers (`rust-analyzer`, `marksman`, …): full control of the look, much more work.
+  Leaning to (1): it is the only way "LSP support" is honest at this project's size.
+- Notes render with §5.6's rich formatting in the Files view and previews; the raw text is what's stored.
 
 ---
 
