@@ -105,7 +105,7 @@ fn hash_of(e: &Extracted) -> String {
 /// only held for the final write so searches stay responsive meanwhile.
 /// Each chunk is embedded with the item title in front so a fragment of a
 /// résumé still "knows" it is from a résumé.
-fn embed_item(store: &Mutex<Store>, embedder: &Embedder, item_id: i64, title: &str, content: &str) {
+pub fn embed_item(store: &Mutex<Store>, embedder: &Embedder, item_id: i64, title: &str, content: &str) {
     let chunks: Vec<(String, Vec<f32>)> = chunk(content)
         .into_iter()
         .filter_map(|c| embedder.embed(&format!("{title}\n{c}")).ok().map(|v| (c, v)))

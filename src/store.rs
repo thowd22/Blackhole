@@ -311,6 +311,11 @@ impl Store {
             .collect()
     }
 
+    #[allow(dead_code)]
+    pub fn title_of(&self, id: i64) -> Option<String> {
+        self.conn.query_row("SELECT title FROM items WHERE id = ?1", params![id], |r| r.get(0)).ok()
+    }
+
     /// Does any item contain this word?
     pub fn contains_term(&self, term: &str) -> bool {
         self.items_containing(term) > 0

@@ -18,15 +18,23 @@ src, dst = sys.argv[1], sys.argv[2]
 m = onnx.load(src, load_external_data=False)
 g = m.graph
 
-# Point external tensors at a data file named after the output graph.
-data_name = os.path.basename(dst) + ".data"
+# External data: a single data file is renamed after the output graph; several
+# (transformers.js splits at 2 GB) keep their names, so write the graph beside them.
 old_names = set()
 for t in g.initializer:
     if uses_external_data(t):
         for kv in t.external_data:
             if kv.key == "location":
                 old_names.add(kv.value)
-                kv.value = data_name
+data_name = os.path.basename(dst) + ".data"
+if len(old_names) == 1 and os.path.abspath(src) != os.path.abspath(dst):
+    for t in g.initializer:
+        if uses_external_data(t):
+            for kv in t.external_data:
+                if kv.key == "location":
+                    kv.value = data_name
+else:
+    data_name = None
 
 prod = {o: n for n in g.node for o in n.output}
 n = prod["logits"]
@@ -44,7 +52,9 @@ for o in g.output:
     if o.name == "logits":
         o.type.tensor_type.shape.dim[1].ClearField("dim_param")
         o.type.tensor_type.shape.dim[1].dim_value = 1
-onnx.save(m, dst)
+tmp = dst + ".tmp"
+onnx.save(m, tmp)
+os.replace(tmp, dst)
 print("wrote", dst, "(LM head:", n.op_type + ")")
 if old_names:
-    print("external data:", ", ".join(sorted(old_names)), "->", data_name)
+    print("external data:", ", ".join(sorted(old_names)), "->", data_name or "unchanged")

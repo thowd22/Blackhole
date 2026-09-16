@@ -23,6 +23,8 @@ windows = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
     "Win32_System_Com_StructuredStorage",
 ] }
 windows-core = "0.61"
@@ -32,9 +34,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 dirs = "5"
-ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic", "directml", "api-20"] }
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic", "directml", "api-20", "half"] }
 tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
 anyhow = "1"
+regex = "1"
+half = "2"
 
 [profile.release]
 # Inference kernels (candle, tract) need real optimisation; size is dominated by the models anyway.

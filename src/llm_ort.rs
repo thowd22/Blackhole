@@ -19,8 +19,22 @@ use tokenizers::Tokenizer;
 
 static TOKENIZER_QWEN2: &[u8] = include_bytes!("../models/qwen2.5/tokenizer.json");
 
-const IM_END: u32 = 151645;
-const END_OF_TEXT: u32 = 151643;
+/// Chat-template families, detected from the tokenizer's special tokens so any
+/// instruct export can be dropped next to the exe with its `tokenizer.json`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Family {
+    /// Qwen2.5 / Qwen3 / most others: <|im_start|>role\n…<|im_end|>
+    ChatMl,
+    /// Llama 3.x: <|start_header_id|>role<|end_header_id|>…<|eot_id|>
+    Llama3,
+    /// Phi-3.5 / Phi-4-mini: <|role|>…<|end|>
+    Phi,
+    /// Gemma: <start_of_turn>role\n…<end_of_turn>
+    Gemma,
+}
+
+/// Special-token strings that end a turn, per family; resolved to ids from the tokenizer.
+const STOP_TOKENS: &[&str] = &["<|im_end|>", "<|endoftext|>", "<|eot_id|>", "<|end_of_text|>", "<|end|>", "<end_of_turn>", "<eos>"];
 const MAX_NEW_TOKENS: usize = 260;
 const PREFILL_TIMELINE: &str = "Timeline:\n";
 
@@ -31,6 +45,10 @@ pub struct Source<'a> {
 }
 
 pub struct Llm {
+    family: Family,
+    /// Qwen3-style models: an empty think block selects non-thinking mode.
+    no_think: bool,
+    eos: Vec<u32>,
     /// Decode session (CPU provider); also does the prompt pass when there is no GPU.
     cpu: Session,
     /// Prompt-pass session on DirectML, if a GPU is available.
@@ -41,6 +59,8 @@ pub struct Llm {
     head_dim: usize,
     /// HF-style exports take explicit `position_ids`; GenAI exports derive positions from the mask.
     wants_position_ids: bool,
+    /// fp16 exports carry the KV cache as float16.
+    kv_f16: bool,
     pub backend: &'static str,
     #[allow(dead_code)]
     pub name: String,
@@ -50,12 +70,41 @@ fn ok<T, E: std::fmt::Display>(r: Result<T, E>) -> anyhow::Result<T> {
     r.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Size of a model = graph file + its external data file (`<name>.onnx.data`), if any.
-fn model_size(p: &Path) -> u64 {
-    let graph = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-    let mut data = p.as_os_str().to_owned();
-    data.push(".data");
-    graph + std::fs::metadata(PathBuf::from(data)).map(|m| m.len()).unwrap_or(0)
+/// Size of a model = graph file + every external data file beside it
+/// (`<name>.onnx.data`, `<name>.onnx_data`, `<name>.onnx_data_1`, …).
+pub fn model_size(p: &Path) -> u64 {
+    let Some(stem) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else { return 0 };
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    rd.flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&stem))
+        .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+        .sum()
+}
+
+/// A model's tokenizer: `tokenizer.json` beside it, else the built-in Qwen2.5 one.
+fn tokenizer_for(path: &Path) -> anyhow::Result<Tokenizer> {
+    let beside = path.parent().unwrap_or(Path::new(".")).join("tokenizer.json");
+    let bytes = std::fs::read(&beside).unwrap_or_else(|_| TOKENIZER_QWEN2.to_vec());
+    Tokenizer::from_bytes(&bytes).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn detect_family(tok: &Tokenizer) -> Family {
+    let has = |t: &str| tok.token_to_id(t).is_some();
+    if has("<|start_header_id|>") {
+        Family::Llama3
+    } else if has("<start_of_turn>") {
+        Family::Gemma
+    } else if has("<|im_start|>") {
+        Family::ChatMl
+    } else if has("<|user|>") {
+        Family::Phi
+    } else {
+        Family::ChatMl
+    }
 }
 
 /// Find an ONNX LLM: next to the exe, then in the vault folder. Largest model wins.
@@ -127,10 +176,16 @@ impl Llm {
         let mut kv_heads = 2;
         let mut head_dim = 128;
         let mut wants_position_ids = false;
+        let mut kv_f16 = false;
         for input in session.inputs() {
             let name = input.name();
             if name == "position_ids" {
                 wants_position_ids = true;
+            }
+            if name == "past_key_values.0.key" {
+                if let ort::value::ValueType::Tensor { ty, .. } = input.dtype() {
+                    kv_f16 = *ty == ort::value::TensorElementType::Float16;
+                }
             }
             if name.starts_with("past_key_values.") && name.ends_with(".key") {
                 layers += 1;
@@ -145,9 +200,13 @@ impl Llm {
         if layers == 0 {
             anyhow::bail!("not a decoder with past_key_values inputs");
         }
-        let tok = Tokenizer::from_bytes(TOKENIZER_QWEN2).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let tok = tokenizer_for(path)?;
+        let family = detect_family(&tok);
+        let no_think = family == Family::ChatMl && tok.token_to_id("<think>").is_some();
+        let eos: Vec<u32> = STOP_TOKENS.iter().filter_map(|t| tok.token_to_id(t)).collect();
+        crate::util::log(&format!("llm: {} layout, {family:?} template{}, {} stop tokens, kv {}", if wants_position_ids { "HF" } else { "GenAI" }, if no_think { " (no-think)" } else { "" }, eos.len(), if kv_f16 { "f16" } else { "f32" }));
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Llm { cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, backend, name })
+        Ok(Llm { family, no_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, backend, name })
     }
 
     fn is_temporal(question: &str) -> bool {
@@ -157,22 +216,42 @@ impl Llm {
             .any(|k| q.split(|c: char| !c.is_alphanumeric()).any(|w| w == *k))
     }
 
-    fn prompt(question: &str, sources: &[Source]) -> String {
-        let mut p = String::new();
-        p.push_str(concat!(
-            "<|im_start|>system\n",
-            "You are Blackhole, a search assistant for the user's own files. Answer from the excerpts provided; do not mention excerpts or their numbers. ",
-            "If the question involves order or time, first write a line 'Timeline:' listing every relevant entry with its dates from newest to oldest, then answer on a new line starting with 'Answer:', reading the answer off the timeline. ",
-            "Otherwise answer directly in one or two plain sentences. ",
-            "Only if the excerpts contain nothing relevant, reply: I couldn't find that in your files.",
-            "<|im_end|>\n",
-        ));
-        p.push_str("<|im_start|>user\n");
+    fn prompt(&self, question: &str, sources: &[Source]) -> String {
+        // The timeline scratchpad is prefilled for time/order questions only; telling the
+        // model about it in general made it write one for every question.
+        let temporal = Self::is_temporal(question);
+        let system = if temporal {
+            concat!(
+                "You are Blackhole, a search assistant for the user's own files. Answer from the excerpts provided; do not mention excerpts or their numbers. ",
+                "The question is about order or time: first list every relevant entry with its dates from newest to oldest under 'Timeline:', then answer on a new line starting with 'Answer:', reading the answer off the timeline. ",
+                "Only if the excerpts contain nothing relevant, reply: I couldn't find that in your files.",
+            )
+        } else {
+            concat!(
+                "You are Blackhole, a search assistant for the user's own files. Answer from the excerpts provided; do not mention excerpts or their numbers. ",
+                "Answer directly in one or two plain sentences, quoting names, numbers and dates exactly as written. ",
+                "Only if the excerpts contain nothing relevant, reply: I couldn't find that in your files.",
+            )
+        };
+        let mut user = String::new();
         for (i, s) in sources.iter().enumerate() {
-            p.push_str(&format!("Excerpt {} (from {}):\n{}\n\n", i + 1, s.title, s.text.trim()));
+            user.push_str(&format!("Excerpt {} (from {}):\n{}\n\n", i + 1, s.title, s.text.trim()));
         }
-        p.push_str(&format!("Question: {}<|im_end|>\n<|im_start|>assistant\n", question.trim()));
-        if Self::is_temporal(question) {
+        user.push_str(&format!("Question: {}", question.trim()));
+
+        let mut p = match self.family {
+            Family::ChatMl => format!("<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n"),
+            Family::Llama3 => format!(
+                "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+            ),
+            Family::Phi => format!("<|system|>{system}<|end|><|user|>{user}<|end|><|assistant|>"),
+            // Gemma has no system role: fold the instructions into the user turn.
+            Family::Gemma => format!("<bos><start_of_turn>user\n{system}\n\n{user}<end_of_turn>\n<start_of_turn>model\n"),
+        };
+        if self.no_think {
+            p.push_str("<think>\n\n</think>\n\n");
+        }
+        if temporal {
             p.push_str(PREFILL_TIMELINE);
         }
         p
@@ -191,16 +270,30 @@ impl Llm {
         piece.ends_with('\n') && lines.iter().any(|l| *l == last)
     }
 
+    /// Greedy pick over the last position's logits (fp32 or fp16 exports).
     fn argmax(logits: &DynValue) -> anyhow::Result<u32> {
-        let (shape, data) = ok(logits.try_extract_tensor::<f32>())?;
-        let vocab = *shape.last().unwrap_or(&(data.len() as i64)) as usize;
-        let last = &data[data.len() - vocab..];
-        Ok(last.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |b, (i, &x)| if x > b.1 { (i, x) } else { b }).0 as u32)
+        fn pick<T: Copy + Into<f32>>(shape: &[i64], data: &[T]) -> u32 {
+            let vocab = *shape.last().unwrap_or(&(data.len() as i64)) as usize;
+            let last = &data[data.len() - vocab..];
+            last.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |b, (i, &x)| { let x: f32 = x.into(); if x > b.1 { (i, x) } else { b } }).0 as u32
+        }
+        if let Ok((shape, data)) = logits.try_extract_tensor::<f32>() {
+            return Ok(pick(shape, data));
+        }
+        let (shape, data) = ok(logits.try_extract_tensor::<half::f16>())?;
+        Ok(pick(shape, data))
     }
 
     fn empty_past(&self) -> anyhow::Result<Vec<DynValue>> {
+        let shape = [1usize, self.kv_heads, 0, self.head_dim];
         (0..self.layers * 2)
-            .map(|_| Ok(ok(Tensor::<f32>::from_array(([1usize, self.kv_heads, 0, self.head_dim], Vec::<f32>::new())))?.into_dyn()))
+            .map(|_| {
+                Ok(if self.kv_f16 {
+                    ok(Tensor::<half::f16>::from_array((shape, Vec::<half::f16>::new())))?.into_dyn()
+                } else {
+                    ok(Tensor::<f32>::from_array((shape, Vec::<f32>::new())))?.into_dyn()
+                })
+            })
             .collect()
     }
 
@@ -284,9 +377,14 @@ impl Llm {
         cancel: &AtomicBool,
         mut on_token: impl FnMut(&str),
     ) -> anyhow::Result<String> {
-        let prompt = Self::prompt(question, sources);
+        let prompt = self.prompt(question, sources);
         let enc = self.tok.encode(prompt, false).map_err(|e| anyhow::anyhow!("{e}"))?;
         let prompt_ids: Vec<u32> = enc.get_ids().to_vec();
+        if std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some() {
+            let head: Vec<String> = prompt_ids.iter().take(12).map(|i| i.to_string()).collect();
+            let tail: Vec<String> = prompt_ids.iter().rev().take(8).rev().map(|i| i.to_string()).collect();
+            crate::util::log(&format!("llm prompt: {} tokens, head [{}] tail [{}] eos {:?}", prompt_ids.len(), head.join(" "), tail.join(" "), self.eos));
+        }
 
         let mut out = String::new();
         if Self::is_temporal(question) {
@@ -298,9 +396,11 @@ impl Llm {
         let (mut next, mut past) = self.step(&prompt_ids, 0, past)?;
         let mut len = prompt_ids.len();
         let mut generated: Vec<u32> = Vec::new();
-        let mut decoded_upto = 0;
+        // Decode the whole sequence each step and emit the new suffix: decoding a
+        // slice of tokens on its own drops/adds leading spaces ("7. 73").
+        let mut emitted = String::new();
         for _ in 0..MAX_NEW_TOKENS {
-            if cancel.load(Ordering::Relaxed) || next == IM_END || next == END_OF_TEXT {
+            if cancel.load(Ordering::Relaxed) || self.eos.contains(&next) {
                 break;
             }
             generated.push(next);
@@ -310,14 +410,15 @@ impl Llm {
             if stuck {
                 break;
             }
-            if let Ok(text) = self.tok.decode(&generated[decoded_upto..], true) {
-                if !text.contains('\u{FFFD}') {
+            if let Ok(full) = self.tok.decode(&generated, true) {
+                if !full.ends_with('\u{FFFD}') && full.len() > emitted.len() && full.starts_with(&emitted) {
+                    let text = full[emitted.len()..].to_string();
                     if text.contains('\n') && Self::repeats_line(&out, &text) {
                         break;
                     }
                     on_token(&text);
                     out.push_str(&text);
-                    decoded_upto = generated.len();
+                    emitted = full;
                 }
             }
             let (n, p) = self.step(&[next], len, past)?;
