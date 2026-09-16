@@ -51,6 +51,46 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
   notifications later; a right-click menu has sizes, tray options, start-at-sign-in and a "center on new
   message" toggle. There's a tray icon so the dot can hide.
 
+## Notes
+
+The panel has two tabs, **Files** and **Notes**. Notes are written right in Blackhole: **Ctrl+Shift+N** summons the
+dot to your mouse with a fresh note open (or press **+** in the panel, Ctrl+N inside it). Notes save themselves
+600 ms after you pause and are re-embedded in the background, so a note is a vault item like any other — it
+shows up in search, ask mode and MCP `retrieve` — but stays editable: open it from the list, or from a search
+hit in Files. Ctrl+Tab switches tabs; right-click → **Default view** picks which one opens.
+
+The editor is **Neovim** — a real one, with line numbers, markdown highlighting, undo, visual mode, `:`
+commands, and any language server you have installed — drawn in Blackhole's own font and colours so it
+doesn't look like a terminal glued on. New notes open in insert mode; Esc in normal mode closes the panel.
+
+## Using it from agents (MCP)
+
+Blackhole is an **MCP server**, so Claude Code (or any MCP client) can use your vault as memory: `retrieve`
+to look things up, `put` to remember something, `notify` to pop a speech bubble from the dot when a job is
+done. The running dot serves it on `127.0.0.1` only; `blackhole.exe --mcp` is a stdio bridge that starts the
+dot if it isn't running. Because WSL can run Windows programs, the same command works from both sides:
+
+```sh
+# Windows (PowerShell / cmd)
+claude mcp add --scope user blackhole -- "C:\Users\<you>\AppData\Local\Programs\Blackhole\blackhole.exe" --mcp
+# WSL
+claude mcp add --scope user blackhole -- /mnt/c/Users/<you>/AppData/Local/Programs/Blackhole/blackhole.exe --mcp
+```
+
+Any other client: command `blackhole.exe`, args `["--mcp"]`, stdio transport. Or talk HTTP directly: `POST
+http://127.0.0.1:47811/mcp` with `Authorization: Bearer <token>` from `%LOCALAPPDATA%\Blackhole\mcp.json`.
+`put` goes through the same pipeline as a drop (extract → chunk → embed) and the dot animates; `retrieve`
+returns each hit's title, source path, snippet and best-matching passage.
+
+## Installing
+
+Download `Blackhole-<version>-x64-setup.exe` (≈2.9 GB: app + ONNX Runtime/DirectML + Qwen3-4B) and run
+it. Per-user install by default (no admin), optional start-at-sign-in and desktop shortcut. Your vault in
+`%LOCALAPPDATA%\Blackhole` survives updates; uninstall asks before deleting it. Requires Windows 10 1903+ /
+Windows 11 x64; any GPU with DirectML (the CPU is used otherwise, more slowly). While answering, the app uses
+about 5.5 GB of RAM and ~6 GB of VRAM (weights are held by both GPU sessions); with no GPU it falls back to the
+CPU for everything at a few tokens per second.
+
 ## How it works
 
 Everything below runs inside one 275 MB executable plus a 2.7 GB model folder. There is exactly one
@@ -148,6 +188,17 @@ Any instruct model dropped beside the exe works if its `tokenizer.json` sits nex
 (ChatML, Llama 3, Phi, Gemma), stop tokens and fp16/fp32 cache layout are detected from the tokenizer and the
 graph. The largest model in the exe folder or its subfolders is used.
 
+### The note editor
+
+Blackhole ships an unmodified `nvim.exe` beside its own exe, runs it as
+`nvim --embed`, and draws Neovim's screen grid itself in the panel's pixel font and palette (Neovim's
+"external UI" protocol over msgpack-RPC, `src/nvim.rs`). So a note gets line numbers, treesitter markdown
+highlighting, undo, visual mode, `:` commands, and any LSP server you have on your PATH (`marksman` for
+markdown, `rust-analyzer`, `pyright`, …) — with the block/bar cursor, orange line-number highlight and
+dark-violet ground of the rest of the app. Notes start in insert mode; Esc in normal mode closes the panel;
+Ctrl+Tab / Ctrl+N / Ctrl+Del stay Blackhole's. The init file Blackhole writes (`%LOCALAPPDATA%\Blackhole\nvim-init.lua`)
+sets the look and `number`; if `nvim.exe` isn't there (portable exe alone) a plain text box takes its place.
+
 ### Measured, not guessed
 
 Every retrieval and model decision in this repo was made against question sets over a real vault, with a
@@ -182,51 +233,6 @@ the DirectML findings and the memory work are in [PACKAGING.md](PACKAGING.md).
 - **Honest about limits.** A 4B model still misses a multi-hop question across two fields of a form, and
   colloquial questions with no word in common with a one-line note can't be retrieved. Those are the open
   items below; RAG.md records every step that was measured, including the ones that made things worse.
-
-## Notes
-
-The panel has two tabs, **Files** and **Notes**. Notes are written right in Blackhole: **Ctrl+Shift+N** summons the
-dot to your mouse with a fresh note open (or press **+** in the panel, Ctrl+N inside it). Notes save themselves
-600 ms after you pause and are re-embedded in the background, so a note is a vault item like any other — it
-shows up in search, ask mode and MCP `retrieve` — but stays editable: open it from the list, or from a search
-hit in Files. Ctrl+Tab switches tabs; right-click → **Default view** picks which one opens.
-
-The editor is **Neovim**, embedded. Blackhole ships an unmodified `nvim.exe` beside its own exe, runs it as
-`nvim --embed`, and draws Neovim's screen grid itself in the panel's pixel font and palette (Neovim's
-"external UI" protocol over msgpack-RPC, `src/nvim.rs`). So a note gets line numbers, treesitter markdown
-highlighting, undo, visual mode, `:` commands, and any LSP server you have on your PATH (`marksman` for
-markdown, `rust-analyzer`, `pyright`, …) — with the block/bar cursor, orange line-number highlight and
-dark-violet ground of the rest of the app. Notes start in insert mode; Esc in normal mode closes the panel;
-Ctrl+Tab / Ctrl+N / Ctrl+Del stay Blackhole's. The init file Blackhole writes (`%LOCALAPPDATA%\Blackhole\nvim-init.lua`)
-sets the look and `number`; if `nvim.exe` isn't there (portable exe alone) a plain text box takes its place.
-
-## Using it from agents (MCP)
-
-Blackhole is an **MCP server**, so Claude Code (or any MCP client) can use your vault as memory: `retrieve`
-to look things up, `put` to remember something, `notify` to pop a speech bubble from the dot when a job is
-done. The running dot serves it on `127.0.0.1` only; `blackhole.exe --mcp` is a stdio bridge that starts the
-dot if it isn't running. Because WSL can run Windows programs, the same command works from both sides:
-
-```sh
-# Windows (PowerShell / cmd)
-claude mcp add --scope user blackhole -- "C:\Users\<you>\AppData\Local\Programs\Blackhole\blackhole.exe" --mcp
-# WSL
-claude mcp add --scope user blackhole -- /mnt/c/Users/<you>/AppData/Local/Programs/Blackhole/blackhole.exe --mcp
-```
-
-Any other client: command `blackhole.exe`, args `["--mcp"]`, stdio transport. Or talk HTTP directly: `POST
-http://127.0.0.1:47811/mcp` with `Authorization: Bearer <token>` from `%LOCALAPPDATA%\Blackhole\mcp.json`.
-`put` goes through the same pipeline as a drop (extract → chunk → embed) and the dot animates; `retrieve`
-returns each hit's title, source path, snippet and best-matching passage.
-
-## Installing
-
-Download `Blackhole-<version>-x64-setup.exe` (≈2.9 GB: app + ONNX Runtime/DirectML + Qwen3-4B) and run
-it. Per-user install by default (no admin), optional start-at-sign-in and desktop shortcut. Your vault in
-`%LOCALAPPDATA%\Blackhole` survives updates; uninstall asks before deleting it. Requires Windows 10 1903+ /
-Windows 11 x64; any GPU with DirectML (the CPU is used otherwise, more slowly). While answering, the app uses
-about 5.5 GB of RAM and ~6 GB of VRAM (weights are held by both GPU sessions); with no GPU it falls back to the
-CPU for everything at a few tokens per second.
 
 ## Building (from WSL)
 
