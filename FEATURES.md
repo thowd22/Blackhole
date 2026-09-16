@@ -138,6 +138,13 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - **bge-base-en-v1.5 tested** (110M, 768-dim, 435 MB fp32, ~600 ms load on DirectML, re-embeds the vault in ~3 s): top-document accuracy on a 5-question set was 3/5 plain, 4/5 with BGE's query instruction — versus bge-small's 4/5 without it — and it demoted the résumé below customs paperwork for "most recent job title". Neither model gets "list my employers". Pipeline verified exact against the official tokenizer + CPU ORT (cosine 1.0000), so this is model behaviour, not a bug.
 - Next candidates when this is revisited: nomic-embed-text-v1.5 / gte-base / e5-base (different training mixes), query rewriting ("employers" → "work history, positions, companies"), or a small reranker over the top 20 chunks.
 
+### 4.2c Retrieval accuracy programme — P0 (see [RAG.md](RAG.md))
+Research-backed, measured on the real vault (13/14 top-document accuracy in the reference harness vs 12/14 today):
+1. Document-level units (title vector per item, `ord = -1`) + document-level RRF of embedding and reranker evidence.
+2. Cross-encoder reranker `ms-marco-MiniLM-L-6-v2` on ORT over the top-20 passages (23 MB int8).
+3. Synonym expansion table for query words documents rarely use literally; evaluation harness ("Self-check": 2 LLM-generated questions per document, Hit@1/Hit@5).
+4. Chunk-size sweep 100 → 200 words against the harness; LLM document descriptions generated at idle.
+
 ### 4.3 Background & resource behaviour — P0
 - Indexing runs at low priority; the UI never blocks.
 - Idle CPU ≈ 0, RAM small enough to leave running permanently.
