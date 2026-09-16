@@ -38,6 +38,13 @@ enum Family {
 /// Special-token strings that end a turn, per family; resolved to ids from the tokenizer.
 const STOP_TOKENS: &[&str] = &["<|im_end|>", "<|endoftext|>", "<|eot_id|>", "<|end_of_text|>", "<|end|>", "<end_of_turn>", "<eos>"];
 const MAX_NEW_TOKENS: usize = 260;
+/// Thinking budget in tokens for models with a `<think>` mode (Qwen3); 0 = answer
+/// directly. `BLACKHOLE_THINK` overrides. When the budget runs out the think block is
+/// closed for the model and it answers from what it has.
+const THINK_BUDGET: usize = 0;
+fn think_budget() -> usize {
+    std::env::var("BLACKHOLE_THINK").ok().and_then(|v| v.parse().ok()).unwrap_or(THINK_BUDGET)
+}
 /// GPU-resident cache capacity (tokens) for the GPU-decode mode; BLACKHOLE_KV_CAP overrides.
 const GPU_KV_CAPACITY: usize = 4096;
 
@@ -64,6 +71,8 @@ pub struct Llm {
     family: Family,
     /// Qwen3-style models: an empty think block selects non-thinking mode.
     no_think: bool,
+    /// Token id of `</think>` when the model has a thinking mode.
+    end_think: Option<u32>,
     eos: Vec<u32>,
     /// Decode session (CPU provider); also does the prompt pass when there is no GPU.
     cpu: Session,
@@ -83,6 +92,9 @@ pub struct Llm {
     has_logit_index: bool,
     /// Static-shape session: every step is exactly this many tokens (0 = dynamic shapes).
     seq: usize,
+    /// During a padded prompt pass: how many of the step's tokens are real (logits come
+    /// from the last real one; padding follows and is overwritten by the first decode step).
+    prompt_live: Option<usize>,
     gpu_device: i32,
     /// Owns the GPU cache buffers' memory; must outlive them (freeing through a
     /// dropped allocator crashes), so it lives as long as the model.
@@ -329,9 +341,10 @@ impl Llm {
         let family = detect_family(&tok);
         let no_think = family == Family::ChatMl && tok.token_to_id("<think>").is_some();
         let eos: Vec<u32> = STOP_TOKENS.iter().filter_map(|t| tok.token_to_id(t)).collect();
+        let end_think = if no_think { tok.token_to_id("</think>") } else { None };
         crate::util::log(&format!("llm: {} layout, {family:?} template{}, {} stop tokens, kv {}", if wants_position_ids { "HF" } else { "GenAI" }, if no_think { " (no-think)" } else { "" }, eos.len(), if kv_f16 { "f16" } else { "f32" }));
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Llm { family, no_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, gpu_decode, has_logit_index, seq, gpu_device, gpu_alloc, backend, name })
+        Ok(Llm { family, no_think, end_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, gpu_decode, has_logit_index, seq, prompt_live: None, gpu_device, gpu_alloc, backend, name })
     }
 
     /// Questions about the files themselves rather than their contents: "which
@@ -376,10 +389,15 @@ impl Llm {
         }
         user.push_str(&format!("Question: {}", question.trim()));
         let mut p = self.chat(system, &user);
-        if temporal {
+        if temporal && !self.thinking() {
             p.push_str(PREFILL_TIMELINE);
         }
         p
+    }
+
+    /// Reasoning before answering: only for models with a think mode, and only when budgeted.
+    pub fn thinking(&self) -> bool {
+        self.end_think.is_some() && think_budget() > 0
     }
 
     /// One system + user turn in this model family's chat template, ready for the assistant.
@@ -394,7 +412,8 @@ impl Llm {
             Family::Gemma => format!("<bos><start_of_turn>user\n{system}\n\n{user}<end_of_turn>\n<start_of_turn>model\n"),
         };
         if self.no_think {
-            p.push_str("<think>\n\n</think>\n\n");
+            // Empty think block = answer directly; an open one = reason first.
+            p.push_str(if self.thinking() { "<think>\n" } else { "<think>\n\n</think>\n\n" });
         }
         p
     }
@@ -534,7 +553,7 @@ impl Llm {
         // padding. The pads land in cache rows past the live length, where the next step
         // overwrites them, and the causal mask keeps live tokens from ever attending to them.
         // The prompt pass (past_len == 0) uses the dynamic session when there is one.
-        let dynamic_prompt = past_len == 0 && self.gpu_decode && self.gpu.is_some();
+        let dynamic_prompt = n > 1 && self.gpu_decode && self.gpu.is_some();
         let width = if self.seq > 0 && !dynamic_prompt { self.seq } else { n };
         if n > width {
             anyhow::bail!("{n} tokens in one step, static width is {width}");
@@ -545,7 +564,8 @@ impl Llm {
         let input_ids = ok(Tensor::from_array(([1usize, width], ids64)))?;
         let mask = ok(Tensor::from_array(([1usize, total], vec![1i64; total])))?;
         let pos = ok(Tensor::from_array(([1usize, width], (past_len..past_len + width).map(|p| p as i64).collect::<Vec<_>>())))?;
-        let logit_index = ok(Tensor::from_array(([1usize], vec![n as i64 - 1])))?;
+        let live = self.prompt_live.filter(|&l| l > 0 && l <= n).unwrap_or(n);
+        let logit_index = ok(Tensor::from_array(([1usize], vec![live as i64 - 1])))?;
         let layers = self.layers;
 
         if self.gpu_decode {
@@ -645,8 +665,9 @@ impl Llm {
         on_token: impl FnMut(&str),
     ) -> anyhow::Result<String> {
         let prompt = self.prompt(question, sources);
-        let prefill = Self::is_temporal(question).then_some(PREFILL_TIMELINE);
-        self.generate(prompt, prefill, MAX_NEW_TOKENS, cancel, on_token)
+        let prefill = (Self::is_temporal(question) && !self.thinking()).then_some(PREFILL_TIMELINE);
+        let think = self.thinking();
+        self.generate_ex(prompt, prefill, MAX_NEW_TOKENS, think, cancel, on_token)
     }
 
     /// Greedy generation from a finished prompt; `prefill` is text already in the
@@ -656,6 +677,20 @@ impl Llm {
         prompt: String,
         prefill: Option<&str>,
         max_new: usize,
+        cancel: &AtomicBool,
+        on_token: impl FnMut(&str),
+    ) -> anyhow::Result<String> {
+        self.generate_ex(prompt, prefill, max_new, false, cancel, on_token)
+    }
+
+    /// `think`: the prompt ends inside an open `<think>` block; tokens up to `</think>`
+    /// (or the budget, after which `</think>` is forced) are kept private, the rest streams.
+    fn generate_ex(
+        &mut self,
+        prompt: String,
+        prefill: Option<&str>,
+        max_new: usize,
+        think: bool,
         cancel: &AtomicBool,
         mut on_token: impl FnMut(&str),
     ) -> anyhow::Result<String> {
@@ -676,8 +711,34 @@ impl Llm {
         let mut past = if self.gpu_decode { self.device_kv()? } else { self.empty_past()? };
         let mut next = 0u32;
         let mut done = 0;
+        // DirectML's GroupQueryAttention drops off its metacommand path when the prompt is
+        // ~45–64 % of the cache capacity (10 s instead of 1 s for a 2,100-token prompt at
+        // 4,096). Longer prompts are fast, so a prompt in the band is padded past it: real
+        // tokens never attend the pads (causal), the logits come from the last real token,
+        // and the first decode step overwrites the pads' cache rows.
+        let real_len = prompt_ids.len();
+        let mut prompt_ids = prompt_ids;
+        if self.gpu_decode && self.gpu.is_some() && std::env::var("BLACKHOLE_PAD_BAND").map(|v| v != "0").unwrap_or(true) {
+            let cap = kv_capacity() as f32;
+            let (lo, hi) = ((cap * 0.42) as usize, (cap * 0.66) as usize);
+            if real_len >= lo && real_len < hi {
+                let target = (hi + 63) / 64 * 64;
+                let pad = self.eos.first().copied().unwrap_or(0);
+                prompt_ids.resize(target, pad);
+                if std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some() {
+                    crate::util::log(&format!("llm prompt padded {real_len} -> {target} (metacommand band {lo}..{hi} at capacity {cap})"));
+                }
+            }
+        }
+        self.prompt_live = Some(real_len);
         // Dynamic shapes take the whole prompt in one pass; static ones in `seq`-token chunks.
-        let chunk = if self.seq > 0 && !(self.gpu_decode && self.gpu.is_some()) { self.seq } else { prompt_ids.len().max(1) };
+        let mut chunk = if self.seq > 0 && !(self.gpu_decode && self.gpu.is_some()) { self.seq } else { prompt_ids.len().max(1) };
+        // BLACKHOLE_PROMPT_CHUNK: feed the dynamic prompt session in pieces (experiment).
+        if let Some(c) = std::env::var("BLACKHOLE_PROMPT_CHUNK").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&c| c > 0) {
+            if self.gpu_decode && self.gpu.is_some() {
+                chunk = c;
+            }
+        }
         while done < prompt_ids.len() {
             let end = (done + chunk).min(prompt_ids.len());
             let (n, p) = self.step(&prompt_ids[done..end], done, past)?;
@@ -685,14 +746,52 @@ impl Llm {
             past = p;
             done = end;
         }
-        let mut len = prompt_ids.len();
+        self.prompt_live = None;
+        let mut len = real_len;
         let mut generated: Vec<u32> = Vec::new();
         // Decode the whole sequence each step and emit the new suffix: decoding a
         // slice of tokens on its own drops/adds leading spaces ("7. 73").
         let mut emitted = String::new();
-        for _ in 0..max_new {
+        let budget = think_budget();
+        let mut in_think = think;
+        let mut think_tokens: Vec<u32> = Vec::new();
+        let end_think = self.end_think;
+        let total_cap = if think { max_new + budget + 4 } else { max_new };
+        for _ in 0..total_cap {
             if cancel.load(Ordering::Relaxed) || self.eos.contains(&next) {
                 break;
+            }
+            if in_think {
+                let closed = Some(next) == end_think;
+                if !closed {
+                    think_tokens.push(next);
+                }
+                if closed || think_tokens.len() >= budget {
+                    // Out of the think block: naturally, or forced by feeding `</think>`.
+                    let mut tail: Vec<u32> = if closed { Vec::new() } else { end_think.into_iter().collect() };
+                    tail.extend(self.tok.encode("\n\n", false).map(|e| e.get_ids().to_vec()).unwrap_or_default());
+                    let (n, p) = self.step(&[next], len, past)?;
+                    next = n;
+                    past = p;
+                    len += 1;
+                    for &t in &tail {
+                        let (n, p) = self.step(&[t], len, past)?;
+                        next = n;
+                        past = p;
+                        len += 1;
+                    }
+                    in_think = false;
+                    if std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some() {
+                        let text = self.tok.decode(&think_tokens, true).unwrap_or_default();
+                        crate::util::log(&format!("llm think ({} tokens{}): {}", think_tokens.len(), if closed { "" } else { ", budget hit" }, text.replace('\n', " ⏎ ").chars().take(400).collect::<String>()));
+                    }
+                    continue;
+                }
+                let (n, p) = self.step(&[next], len, past)?;
+                next = n;
+                past = p;
+                len += 1;
+                continue;
             }
             generated.push(next);
             // Greedy decoding can fall into a loop; a small model repeating a whole

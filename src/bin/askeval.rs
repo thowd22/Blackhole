@@ -104,7 +104,7 @@ fn main() -> anyhow::Result<()> {
                 let s = store.lock().unwrap();
                 let absent = s.absent(&q.question, Some(&qvec)) && !s.any_term_present(&aux);
                 let hook = |qq: &str, ps: &[String]| reranker.score(qq, ps).ok();
-                (absent, if absent { Vec::new() } else { s.context_reranked(&q.question, &aux, &qvec, 1400, Some(&hook)) })
+                (absent, if absent { Vec::new() } else { s.context_reranked(&q.question, &aux, &qvec, std::env::var("BLACKHOLE_CTX_WORDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1400), Some(&hook)) })
             };
             let is_absent_q = q.kind == "absent" || q.expected_items.is_empty();
             let top_title = chunks.first().map(|c| c.0.clone()).unwrap_or_default();

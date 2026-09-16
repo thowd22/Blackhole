@@ -215,6 +215,45 @@ Default: GPU decode whenever a DirectML adapter exists; `BLACKHOLE_DECODE=cpu` r
 `BLACKHOLE_KV_CAP` sets the cache capacity (4096 tokens ≈ 0.5 GB VRAM at fp16 for the 3B); `BLACKHOLE_SEQ`
 sets the static width (leave at 1). No GPU → CPU session for everything, as before.
 
+## Reasoning models (2026-09-16): Qwen3-4B with a thinking budget
+
+The GPU path made reasoning affordable: a 256-token think costs ~5 s at 50 tok/s instead of 40 s on the
+CPU. Candidates that fit the constraints (ONNX Runtime + DirectML, families with Copilot+ NPU support):
+Qwen3 (hybrid think mode, budgetable), DeepSeek-R1-Distill-Qwen (Microsoft ships DirectML/NPU builds, but
+thousands of thinking tokens with no off switch), Phi-4-mini-reasoning (math-tuned, long chains; the
+instruct sibling already over-refused here). Qwen3-4B it is.
+
+Implementation (`llm_ort.rs`): the prompt ends in an open `<think>\n` block; tokens up to `</think>` are kept
+private; when the budget (`BLACKHOLE_THINK`, tokens) runs out, `</think>\n\n` is force-fed and the model
+answers from what it has. Without a budget the empty think block selects Qwen3's direct mode, as before.
+The temporal `Timeline:` prefill is skipped when thinking — the model does that itself.
+
+| Model / mode (all 44 questions, same retrieval) | Answers | Absent | TTFT | Decode | Peak WS | Disk |
+|---|---|---|---|---|---|---|
+| Llama 3.2 3B, direct (shipped before) | 31/44 | 6/6 | 0.9 s | 100 tok/s | 3.8 GB | 2.3 GB |
+| Qwen3-4B, direct | 29/44 | 6/6 | 2.1 s* | 47 tok/s | 5.5 GB | 2.7 GB |
+| **Qwen3-4B, think ≤256** | **35/44** (36: one right answer failed the regex) | 6/6 | 5.8 s | 50 tok/s | 5.4 GB | 2.7 GB |
+
+*after the band fix below; 7 s before it. Qwen3 direct refuses more often than Llama on the same
+contexts (9 "I couldn't find that" with the right document), which thinking mostly cures. What the
+thinking flipped: the timeline/ordering questions (q08, h07 and friends), the multi-field customs
+questions (b25, q04's sibling), the decoy misreads (b12 stays). 23 of 54 thinks hit the 256 budget.
+
+### DirectML GroupQueryAttention has a slow band — pad the prompt past it
+
+Prompt passes of 1,850–2,620 tokens took 8–14 s at cache capacity 4,096 while both shorter (~1,000) and
+longer (≥2,622) prompts took 1–2 s; at capacity 6,144 the slow band moved to ~2,700–3,900, at 3,072 the
+same prompts were all fast. The profile shows layer 0's GQA spending 0.7 s on the CPU side (compiling an
+alternative kernel) and the GPU work then taking ~9 s: the metacommand path is abandoned when the prompt
+is roughly 45–64 % of the buffer. Peak working set also balloons (9 GB vs 5 GB) on that path.
+
+Fix: a prompt whose length falls in [0.42, 0.66) × capacity is padded with EOS tokens up to 0.66 ×
+capacity before the prompt pass. Real tokens never attend the pads (causal mask); the logits are taken at
+the last real token (`logit_index`); the first decode step writes at the real length and overwrites the
+pads' cache rows. 2,114-token prompt: 10 s → 1.7 s, answers identical. `BLACKHOLE_PAD_BAND=0` disables.
+Chunking the prompt pass instead would need the multi-token dynamic session for every chunk and was not
+pursued.
+
 ## Windows-specific implementation notes
 
 - **Dot window**: `WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` — transparent, always on top, no taskbar entry, doesn't steal focus. Per-pixel alpha via `UpdateLayeredWindow` or a DirectComposition surface.
