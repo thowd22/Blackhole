@@ -70,7 +70,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - Paste clipboard directly into Blackhole without dragging (ingest the current clipboard contents).
 - Open search from anywhere without moving the dot.
 - **Ctrl+Shift+N — summon to mouse and open a new note** (2026-09-16): the dot warps to the cursor, the panel opens on the Notes tab with an empty note ready to type into (see §5.8).
-- **Screenshot shortcut** (2026-09-16): see §3.6; a global shortcut (default Ctrl+Shift+S) and a panel button start a drag-region capture.
+- **Screenshot shortcut** (2026-09-16): see §3.6; a global shortcut (default Ctrl+Shift+S) and a panel button start a drag-region capture. — done 2026-09-16
 
 ### 2.5 System tray icon — P1
 - A tray icon (pixel black hole) so the app has a home when the dot is hidden, for start-at-login setup, and so Windows has somewhere to put it.
@@ -113,9 +113,9 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 | Anything else | Metadata + filename + any extractable strings | P0 |
 
 ### 3.6 Screenshot tool — P1 (2026-09-16)
-- **Drag-region only**: a global shortcut (Ctrl+Shift+S) or the panel's camera button dims the screen; drag a rectangle; release swallows it. No full-screen or window modes — one gesture, on purpose.
-- The capture is ingested like a dropped image: PNG stored in the vault, findable by time/title, and OCR'd once §3.3's OCR lands so its text is searchable. A speech bubble confirms ("swallowed a screenshot, 412×188").
-- Esc cancels; multi-monitor and per-monitor DPI respected (capture in physical pixels).
+- **Drag-region only**: a global shortcut (Ctrl+Shift+S) or the panel's camera button dims the screen; drag a rectangle; release swallows it. No full-screen or window modes — one gesture, on purpose. — done 2026-09-16
+- The capture is ingested like a dropped image: PNG stored in the vault, findable by time/title, and OCR'd once §3.3's OCR lands so its text is searchable. A speech bubble confirms ("swallowed a screenshot, 412×188"). — done 2026-09-16
+- Esc cancels; multi-monitor and per-monitor DPI respected (capture in physical pixels). — done 2026-09-16
 
 ### 3.4 Storage policy — P1
 - Choose per install: **copy** dropped files into the Blackhole vault, or **reference** the original path.
