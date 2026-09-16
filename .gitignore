@@ -9,3 +9,4 @@ eval/*.db*
 eval/questions*.json
 eval/results/
 eval/**/contexts*.json
+eval/.cache/
