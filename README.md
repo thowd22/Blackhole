@@ -189,8 +189,16 @@ The panel has two tabs, **Files** and **Notes**. Notes are written right in Blac
 dot to your mouse with a fresh note open (or press **+** in the panel, Ctrl+N inside it). Notes save themselves
 600 ms after you pause and are re-embedded in the background, so a note is a vault item like any other — it
 shows up in search, ask mode and MCP `retrieve` — but stays editable: open it from the list, or from a search
-hit in Files. Ctrl+Tab switches tabs; right-click → **Default view** picks which one opens. The editor is a
-pixel-framed native text box today; an embedded Neovim (LSP, treesitter, your config) is the planned upgrade.
+hit in Files. Ctrl+Tab switches tabs; right-click → **Default view** picks which one opens.
+
+The editor is **Neovim**, embedded. Blackhole ships an unmodified `nvim.exe` beside its own exe, runs it as
+`nvim --embed`, and draws Neovim's screen grid itself in the panel's pixel font and palette (Neovim's
+"external UI" protocol over msgpack-RPC, `src/nvim.rs`). So a note gets line numbers, treesitter markdown
+highlighting, undo, visual mode, `:` commands, and any LSP server you have on your PATH (`marksman` for
+markdown, `rust-analyzer`, `pyright`, …) — with the block/bar cursor, orange line-number highlight and
+dark-violet ground of the rest of the app. Notes start in insert mode; Esc in normal mode closes the panel;
+Ctrl+Tab / Ctrl+N / Ctrl+Del stay Blackhole's. The init file Blackhole writes (`%LOCALAPPDATA%\Blackhole\nvim-init.lua`)
+sets the look and `number`; if `nvim.exe` isn't there (portable exe alone) a plain text box takes its place.
 
 ## Using it from agents (MCP)
 
@@ -253,6 +261,7 @@ portable exe zip, the installer in <2 GiB parts, checksums.
 | `src/sprite.rs` | Procedural 32×32 pixel-art renderer |
 | `src/bubble.rs` | Pixel-art speech bubbles |
 | `src/mcp.rs` | MCP server (HTTP on localhost) and the `--mcp` stdio bridge |
+| `src/nvim.rs` | Embedded Neovim: msgpack-RPC, grid renderer in the pixel font, key/mouse translation |
 | `src/search.rs` | Search panel: live results, ask box, keyboard handling, content-fit sizing, pixel scrollbars |
 | `src/screenshot.rs` | Drag-region screenshot overlay (Ctrl+Shift+S) |
 | `src/tray.rs`, `src/startup.rs` | Tray icon; start-at-sign-in |
@@ -273,7 +282,16 @@ Rich snippets in the panel → OCR for images, screenshots and scanned PDFs → 
 code signing. Details and the
 reasoning behind each in [FEATURES.md](FEATURES.md).
 
+## Credits
+
+- **Neovim** — the note editor is a stock Neovim build, embedded and drawn in Blackhole's style. Thank you to
+  the Neovim contributors, and to Bram Moolenaar and the Vim project before them: Neovim is Apache-2.0 with
+  Vim's licence for inherited code (<https://neovim.io>, <https://github.com/neovim/neovim>).
+- **Qwen3** (Alibaba Cloud), **bge-small** (BAAI), **mxbai-rerank** (Mixedbread) — the models.
+- **ONNX Runtime + DirectML** (Microsoft) — the one inference engine behind everything.
+- The Rust crates in `Cargo.toml`, `pdf-extract` in particular, and Inno Setup for the installer.
+
 ## Licence notes
 
-Blackhole bundles Qwen3-4B (Alibaba Cloud, Apache-2.0), bge-small
-(MIT), mxbai-rerank-xsmall (Apache-2.0) and ONNX Runtime + DirectML (Microsoft). See `installer/LICENSE-MODELS.txt`.
+Blackhole bundles Qwen3-4B (Alibaba Cloud, Apache-2.0), bge-small (MIT), mxbai-rerank-xsmall (Apache-2.0),
+ONNX Runtime + DirectML (Microsoft) and Neovim (Apache-2.0 / Vim licence). See `installer/LICENSE-MODELS.txt`.

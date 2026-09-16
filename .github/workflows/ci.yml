@@ -157,6 +157,7 @@ jobs:
           rm -rf dist/stage && mkdir -p dist/stage/qwen3-4b
           cp target/$TARGET/release/blackhole.exe runtime/onnxruntime.dll runtime/DirectML.dll README.md installer/LICENSE-MODELS.txt dist/stage/
           cp models/qwen3-4b/model_q4f16.onnx models/qwen3-4b/model_q4f16.onnx.data models/qwen3-4b/tokenizer.json dist/stage/qwen3-4b/
+          cp -r runtime/nvim/nvim-win64 dist/stage/nvim
           "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" //Qp installer/blackhole.iss
           ls -la dist
 
@@ -170,7 +171,8 @@ jobs:
           # Portable: the exe alone is the app (DLLs and small models are embedded); the
           # LLM is optional — without it search works and ask mode says so.
           cp target/$TARGET/release/blackhole.exe installer/LICENSE-MODELS.txt README.md release/
-          (cd release && 7z a -bd -mx=5 "Blackhole-$VERSION-x64-portable.zip" blackhole.exe LICENSE-MODELS.txt README.md >/dev/null && rm blackhole.exe LICENSE-MODELS.txt README.md)
+          cp -r runtime/nvim/nvim-win64 release/nvim
+          (cd release && 7z a -bd -mx=5 "Blackhole-$VERSION-x64-portable.zip" blackhole.exe LICENSE-MODELS.txt README.md nvim >/dev/null && rm -r blackhole.exe LICENSE-MODELS.txt README.md nvim)
           # Installer (~3 GB): GitHub caps release assets at 2 GiB, so ship it as
           # 1900 MB parts. Re-join: `copy /b a.part1+a.part2 a.exe` (Windows) or `cat`.
           SETUP=$(ls dist/Blackhole-*-x64-setup.exe)
@@ -194,8 +196,8 @@ jobs:
           \`\`\`
           (GitHub limits release assets to 2 GiB; the installer carries the 2.7 GB Qwen3-4B model.)
 
-          **Portable**: \`Blackhole-$VERSION-x64-portable.zip\` is just the exe — search and MCP work out of the
-          box; put a supported model folder beside it to enable ask mode.
+          **Portable**: \`Blackhole-$VERSION-x64-portable.zip\` is the exe plus Neovim for the notes editor — search,
+          notes and MCP work out of the box; put a supported model folder beside it to enable ask mode.
 
           Checksums in \`SHA256SUMS.txt\`. Built by GitHub Actions from tag \`${GITHUB_REF_NAME}\`.
           EOF

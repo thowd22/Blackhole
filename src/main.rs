@@ -15,6 +15,7 @@ mod pdf_layout;
 mod gpu;
 mod llm_ort;
 mod mcp;
+mod nvim;
 mod rerank;
 mod runtime;
 mod screenshot;

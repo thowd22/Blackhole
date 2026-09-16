@@ -51,4 +51,11 @@ if [ ! -f runtime/DirectML.dll ] || [ "$(sha runtime/DirectML.dll)" != 9c9e6d822
 fi
 [ "$(sha runtime/onnxruntime.dll)" = 903c92c54acc57caa77d44d4c856c829eb82f5cf6755b47367a8153bd3fabeb6 ] || { echo "onnxruntime.dll hash mismatch" >&2; exit 1; }
 [ "$(sha runtime/DirectML.dll)" = 9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1 ] || { echo "DirectML.dll hash mismatch" >&2; exit 1; }
+# Neovim (the notes editor) ships beside the exe, not inside it: installer + portable zip.
+NVIM_VER=0.12.5
+fetch https://github.com/neovim/neovim/releases/download/v$NVIM_VER/nvim-win64.zip \
+      runtime/nvim-win64.zip de8625ba8cf65ebf40eb80a388ba1ec8e9c15b30218821e2c639119b05920de1
+if [ ! -x runtime/nvim/nvim-win64/bin/nvim.exe ] && [ ! -f runtime/nvim/nvim-win64/bin/nvim.exe ]; then
+  rm -rf runtime/nvim && mkdir -p runtime/nvim && unzip -q runtime/nvim-win64.zip -d runtime/nvim
+fi
 echo "assets ready"

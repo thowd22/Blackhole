@@ -11,3 +11,5 @@ eval/questions*.json
 eval/results/
 eval/**/contexts*.json
 models/qwen3-4b/tokenizer.json
+runtime/nvim/
+runtime/*.zip

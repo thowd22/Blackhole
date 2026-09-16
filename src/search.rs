@@ -16,6 +16,7 @@
 //! fight the control's own repaints — so the bar simply lives outside the control.
 
 use crate::ask::{AskEngine, Job, WM_ASK_DONE, WM_ASK_STATUS, WM_ASK_TOKEN};
+use crate::nvim::{self, WM_NVIM_CHANGED, WM_NVIM_ESCAPE, WM_NVIM_FLUSH};
 use crate::embed::Embedder;
 use crate::store::{Hit, Store};
 use crate::util::wide;
@@ -160,6 +161,9 @@ pub struct SearchWin {
     dirty: bool,
     /// Text is being set by the panel (loading a note), not typed: ignore EN_CHANGE.
     loading: bool,
+    /// Embedded Neovim editing the note, when nvim is installed beside the exe
+    /// (started on first use of the Notes tab); the plain EDIT otherwise.
+    nvim: Option<nvim::Host>,
     editor_rc: RECT,
     /// Tab strip and "+ new note" button rects from the last layout (client coords).
     tab_rc: [RECT; 2],
@@ -227,6 +231,7 @@ impl SearchWin {
                 editing: None,
                 dirty: false,
                 loading: false,
+                nvim: None,
                 editor_rc: RECT::default(),
                 tab_rc: [RECT::default(); 2],
                 new_rc: RECT::default(),
@@ -402,13 +407,20 @@ impl SearchWin {
             y += if rows > 0 { list_h + pad } else { 0 };
             let ed_h = (status_y - pad / 2 - y).max(self.line_h * 2);
             self.editor_rc = RECT { left: pad, top: y, right: pad + inner_w, bottom: y + ed_h };
-            let _ = SetWindowPos(self.editor, None, pad + u, y + u, inner_w - 2 * u, ed_h - 2 * u, SWP_NOZORDER | SWP_NOACTIVATE);
-            let _ = ShowWindow(self.editor, SW_SHOWNA);
+            let ed = self.editor_hwnd();
+            let _ = SetWindowPos(ed, None, pad + u, y + u, inner_w - 2 * u, ed_h - 2 * u, SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = ShowWindow(ed, SW_SHOWNA);
+            if ed != self.editor {
+                let _ = ShowWindow(self.editor, SW_HIDE);
+            }
             let status_w = w - 2 * pad - self.grip_size() - u;
             let _ = SetWindowPos(self.status, None, pad, status_y, status_w, status_h, SWP_NOZORDER | SWP_NOACTIVATE);
             return;
         }
         let _ = ShowWindow(self.editor, SW_HIDE);
+        if let Some(h) = &self.nvim {
+            let _ = ShowWindow(h.hwnd, SW_HIDE);
+        }
         let _ = ShowWindow(self.list, SW_SHOWNA);
         self.editor_rc = RECT::default();
         let answer_h = if self.answer_shown {
@@ -524,6 +536,7 @@ impl SearchWin {
                 let page = ((self.list_rc.bottom - self.list_rc.top) / self.row_height()).max(1);
                 (pos, page, count)
             }
+            Ctl::Editor if self.nvim.is_some() => self.nvim.as_ref().unwrap().scroll_info(),
             Ctl::Answer | Ctl::Editor => {
                 let (ctl, rc) = if c == Ctl::Editor { (self.editor, self.editor_rc) } else { (self.answer, self.answer_rc) };
                 let count = SendMessageW(ctl, EM_GETLINECOUNT, None, None).0 as i32;
@@ -544,6 +557,7 @@ impl SearchWin {
             Ctl::List => {
                 SendMessageW(self.list, LB_SETTOPINDEX, Some(WPARAM(pos as usize)), None);
             }
+            Ctl::Editor if self.nvim.is_some() => self.nvim.as_ref().unwrap().scroll_to(pos),
             Ctl::Answer | Ctl::Editor => {
                 SendMessageW(self.text_ctl(c), EM_LINESCROLL, Some(WPARAM(0)), Some(LPARAM((pos - cur) as isize)));
             }
@@ -783,9 +797,12 @@ impl SearchWin {
         self.restored = false;
         let _ = SetWindowTextW(self.edit, w!(""));
         let _ = KillTimer(Some(self.hwnd), TIMER_DEBOUNCE);
+        if tab == Tab::Notes {
+            self.ensure_nvim();
+        }
         self.refresh();
         let _ = InvalidateRect(Some(self.hwnd), None, true);
-        let _ = SetFocus(Some(if tab == Tab::Notes { self.editor } else { self.edit }));
+        let _ = SetFocus(Some(if tab == Tab::Notes { self.editor_hwnd() } else { self.edit }));
     }
 
     /// Switch to Notes with a fresh empty note in the editor. The note is created in the
@@ -798,34 +815,58 @@ impl SearchWin {
     unsafe fn begin_new_note(&mut self) {
         self.flush_note();
         self.tab = Tab::Notes;
+        self.ensure_nvim();
         self.editing = None;
         self.dirty = false;
-        self.loading = true;
-        let _ = SetWindowTextW(self.editor, w!(""));
-        self.loading = false;
+        self.set_editor_text("");
         self.refresh();
         SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(usize::MAX)), None);
         self.set_status("new note — start typing; saved as you go");
         let _ = InvalidateRect(Some(self.hwnd), None, true);
-        let _ = SetFocus(Some(self.editor));
+        let _ = SetFocus(Some(self.editor_hwnd()));
+    }
+
+    /// The window that edits notes: the Neovim host when it runs, else the EDIT.
+    fn editor_hwnd(&self) -> HWND {
+        self.nvim.as_ref().map(|h| h.hwnd).unwrap_or(self.editor)
+    }
+
+    /// Start Neovim the first time the Notes tab is used (no-op without nvim.exe).
+    unsafe fn ensure_nvim(&mut self) {
+        if self.nvim.is_none() && !self.editor.is_invalid() && std::env::var_os("BLACKHOLE_NO_NVIM").is_none() {
+            self.nvim = nvim::Host::create(self.hwnd, self.px(15), self.unit(), BORDER);
+        }
     }
 
     unsafe fn editor_text(&self) -> String {
+        if let Some(h) = &self.nvim {
+            return h.text();
+        }
         let len = GetWindowTextLengthW(self.editor) as usize;
         let mut buf = vec![0u16; len + 1];
         GetWindowTextW(self.editor, &mut buf);
         crate::util::from_wide(&buf).replace("\r\n", "\n")
     }
 
+    /// Put `text` in the editor without counting it as an edit.
+    unsafe fn set_editor_text(&mut self, text: &str) {
+        if let Some(h) = &self.nvim {
+            h.set_text(text, text.trim().is_empty());
+            return;
+        }
+        self.loading = true;
+        let _ = SetWindowTextW(self.editor, PCWSTR(wide(&text.replace('\n', "\r\n")).as_ptr()));
+        self.loading = false;
+    }
+
     /// Load a note into the editor (saving whatever was there first).
     unsafe fn open_note(&mut self, id: i64) {
         self.flush_note();
         let text = self.store.lock().unwrap().content(id).unwrap_or_default();
+        self.ensure_nvim();
         self.editing = Some(id);
         self.dirty = false;
-        self.loading = true;
-        let _ = SetWindowTextW(self.editor, PCWSTR(wide(&text.replace('\n', "\r\n")).as_ptr()));
-        self.loading = false;
+        self.set_editor_text(&text);
         self.set_status(&format!("{} notes   ↵ in the list opens · Ctrl+Del forgets · Ctrl+N new", self.hits.len()));
         self.invalidate_bar(Ctl::Editor);
     }
@@ -988,7 +1029,7 @@ impl SearchWin {
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW);
         let _ = SetForegroundWindow(hwnd);
         if s.tab == Tab::Notes {
-            let _ = SetFocus(Some(s.editor));
+            let _ = SetFocus(Some(s.editor_hwnd()));
         } else {
             let _ = SetFocus(Some(s.edit));
             let len = GetWindowTextLengthW(s.edit) as usize;
@@ -1128,7 +1169,7 @@ impl SearchWin {
                 self.set_tab(Tab::Notes);
             }
             self.open_note(id);
-            let _ = SetFocus(Some(self.editor));
+            let _ = SetFocus(Some(self.editor_hwnd()));
             return;
         }
         match (&hit.source, reveal) {
@@ -1157,7 +1198,7 @@ impl SearchWin {
             self.dirty = false;
             self.editing = None;
             let _ = KillTimer(Some(self.hwnd), TIMER_SAVE);
-            let _ = SetWindowTextW(self.editor, w!(""));
+            self.set_editor_text("");
         }
         let _ = self.store.lock().unwrap().delete(id);
         self.refresh();
@@ -1398,6 +1439,40 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        WM_NVIM_CHANGED => {
+            if let Some(s) = state(hwnd) {
+                if s.nvim.as_ref().map(|h| h.is_user_change(wparam.0 as u64)).unwrap_or(false) {
+                    s.note_changed();
+                }
+            }
+            LRESULT(0)
+        }
+        WM_NVIM_FLUSH => {
+            if let Some(s) = state(hwnd) {
+                s.invalidate_bar(Ctl::Editor);
+            }
+            LRESULT(0)
+        }
+        WM_NVIM_ESCAPE => {
+            if let Some(s) = state(hwnd) {
+                s.flush_note();
+            }
+            SearchWin::hide(hwnd);
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            // Forwarded by the Neovim host for the panel's own shortcuts.
+            if let Some(s) = state(hwnd) {
+                let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
+                match VIRTUAL_KEY(wparam.0 as u16) {
+                    VK_TAB if ctrl => s.set_tab(if s.tab == Tab::Notes { Tab::Files } else { Tab::Notes }),
+                    VK_N if ctrl => { s.begin_new_note(); s.fit(true); }
+                    VK_DELETE if ctrl => s.forget_selected(),
+                    _ => {}
+                }
+            }
+            LRESULT(0)
+        }
         WM_ASK_TOKEN | WM_ASK_STATUS | WM_ASK_DONE => {
             let text = *Box::from_raw(lparam.0 as *mut String);
             if let Some(s) = state(hwnd) {
@@ -1422,7 +1497,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         if let Some(id) = s.selected().map(|h| h.id) {
                             s.open_note(id);
                         }
-                        let _ = SetFocus(Some(s.editor));
+                        let _ = SetFocus(Some(s.editor_hwnd()));
                     } else {
                         let _ = SetFocus(Some(s.edit));
                     }
@@ -1489,7 +1564,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let over_answer = s.ctl_visible(Ctl::Answer) && (PtInRect(&s.answer_rc, pt).as_bool() || PtInRect(&s.bar_rect(Ctl::Answer), pt).as_bool());
                 let over_editor = s.ctl_visible(Ctl::Editor) && (PtInRect(&s.editor_rc, pt).as_bool() || PtInRect(&s.bar_rect(Ctl::Editor), pt).as_bool());
                 let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
-                s.scroll_by(if over_editor { Ctl::Editor } else if over_answer { Ctl::Answer } else { Ctl::List }, -(delta / 120) * 3);
+                if over_editor && s.nvim.is_some() {
+                    s.nvim.as_ref().unwrap().wheel(delta > 0);
+                } else {
+                    s.scroll_by(if over_editor { Ctl::Editor } else if over_answer { Ctl::Answer } else { Ctl::List }, -(delta / 120) * 3);
+                }
             }
             LRESULT(0)
         }
@@ -1515,7 +1594,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_SETFOCUS => {
             if let Some(s) = state(hwnd) {
-                let _ = SetFocus(Some(if s.tab == Tab::Notes { s.editor } else { s.edit }));
+                let _ = SetFocus(Some(if s.tab == Tab::Notes { s.editor_hwnd() } else { s.edit }));
             }
             LRESULT(0)
         }

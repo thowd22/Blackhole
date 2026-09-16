@@ -15,6 +15,9 @@ rm -rf dist/stage && mkdir -p dist/stage/qwen3-4b
 cp target/x86_64-pc-windows-gnu/release/blackhole.exe runtime/onnxruntime.dll runtime/DirectML.dll README.md dist/stage/
 cp installer/LICENSE-MODELS.txt dist/stage/
 cp "$MODEL_DIR"/model_q4f16.onnx "$MODEL_DIR"/model_q4f16.onnx.data "$MODEL_DIR"/tokenizer.json dist/stage/qwen3-4b/
+# Neovim for the notes editor (ci/fetch-assets.sh downloads it into runtime/nvim/).
+[ -d runtime/nvim/nvim-win64 ] || { echo "runtime/nvim/nvim-win64 missing: run ci/fetch-assets.sh"; exit 1; }
+cp -r runtime/nvim/nvim-win64 dist/stage/nvim
 du -sh dist/stage
 # Inno Setup is a Windows program: hand it a Windows path.
 WIN_ISS=$(wslpath -w "$(pwd)/installer/blackhole.iss")

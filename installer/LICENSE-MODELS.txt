@@ -6,4 +6,7 @@ Bundled models and runtime
   (last-token logits via Gather, Gemm LM head, single data file).
 - bge-small-en-v1.5 (embeddings), BAAI — MIT.
 - mxbai-rerank-xsmall-v1 (reranker), Mixedbread — Apache-2.0.
+- Neovim 0.12.5 (nvim\, the notes editor), the Neovim contributors — Apache-2.0, with Vim's
+  licence for the parts inherited from Vim (see nvim\share\nvim\runtime\doc\uganda.txt).
+  https://github.com/neovim/neovim/blob/master/LICENSE.txt . Unmodified release build.
 - ONNX Runtime + DirectML, Microsoft — MIT (onnxruntime), Microsoft Software License (DirectML redistributable).

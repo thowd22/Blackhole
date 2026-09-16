@@ -52,6 +52,8 @@ Source: "..\dist\stage\DirectML.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\stage\qwen3-4b\model_q4f16.onnx"; DestDir: "{app}\qwen3-4b"; Flags: ignoreversion
 Source: "..\dist\stage\qwen3-4b\model_q4f16.onnx.data"; DestDir: "{app}\qwen3-4b"; Flags: ignoreversion nocompression
 Source: "..\dist\stage\qwen3-4b\tokenizer.json"; DestDir: "{app}\qwen3-4b"; Flags: ignoreversion
+; Neovim (Apache-2.0 / Vim licence): the note editor. See LICENSE-MODELS.txt.
+Source: "..\dist\stage\nvim\*"; DestDir: "{app}\nvim"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\dist\stage\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 Source: "..\dist\stage\LICENSE-MODELS.txt"; DestDir: "{app}"; Flags: ignoreversion
 
