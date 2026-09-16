@@ -122,7 +122,18 @@ impl AskEngine {
             post(WM_ASK_DONE, "Could not embed the question.".into());
             return;
         };
-        let chunks = self.store.lock().unwrap().context(&question, &qvec, CONTEXT_WORDS);
+        let (absent, chunks) = {
+            let store = self.store.lock().unwrap();
+            let absent = store.absent(&question, Some(&qvec));
+            (absent, if absent { Vec::new() } else { store.context(&question, &qvec, CONTEXT_WORDS) })
+        };
+        if absent {
+            // None of the question's words occur anywhere in the vault: say so instead of
+            // letting the model invent an answer from unrelated excerpts.
+            crate::util::log(&format!("absent gate: {question:?}"));
+            post(WM_ASK_DONE, "That isn't in your vault — none of those words appear in anything I've swallowed.".into());
+            return;
+        }
         if chunks.is_empty() {
             post(WM_ASK_DONE, "Nothing inside yet — drop something on me first.".into());
             return;

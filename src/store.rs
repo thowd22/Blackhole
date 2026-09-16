@@ -31,6 +31,48 @@ pub struct Hit {
 
 /// Semantic matches must clear this cosine (bge: relevant ≈ 0.6+, noise ≈ 0.5)…
 const MIN_COSINE: f32 = 0.45;
+/// Absent gate: a query with at least this many content terms, none of which occur
+/// anywhere in the vault, and no strong semantic match, has no answer here.
+const ABSENT_MIN_TERMS: usize = 2;
+const ABSENT_MAX_COSINE: f32 = 0.70;
+/// Minimum length for a query token to count as a content term.
+const CONTENT_TERM_MIN_LEN: usize = 4;
+
+/// English function words. In a small personal vault a word like "these" occurs in
+/// few items and would otherwise pass for a distinctive term (measured: it flipped
+/// two of nine test questions). Sorted for binary search.
+const STOPWORDS: &[&str] = &[
+    "about", "actually", "after", "again", "also", "another", "anything", "around", "back", "because",
+    "been", "before", "being", "below", "best", "between", "both", "came", "cant", "come", "could",
+    "days", "didnt", "does", "doesnt", "doing", "done", "dont", "down", "during", "each", "else",
+    "even", "ever", "every", "from", "gets", "getting", "give", "given", "going", "good", "have",
+    "having", "here", "hers", "however", "into", "isnt", "just", "keep", "kept", "know", "known",
+    "last", "like", "little", "long", "made", "make", "many", "might", "mine", "more", "most", "much",
+    "must", "myself", "need", "never", "next", "often", "once", "only", "other", "others", "over",
+    "please", "really", "right", "said", "same", "seen", "shall", "should", "show", "since", "some",
+    "something", "soon", "still", "such", "take", "taken", "tell", "than", "that", "their", "them",
+    "then", "there", "these", "they", "thing", "things", "this", "those", "though", "through", "thus",
+    "time", "took", "under", "until", "upon", "used", "using", "very", "want", "well", "went", "were",
+    "what", "whats", "when", "where", "whether", "which", "while", "whom", "whose", "will", "with",
+    "within", "without", "would", "youre", "your",
+];
+
+fn is_stopword(t: &str) -> bool {
+    STOPWORDS.binary_search(&t).is_ok()
+}
+
+/// Lower-cased alphanumeric query tokens long enough to carry meaning, minus function words.
+fn content_terms(query: &str) -> Vec<String> {
+    let mut out: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= CONTENT_TERM_MIN_LEN)
+        .map(|t| t.to_lowercase())
+        .filter(|t| !is_stopword(t))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
 /// Cosine is mapped to a 0..1 score as (cos - SEM_FLOOR) / (1 - SEM_FLOOR).
 const SEM_FLOOR: f32 = 0.4;
 /// Weight of a perfect keyword hit relative to a perfect semantic one.
@@ -101,11 +143,23 @@ impl Store {
         Ok(())
     }
 
-    /// Store embedded chunks for an item (replacing any it already had).
-    pub fn add_chunks(&mut self, item_id: i64, chunks: &[(String, Vec<f32>)]) -> rusqlite::Result<()> {
+    /// Store embedded chunks for an item (replacing any it already had), plus one
+    /// document unit — the title alone, `ord = -1`. A title is a whole-document
+    /// handle: "which file has my career history" matches "Resume.pdf" when no
+    /// single chunk does. Measured: +1 Hit@3 out of sample; adding opening words
+    /// or an LLM description to it measured worse, so it stays title-only.
+    pub fn add_chunks(&mut self, item_id: i64, chunks: &[(String, Vec<f32>)], title_unit: Option<(String, Vec<f32>)>) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM chunks WHERE item_id = ?1", params![item_id])?;
         self.index.retain(|e| e.item_id != item_id);
+        if let Some((title, vec)) = title_unit {
+            tx.execute(
+                "INSERT INTO chunks (item_id, ord, text, vec) VALUES (?1, -1, ?2, ?3)",
+                params![item_id, title, vec_to_blob(&vec)],
+            )?;
+            let chunk_id = tx.last_insert_rowid();
+            self.index.push(VecEntry { chunk_id, item_id, vec });
+        }
         for (ord, (text, vec)) in chunks.iter().enumerate() {
             tx.execute(
                 "INSERT INTO chunks (item_id, ord, text, vec) VALUES (?1, ?2, ?3, ?4)",
@@ -117,11 +171,11 @@ impl Store {
         tx.commit()
     }
 
-    /// Items that were swallowed before embeddings existed (or whose
-    /// embedding was interrupted) — used to backfill on startup.
+    /// Items that were swallowed before embeddings existed, whose embedding was
+    /// interrupted, or that predate document units — used to backfill on startup.
     pub fn unembedded(&self) -> Vec<(i64, String, String)> {
         self.conn
-            .prepare("SELECT id, title, content FROM items WHERE id NOT IN (SELECT DISTINCT item_id FROM chunks) ORDER BY id")
+            .prepare("SELECT id, title, content FROM items WHERE id NOT IN (SELECT DISTINCT item_id FROM chunks WHERE ord = -1) ORDER BY id")
             .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|rows| rows.filter_map(|r| r.ok()).collect()))
             .unwrap_or_default()
     }
@@ -228,7 +282,10 @@ impl Store {
         ranked.truncate(limit);
 
         let mut stmt = match self.conn.prepare(
-            "SELECT i.title, i.kind, i.source, substr(c.text, 1, 160) FROM items i JOIN chunks c ON c.id = ?2 WHERE i.id = ?1",
+            "SELECT i.title, i.kind, i.source,
+                    CASE WHEN c.ord < 0 THEN (SELECT substr(text, 1, 160) FROM chunks WHERE item_id = i.id AND ord = 0)
+                         ELSE substr(c.text, 1, 160) END
+             FROM items i JOIN chunks c ON c.id = ?2 WHERE i.id = ?1",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -252,6 +309,36 @@ impl Store {
                 .ok()
             })
             .collect()
+    }
+
+    /// Number of items whose text contains `term` (FTS5 token match).
+    fn items_containing(&self, term: &str) -> i64 {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1", params![format!("\"{term}\"")], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    /// Highest cosine between the query vector and anything in the vault.
+    pub fn best_cosine(&self, qvec: &[f32]) -> f32 {
+        if qvec.len() != DIM {
+            return 0.0;
+        }
+        self.index.iter().map(|e| cosine(qvec, &e.vec)).fold(0.0, f32::max)
+    }
+
+    /// "Not in your vault": the query has ≥2 content terms, none of them occurs in
+    /// any item, and nothing matches strongly by meaning. Lexical on purpose — cosine
+    /// thresholds and rank margins could not separate unanswerable questions
+    /// (they score as high as real ones); this rule caught 2/2 with 0 false absents.
+    pub fn absent(&self, query: &str, qvec: Option<&[f32]>) -> bool {
+        let terms = content_terms(query);
+        if terms.len() < ABSENT_MIN_TERMS {
+            return false;
+        }
+        if terms.iter().any(|t| self.items_containing(t) > 0) {
+            return false;
+        }
+        qvec.map(|v| self.best_cosine(v) < ABSENT_MAX_COSINE).unwrap_or(true)
     }
 
     /// Fraction of the query's terms each of the given items matches.
@@ -302,15 +389,10 @@ impl Store {
         // weight each by how rare it is across the vault, so "list", "with" or
         // "dates" don't drag random chunks up.
         let n_items = self.count().max(1) as f32;
-        let terms: Vec<(String, f32)> = query
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| t.len() >= 4)
-            .map(|t| t.to_lowercase())
+        let terms: Vec<(String, f32)> = content_terms(query)
+            .into_iter()
             .filter_map(|t| {
-                let docs: i64 = self
-                    .conn
-                    .query_row("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1", params![format!("\"{t}\"")], |r| r.get(0))
-                    .unwrap_or(0);
+                let docs = self.items_containing(&t);
                 let frac = docs as f32 / n_items;
                 // Present in more than a third of items: not distinctive.
                 (frac <= 0.34).then(|| (t, 0.08 * (1.0 - frac)))
@@ -395,7 +477,7 @@ impl Store {
         let (n_chunks, raw_words): (i64, i64) = self
             .conn
             .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(length(text) - length(replace(text, ' ', '')) + 1), 0) FROM chunks WHERE item_id = ?1",
+                "SELECT COUNT(*), COALESCE(SUM(length(text) - length(replace(text, ' ', '')) + 1), 0) FROM chunks WHERE item_id = ?1 AND ord >= 0",
                 params![top.item],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -403,7 +485,7 @@ impl Store {
         // Consecutive chunks share OVERLAP_WORDS, which the merge below removes again.
         let doc_words = (raw_words as usize).saturating_sub(crate::chunk::OVERLAP_WORDS * (n_chunks.max(1) as usize - 1));
         if n_chunks > 0 && doc_words <= budget_words {
-            let Ok(mut all) = self.conn.prepare("SELECT id, ord, text FROM chunks WHERE item_id = ?1 ORDER BY ord") else {
+            let Ok(mut all) = self.conn.prepare("SELECT id, ord, text FROM chunks WHERE item_id = ?1 AND ord >= 0 ORDER BY ord") else {
                 return Vec::new();
             };
             if let Ok(rows) = all.query_map(params![top.item], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))) {

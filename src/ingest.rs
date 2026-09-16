@@ -110,7 +110,9 @@ fn embed_item(store: &Mutex<Store>, embedder: &Embedder, item_id: i64, title: &s
         .into_iter()
         .filter_map(|c| embedder.embed(&format!("{title}\n{c}")).ok().map(|v| (c, v)))
         .collect();
-    let _ = store.lock().unwrap().add_chunks(item_id, &chunks);
+    // Document unit: the title on its own (see Store::add_chunks).
+    let title_unit = embedder.embed(title).ok().map(|v| (title.to_string(), v));
+    let _ = store.lock().unwrap().add_chunks(item_id, &chunks, title_unit);
 }
 
 /// Worker loop. `notify` is called after each batch with the outcome.

@@ -295,9 +295,10 @@ impl SearchWin {
         let q = Self::question_of(&raw).unwrap_or(&raw).to_string();
         // Embed outside the store lock; the worker may be holding it to write.
         let qvec = if q.trim().is_empty() { None } else { self.embedder.embed(&q).ok() };
-        let (hits, total) = {
+        let (hits, total, absent) = {
             let store = self.store.lock().unwrap();
-            (store.search(&q, qvec.as_deref(), MAX_HITS), store.count())
+            let absent = !q.trim().is_empty() && store.absent(&q, qvec.as_deref());
+            (if absent { Vec::new() } else { store.search(&q, qvec.as_deref(), MAX_HITS) }, store.count(), absent)
         };
         self.hits = hits;
         SendMessageW(self.list, LB_RESETCONTENT, None, None);
@@ -312,6 +313,8 @@ impl SearchWin {
         }
         let status = if q.trim().is_empty() {
             format!("{total} items inside · recent   ↵ open  ^↵ reveal  ^C copy  Del forget  ? ask")
+        } else if absent {
+            "nothing in the vault mentions that".to_string()
         } else if asking {
             format!("↵ to ask · {} related items", self.hits.len())
         } else {
