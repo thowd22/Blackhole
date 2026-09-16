@@ -45,6 +45,39 @@ The single stubborn failure is document-level ("list all my employers"): no chun
 "employer", but the *document* is obviously the answer. Chunk-only indexes cannot see that; a
 document-level unit can.
 
+## 2b. Ultracode experiment round (2026-09-15) — what survived a blind held-out set
+
+Nine parallel agents, one technique each, against a 10-question dev set; a blind agent wrote 10 held-out
+questions; a judge re-ran the decisive comparisons on an idle machine with real query embeddings
+(`eval/harness.py` is the merged harness; `eval/results/judge-*.json`).
+
+**Every dev-set "9/9" was two questions wide and most did not survive the held-out set** — the
+dev↔held-out Hit@1 correlation across the ten proposals was *negative*. What did hold:
+
+| change | dev H@1 | held H@1 | held H@3 | verdict |
+|---|---|---|---|---|
+| shipped baseline | 7/9 | 7/9 | 8/9 | reference, 4.6 ms |
+| **document-level RRF** (`rrf_docs`), alone | 7/9 | **5/9** | 7/9 | **regression** — RRF throws away score magnitude; junk keyword ranks tie with 0.73-cosine matches. Do not replace the score blend. |
+| **title-only document units** under the existing score fusion | 7/9 | 7/9 | **9/9** | keep — free, +1 held Hit@3; opening words / LLM descriptions measured worse |
+| stopwords removed from the IDF term boost | fixes q07 | — | — | keep — function words were "distinctive" in a 9-item vault |
+| absent gate: ≥2 content terms, none anywhere in FTS vocabulary, cosine < 0.7 | 1/1 | 1/1 | 0 false absents | keep — the only working "not in your vault" signal; cosine thresholds and margins cannot do it |
+| corpus-anchored synonym table (dense side only) | 9/9 | 7/9 | 9/9 | fragile: gain came from job-title words of the one résumé; default OFF, ON in ask mode as a latency buy |
+| cross-encoder `mxbai-rerank-xsmall-v1` int8, k=10, 128 tokens, 6 threads, batch 1, **final order = reranker among scored docs** | **9/9** | **9/9** | 9/9 | **18/18 at 117 ms** — the only component that fixes the two questions every cheap config missed |
+| MiniLM reranker (fp32/O3/int8) | 9/9 | 8/9 | — | worse than mxbai and int8 flips answers |
+| bge-base / gte-small / arctic-s / e5-small / nomic / EmbeddingGemma | ≤9/9 | ≤7/9 | — | no reason to leave bge-small (nomic, gemma blow the latency budget) |
+| chunk size 200 words, structure-aware | 7/9 | 6/9 | 8/9 | neutral for retrieval; +3/33 evidence recall in a 600-word ask context — hold until an end-to-end answer eval exists |
+| LLM contextual enrichment (per doc / per chunk) | −1 | 5/9 | — | **measured worse twice**; dropped |
+| pseudo-relevance feedback / lite HyDE | 6/9 | — | 7/9 | strictly worse, doubles query-embed cost, inflates absent scores |
+
+Production configs (both validated on dev + held-out, 20 questions):
+- **Live search** (≤15 ms): baseline score fusion + title doc units + IDF stopwords + absent gate → 14/18 Hit@1, **18/18 Hit@3, 2/2 absent**, **4.5–5.0 ms** (85 % of it the bge-small query embed). Zero bytes added.
+- **Ask mode** (≤250 ms): the same + dense synonym expansion + mxbai int8 reranker (k=10) deciding the final document order → **18/18 Hit@1, 2/2 absent, 117 ms mean / 136 ms worst**. +92 MB download.
+
+Cancelled: RRF fusion in `Store::search`, chunk.rs change, embedding-model change, LLM enrichment.
+Next measurements (in order): a third ~30-question set written blind; per-pair reranker cost on a 4-core
+laptop (set `rerank_k` from a measured budget); a ~400-item vault; the absent rule against short queries;
+end-to-end answer quality with the 1.5B (the only thing that can settle chunking).
+
 ## 3. Scaled-down design for Blackhole
 
 Everything below runs on what we already ship (ONNX Runtime + DirectML, bge-small, Qwen2.5-1.5B) plus one
@@ -92,13 +125,12 @@ Anthropic's technique needs a capable LLM at ingest; our 1.5B produced generic, 
   errors are the 1.5B's reasoning; the fix is a bigger model on the GPU (PACKAGING.md phase 2b), not
   retrieval.
 
-## 4. Order of work
-1. Document units (title vector) + document-level RRF — **measured 13/14**, half a day.
-2. Cross-encoder reranker on ORT (embed model bytes; DirectML → CPU) — measured +1, the standard
-   production step.
-3. Synonym expansion table + evaluation harness ("Self-check").
-4. Chunk-size sweep (100 → 200 words) against the harness.
-5. LLM document descriptions at idle; per-chunk contexts only if eval says so.
+## 4. Order of work (revised after §2b)
+1. `store.rs`: stopword filter in the IDF boost + absent gate (≥2 content terms, none in the FTS vocabulary, cosine < 0.7). No model, no index change.
+2. `store.rs` + ingest: title-only document units (`chunks.ord = -1`), never handed to the LLM as evidence.
+3. `rerank.rs` (new): mxbai-rerank-xsmall-v1 int8 on ORT, ask path only; k=10, 128 tokens, batch 1, threads pinned; final document order = reranker among scored docs, fused score as tiebreak.
+4. `expand.rs` (new): dense-side synonym table, vocabulary-anchored, ask mode only.
+5. Evaluation: third blind question set; per-pair reranker cost on low-end hardware; end-to-end answer eval before touching chunking.
 
 ## 5. Rejected for this scale
 - Bigger embedding model (bge-base): measured worse here, 3× the bytes.
