@@ -47,7 +47,7 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
 
 ## How it works
 
-Everything below runs inside one 275 MB executable plus a 2.7 GB model folder. There is exactly one
+Everything below runs inside one 275 MB executable plus a 2.3 GB model folder. There is exactly one
 inference engine in the whole app — **ONNX Runtime**, driven through **DirectML** so the same binary uses an
 AMD, NVIDIA or Intel GPU, and the same models run on the Copilot+ NPU providers (Qualcomm QNN, AMD Ryzen AI,
 Intel OpenVINO) when those land. The engine DLLs are compiled into the exe and unpacked beside it on first
@@ -97,8 +97,11 @@ unanswerable questions score as high as real ones — the lexical test could.
    *whole* thing; otherwise it gets the best chunks with their neighbours, in document order, up to ~1,400
    words. Questions about order or time get a forced `Timeline:` scratchpad — small models list dates
    correctly far more often than they reason about them in one shot.
-4. **Generation**: **Llama 3.2 3B Instruct**, int4, on ONNX Runtime. The prompt pass (~2,000 tokens) runs on
-   the GPU; tokens stream into the panel as they're produced. The model is pre-loaded the moment you open
+4. **Generation**: **Llama 3.2 3B Instruct**, int4, on ONNX Runtime, entirely on the GPU. The prompt pass
+   (~1,300 tokens, about a second) runs on a dynamic-shape DirectML session; decoding runs on a second,
+   *static-shape* session that DirectML compiles into a single fused operator, so each token is one dispatch
+   (~9 ms, 100+ tok/s) instead of 400. Both share one fixed-capacity KV cache that never leaves the GPU;
+   tokens stream into the panel as they're produced. The model is pre-loaded the moment you open
    the panel and unloaded 60 s after you close it, so RAM is only spent while you're actually asking.
 
 The exact prompt of your last question is written to `%LOCALAPPDATA%\Blackhole\last_ask.txt`, and
@@ -115,7 +118,14 @@ weight-preserving graph tools (`tools/`) that turn a Hugging Face export into so
 | The tied 1.5 GB embedding matrix is transposed at runtime on every pass | `gemm_head.py` swaps in `Gemm(transB)` |
 | DirectML's GroupQueryAttention silently returns prompt-independent output when rotary is done inside the op | `explicit_rotary.py` moves rotary into explicit `RotaryEmbedding` nodes — the layout Microsoft's own DirectML exports use |
 | The embedding/LM-head matrix is fp32 (1.5 GB, held twice) | `shrink_embeddings.py` streams it into an fp16 lookup and an int4 `MatMulNBits` head — −2.6 GB RAM, *faster* decode |
+| The last-token `Slice` can't vary inside a fused DirectML graph | `logit_index.py` makes it a `Gather` on an int64 input, so the static decode session can be fused |
 | Split, partly dead external data files | `repack.py` writes one file with only referenced weights |
+
+Getting from 5 to 100+ tokens/s was not arithmetic: ONNX Runtime's profiler showed a decode step was 166 ms of
+CPU-side dispatch for ~400 DirectML operators at ~0.4 ms each. Pinning every symbolic dimension
+(`AddFreeDimensionOverrideByName`) lets DirectML fuse the whole decoder at load time. The dead ends
+(padded steps corrupt GroupQueryAttention; graph capture, spinning and fp16 alone changed nothing) are
+written down in [PACKAGING.md](PACKAGING.md#gpu-decode-2026-09-16-from-5-to-105-toks-on-the-same-engine).
 
 Any instruct model dropped beside the exe works if its `tokenizer.json` sits next to it: the chat template
 (ChatML, Llama 3, Phi, Gemma), stop tokens and fp16/fp32 cache layout are detected from the tokenizer and the
@@ -134,7 +144,7 @@ binary (`askeval`) that runs the actual pipeline and checks answers against rege
 | Right document in top 3 | 92 % | 88 % |
 | "Not in your vault" | 4/4, no false alarms | |
 | Correct answers (Llama 3.2 3B) | | **65 %** |
-| Latency | 5 ms | ~1.2 s to first text, ~8 tok/s |
+| Latency | 5 ms | ~1.1 s to first text, ~105 tok/s |
 
 The full story — what was tried, what won, what lost and why (bigger embedders lost; LLM chunk enrichment
 lost; RRF lost out of sample; the reranker and title units won) — is in [RAG.md](RAG.md). Model selection,
@@ -155,11 +165,12 @@ the DirectML findings and the memory work are in [PACKAGING.md](PACKAGING.md).
 
 ## Installing
 
-Download `Blackhole-<version>-x64-setup.exe` (≈2.9 GB: app + ONNX Runtime/DirectML + Llama 3.2 3B) and run
+Download `Blackhole-<version>-x64-setup.exe` (≈2.5 GB: app + ONNX Runtime/DirectML + Llama 3.2 3B) and run
 it. Per-user install by default (no admin), optional start-at-sign-in and desktop shortcut. Your vault in
 `%LOCALAPPDATA%\Blackhole` survives updates; uninstall asks before deleting it. Requires Windows 10 1903+ /
 Windows 11 x64; any GPU with DirectML (the CPU is used otherwise, more slowly). While answering, the app uses
-about 6 GB of RAM in the current hybrid mode; a pure-GPU mode that needs ~2.4 GB is working and being tuned.
+about 3.7 GB of RAM and ~5 GB of VRAM (weights are held by both GPU sessions); with no GPU it falls back to the
+CPU for everything at a few tokens per second.
 
 ## Building (from WSL)
 
@@ -203,7 +214,7 @@ cargo build --release --bin askeval   # end-to-end evaluation binary
 
 ## Roadmap
 
-Pure-GPU decode as the default (working, being tuned for speed) → MCP server (`put` / `retrieve` / `notify`)
+MCP server (`put` / `retrieve` / `notify`)
 so agents can use the vault as memory → CI/CD → search-panel polish (auto-resize, on-theme scrollbars, rich
 snippets) → OCR for images and scanned PDFs → Copilot+ NPU providers → code signing. Details and the
 reasoning behind each in [FEATURES.md](FEATURES.md).

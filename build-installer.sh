@@ -14,7 +14,7 @@ cargo build --release --bin blackhole
 rm -rf dist/stage && mkdir -p dist/stage/llama-3.2-3b
 cp target/x86_64-pc-windows-gnu/release/blackhole.exe runtime/onnxruntime.dll runtime/DirectML.dll README.md dist/stage/
 cp installer/LICENSE-MODELS.txt dist/stage/
-cp "$MODEL_DIR"/model_q4.onnx "$MODEL_DIR"/model_q4.onnx.data "$MODEL_DIR"/tokenizer.json dist/stage/llama-3.2-3b/
+cp "$MODEL_DIR"/model_q4f16.onnx "$MODEL_DIR"/model_q4f16.onnx.data "$MODEL_DIR"/tokenizer.json dist/stage/llama-3.2-3b/
 du -sh dist/stage
 # Inno Setup is a Windows program: hand it a Windows path.
 WIN_ISS=$(wslpath -w "$(pwd)/installer/blackhole.iss")

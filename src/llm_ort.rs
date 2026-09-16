@@ -10,7 +10,9 @@
 
 use ort::ep::{DirectML, ExecutionProvider, CPU};
 use ort::memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType};
+use ort::session::builder::SessionBuilder;
 use ort::session::Session;
+use ort::AsPointer;
 use ort::value::{DynValue, Tensor};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -42,6 +44,14 @@ const GPU_KV_CAPACITY: usize = 4096;
 fn kv_capacity() -> usize {
     std::env::var("BLACKHOLE_KV_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(GPU_KV_CAPACITY)
 }
+/// Width of the static-shape decode session (`BLACKHOLE_SEQ`). Padding a step
+/// out to a wider shape corrupts DirectML's GroupQueryAttention, so this is 1:
+/// each decode step is exactly one token, and the prompt goes through the
+/// dynamic-shape session instead.
+const GPU_STATIC_SEQ: usize = 1;
+fn static_seq() -> usize {
+    std::env::var("BLACKHOLE_SEQ").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(GPU_STATIC_SEQ)
+}
 const PREFILL_TIMELINE: &str = "Timeline:\n";
 
 /// An excerpt handed to the model as grounding.
@@ -69,6 +79,10 @@ pub struct Llm {
     kv_f16: bool,
     /// Decode on the GPU too (cache stays resident there); the CPU session is not loaded.
     gpu_decode: bool,
+    /// The graph takes the position whose logits to return (`tools/logit_index.py`).
+    has_logit_index: bool,
+    /// Static-shape session: every step is exactly this many tokens (0 = dynamic shapes).
+    seq: usize,
     gpu_device: i32,
     /// Owns the GPU cache buffers' memory; must outlive them (freeing through a
     /// dropped allocator crashes), so it lives as long as the model.
@@ -165,12 +179,52 @@ fn opt(name: &str) -> bool {
     std::env::var("BLACKHOLE_LLM_OPTS").map(|v| v.split(',').any(|o| o.trim() == name)).unwrap_or(false)
 }
 
-fn gpu_session(path: &Path, device: i32) -> anyhow::Result<Session> {
+/// Pin a symbolic input dimension so DirectML can fuse the graph at load time.
+fn override_dim(b: &mut SessionBuilder, name: &str, value: i64) -> anyhow::Result<()> {
+    let cname = std::ffi::CString::new(name)?;
+    let api = ort::api();
+    let status = unsafe { (api.AddFreeDimensionOverrideByName)(b.ptr_mut(), cname.as_ptr(), value) };
+    if !status.0.is_null() {
+        let msg = unsafe { std::ffi::CStr::from_ptr((api.GetErrorMessage)(status.0)) }.to_string_lossy().into_owned();
+        unsafe { (api.ReleaseStatus)(status.0) };
+        anyhow::bail!("free dimension override {name}={value}: {msg}");
+    }
+    Ok(())
+}
+
+/// `static_shapes`: Some((seq, capacity)) pins every symbolic dimension. With
+/// dynamic shapes DirectML dispatches the ~400 decoder ops one by one (~0.4 ms of
+/// CPU work each); with static shapes it compiles the layer stack into one fused
+/// operator and a decode step costs a single dispatch.
+fn gpu_session(path: &Path, device: i32, static_shapes: Option<(usize, usize)>) -> anyhow::Result<Session> {
     let b = ok(Session::builder())?;
     let b = ok(b.with_execution_providers([dml_provider(device).build().error_on_failure()]))?;
     let mut b = ok(b.with_memory_pattern(false))?;
+    if let Some((seq, cap)) = static_shapes {
+        override_dim(&mut b, "batch_size", 1)?;
+        override_dim(&mut b, "sequence_length", seq as i64)?;
+        override_dim(&mut b, "past_sequence_length", cap as i64)?;
+        override_dim(&mut b, "total_sequence_length", cap as i64)?;
+    }
     if opt("devinit") {
         b = ok(b.with_device_allocated_initializers())?;
+    }
+    // DirectML-specific session knobs (BLACKHOLE_LLM_OPTS): `capture` records the decode
+    // step's command list once and replays it (needs static shapes and device-bound I/O),
+    // `nofusion` turns off DML graph fusion, `spin` lets the CPU spin-wait on the GPU.
+    if opt("capture") {
+        b = ok(b.with_config_entry("ep.dml.enable_graph_capture", "1"))?;
+    }
+    if opt("nofusion") {
+        b = ok(b.with_config_entry("ep.dml.disable_graph_fusion", "1"))?;
+    }
+    if opt("spin") {
+        b = ok(b.with_config_entry("ep.dml.enable_cpu_sync_spinning", "1"))?;
+    }
+    // `profile`: per-node timings to <exe dir>\llm-profile*.json (ORT's chrome-trace format).
+    if opt("profile") {
+        let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
+        b = ok(b.with_profiling(dir.join("llm-profile")))?;
     }
     ok(b.commit_from_file(path))
 }
@@ -192,13 +246,18 @@ fn cpu_session(path: &Path) -> anyhow::Result<Session> {
 impl Llm {
     pub fn load(path: &Path) -> anyhow::Result<Llm> {
         let force_cpu = std::env::var_os("BLACKHOLE_CPU").is_some();
-        // BLACKHOLE_DECODE=gpu: decode on DirectML as well and skip the CPU session
-        // entirely (roughly halves RAM; per-token cost is DirectML's dispatch overhead).
-        let want_gpu_decode = std::env::var("BLACKHOLE_DECODE").map(|v| v == "gpu").unwrap_or(false);
+        // Decode on DirectML too (default when a GPU is present: ~100 tok/s on a static-shape
+        // session, no CPU session in memory). BLACKHOLE_DECODE=cpu keeps the old hybrid path.
+        let want_gpu_decode = std::env::var("BLACKHOLE_DECODE").map(|v| v != "cpu").unwrap_or(true);
         let adapter = if force_cpu { None } else { crate::gpu::preferred() };
+        // Graph-only files are small; a `logit_index` input marks a graph prepared for static shapes.
+        let has_logit_index = std::fs::metadata(path).map(|m| m.len() < 64 << 20).unwrap_or(false)
+            && std::fs::read(path).map(|b| b.windows(11).any(|w| w == b"logit_index")).unwrap_or(false);
+        let seq = if want_gpu_decode && has_logit_index { static_seq() } else { 0 };
+        let static_shapes = if seq > 0 { Some((seq, kv_capacity())) } else { None };
         let mut gpu_device = 0;
         let gpu = match adapter {
-            Some(a) if DirectML::default().is_available().unwrap_or(false) => match gpu_session(path, a.index) {
+            Some(a) if DirectML::default().is_available().unwrap_or(false) => match gpu_session(path, a.index, None) {
                 Ok(s) => {
                     crate::util::log(&format!("llm: prompt pass on DirectML adapter {} ({}, {} MB)", a.index, a.name, a.vram_mb));
                     gpu_device = a.index;
@@ -211,9 +270,19 @@ impl Llm {
             },
             _ => None,
         };
+        let mut gpu = gpu;
         let gpu_decode = want_gpu_decode && gpu.is_some();
-        // The CPU session is only needed when it decodes (or when there is no GPU).
-        let cpu = if gpu_decode { gpu_session(path, gpu_device)? } else { cpu_session(path)? };
+        // Pure GPU decode. With a static-shape graph the dynamic DirectML session runs the
+        // prompt pass and a second, static one-token session decodes (~20x faster per step
+        // than dynamic dispatch); both write the same GPU cache buffers. Without static
+        // shapes the one dynamic session does both. Otherwise the CPU session decodes.
+        let cpu = if gpu_decode && seq > 0 {
+            gpu_session(path, gpu_device, static_shapes)?
+        } else if gpu_decode {
+            gpu.take().unwrap()
+        } else {
+            cpu_session(path)?
+        };
         let gpu_alloc = if gpu_decode {
             let mem = ok(MemoryInfo::new(AllocationDevice::DIRECTML, 0, AllocatorType::Device, MemoryType::Default))?;
             Some(ok(Allocator::new(&cpu, mem))?)
@@ -221,6 +290,11 @@ impl Llm {
             None
         };
         let backend = if gpu_decode { "DirectML" } else if gpu.is_some() { "DirectML + CPU" } else { "CPU" };
+        let _ = &gpu_device;
+        let seq = if gpu_decode { seq } else { 0 };
+        if seq > 0 {
+            crate::util::log(&format!("llm: static shapes, {seq}-token steps, cache capacity {}", kv_capacity()));
+        }
         let session = &cpu;
         // Cache geometry from the graph itself: count past_key_values.N.key inputs, read their dims.
         let mut layers = 0;
@@ -257,7 +331,7 @@ impl Llm {
         let eos: Vec<u32> = STOP_TOKENS.iter().filter_map(|t| tok.token_to_id(t)).collect();
         crate::util::log(&format!("llm: {} layout, {family:?} template{}, {} stop tokens, kv {}", if wants_position_ids { "HF" } else { "GenAI" }, if no_think { " (no-think)" } else { "" }, eos.len(), if kv_f16 { "f16" } else { "f32" }));
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Llm { family, no_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, gpu_decode, gpu_device, gpu_alloc, backend, name })
+        Ok(Llm { family, no_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, gpu_decode, has_logit_index, seq, gpu_device, gpu_alloc, backend, name })
     }
 
     fn is_temporal(question: &str) -> bool {
@@ -373,6 +447,7 @@ impl Llm {
         input_ids: &Tensor<i64>,
         mask: &Tensor<i64>,
         pos: &Tensor<i64>,
+        logit_index: Option<&Tensor<i64>>,
         past: &[DynValue],
     ) -> anyhow::Result<(u32, Vec<DynValue>)> {
         let mut binding = ok(gpu.create_binding())?;
@@ -380,6 +455,9 @@ impl Llm {
         ok(binding.bind_input("attention_mask", mask))?;
         if wants_position_ids {
             ok(binding.bind_input("position_ids", pos))?;
+        }
+        if let Some(li) = logit_index {
+            ok(binding.bind_input("logit_index", li))?;
         }
         for (i, kv) in past.iter().enumerate() {
             ok(binding.bind_input(Self::kv_name(i, "past_key_values"), kv))?;
@@ -404,26 +482,52 @@ impl Llm {
     fn step(&mut self, ids: &[u32], past_len: usize, past: Vec<DynValue>) -> anyhow::Result<(u32, Vec<DynValue>)> {
         let n = ids.len();
         let total = past_len + n;
-        let input_ids = ok(Tensor::from_array(([1usize, n], ids.iter().map(|&i| i as i64).collect::<Vec<_>>())))?;
+        // Static-shape sessions see exactly `seq` tokens a step: the live ones first, then
+        // padding. The pads land in cache rows past the live length, where the next step
+        // overwrites them, and the causal mask keeps live tokens from ever attending to them.
+        // The prompt pass (past_len == 0) uses the dynamic session when there is one.
+        let dynamic_prompt = past_len == 0 && self.gpu_decode && self.gpu.is_some();
+        let width = if self.seq > 0 && !dynamic_prompt { self.seq } else { n };
+        if n > width {
+            anyhow::bail!("{n} tokens in one step, static width is {width}");
+        }
+        let pad = self.eos.first().copied().unwrap_or(0) as i64;
+        let mut ids64: Vec<i64> = ids.iter().map(|&i| i as i64).collect();
+        ids64.resize(width, pad);
+        let input_ids = ok(Tensor::from_array(([1usize, width], ids64)))?;
         let mask = ok(Tensor::from_array(([1usize, total], vec![1i64; total])))?;
-        let pos = ok(Tensor::from_array(([1usize, n], (past_len..total).map(|p| p as i64).collect::<Vec<_>>())))?;
+        let pos = ok(Tensor::from_array(([1usize, width], (past_len..past_len + width).map(|p| p as i64).collect::<Vec<_>>())))?;
+        let logit_index = ok(Tensor::from_array(([1usize], vec![n as i64 - 1])))?;
         let layers = self.layers;
 
         if self.gpu_decode {
             let dbg = std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some();
             if dbg {
-                crate::util::log(&format!("gpu-decode step: n={n} past_len={past_len} past_values={}", past.len()));
+                crate::util::log(&format!("gpu-decode step: n={n} width={width} past_len={past_len} past_values={}", past.len()));
             }
             // Cache stays on the GPU between steps; only the logits come back.
-            let mut binding = ok(self.cpu.create_binding())?;
+            let session = if dynamic_prompt { self.gpu.as_mut().unwrap() } else { &mut self.cpu };
+            let mut binding = ok(session.create_binding())?;
             ok(binding.bind_input("input_ids", &input_ids))?;
-            ok(binding.bind_input("attention_mask", &mask))?;
             if self.wants_position_ids {
                 ok(binding.bind_input("position_ids", &pos))?;
             }
-            if total > kv_capacity() {
-                anyhow::bail!("prompt of {total} tokens exceeds the GPU cache capacity of {}", kv_capacity());
+            if self.has_logit_index {
+                ok(binding.bind_input("logit_index", &logit_index))?;
             }
+            let cap = kv_capacity();
+            let occupied = past_len + width;
+            if occupied > cap {
+                anyhow::bail!("{occupied} tokens exceed the GPU cache capacity of {cap}");
+            }
+            // Fixed-capacity mask (ones for the occupied positions, pads included so GQA appends
+            // the step's rows after the live ones): GroupQueryAttention reads the live length
+            // from ReduceSum(mask) and the buffer length from Shape(mask), so every step has the
+            // same shapes.
+            let mut full = vec![0i64; cap];
+            full[..occupied].fill(1);
+            let mask = ok(Tensor::from_array(([1usize, cap], full)))?;
+            ok(binding.bind_input("attention_mask", &mask))?;
             // GenAI's shared-buffer convention: fixed-capacity cache buffers bound as BOTH past
             // and present, so GroupQueryAttention writes the new rows in place. bind_input keeps
             // a reference; bind_output takes the value and hands it back via outputs.remove().
@@ -439,7 +543,7 @@ impl Llm {
             if dbg {
                 crate::util::log("gpu-decode: bound, running");
             }
-            let mut outputs = ok(self.cpu.run_binding(&binding))?;
+            let mut outputs = ok(session.run_binding(&binding))?;
             if dbg {
                 crate::util::log("gpu-decode: ran");
             }
@@ -454,7 +558,7 @@ impl Llm {
         }
         if past_len == 0 {
             if let Some(gpu) = self.gpu.as_mut() {
-                match Self::prompt_pass_gpu(gpu, layers, self.wants_position_ids, &input_ids, &mask, &pos, &past) {
+                match Self::prompt_pass_gpu(gpu, layers, self.wants_position_ids, &input_ids, &mask, &pos, self.has_logit_index.then_some(&logit_index), &past) {
                     Ok(r) => return Ok(r),
                     Err(e) => {
                         // A kernel this export doesn't support on DirectML: do the pass on the CPU from now on.
@@ -469,6 +573,9 @@ impl Llm {
         inputs.push(("attention_mask".into(), mask.into()));
         if self.wants_position_ids {
             inputs.push(("position_ids".into(), pos.into()));
+        }
+        if self.has_logit_index {
+            inputs.push(("logit_index".into(), logit_index.into()));
         }
         for (i, kv) in past.into_iter().enumerate() {
             inputs.push((Self::kv_name(i, "past_key_values").into(), kv.into()));
@@ -504,8 +611,18 @@ impl Llm {
             out.push_str(PREFILL_TIMELINE);
         }
 
-        let past = if self.gpu_decode { self.device_kv()? } else { self.empty_past()? };
-        let (mut next, mut past) = self.step(&prompt_ids, 0, past)?;
+        let mut past = if self.gpu_decode { self.device_kv()? } else { self.empty_past()? };
+        let mut next = 0u32;
+        let mut done = 0;
+        // Dynamic shapes take the whole prompt in one pass; static ones in `seq`-token chunks.
+        let chunk = if self.seq > 0 && !(self.gpu_decode && self.gpu.is_some()) { self.seq } else { prompt_ids.len().max(1) };
+        while done < prompt_ids.len() {
+            let end = (done + chunk).min(prompt_ids.len());
+            let (n, p) = self.step(&prompt_ids[done..end], done, past)?;
+            next = n;
+            past = p;
+            done = end;
+        }
         let mut len = prompt_ids.len();
         let mut generated: Vec<u32> = Vec::new();
         // Decode the whole sequence each step and emit the new suffix: decoding a
@@ -542,5 +659,17 @@ impl Llm {
             crate::util::log(&format!("llm out ({} tokens): {}", generated.len(), out.replace('\n', " ⏎ ").chars().take(200).collect::<String>()));
         }
         Ok(out)
+    }
+}
+
+impl Drop for Llm {
+    fn drop(&mut self) {
+        // ORT only writes the profile once the session ends it.
+        if opt("profile") {
+            match self.cpu.end_profiling() {
+                Ok(p) => crate::util::log(&format!("llm: profile written to {p}")),
+                Err(e) => crate::util::log(&format!("llm: end_profiling failed: {e}")),
+            }
+        }
     }
 }

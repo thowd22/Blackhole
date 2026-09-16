@@ -142,10 +142,10 @@ Findings that generalise:
   exports already use the explicit form.
 - Runtime `Transpose` of the tied 1.5 GB embedding matrix in the LM head (`tools/gemm_head.py` → `Gemm(transB)`)
   and full-sequence logits (`tools/last_logits.py`) are both worth removing from any export before use.
-- fp16 exports decode slowly on the CPU provider (4–5 tok/s vs 7–8 fp32): pick fp32 for the hybrid
-  (GPU prompt / CPU decode) or decode on the GPU.
-- Peak working set is dominated by holding two sessions (CPU + DirectML) plus fp32 embedding tables; the
-  GPU-only decode mode (`BLACKHOLE_DECODE=gpu`) exists to trade tok/s for RAM.
+- fp16 exports decode slowly on the CPU provider (4–5 tok/s vs 7–8 fp32) but are strictly better on the GPU;
+  the shipped model is the fp16 graph.
+- Peak working set in the hybrid was dominated by holding two sessions (CPU + DirectML) plus fp32 embedding
+  tables; GPU decode (now the default, see below) drops the CPU session.
 
 Model preparation recipe (all graph-only, no weight rewrite): `last_logits.py` → `gemm_head.py` (if the LM head
 transposes at runtime) → `explicit_rotary.py` (if GQA has `do_rotary=1`) → `trim_gqa.py` (GenAI graphs on ORT 1.20).
@@ -161,17 +161,59 @@ Measured with `askeval.exe` (peak working set, Llama 3.2 3B int4, hybrid DirectM
 | weight prepacking off (`prepack0`) | 6.6 GB | **0.3 tok/s** | never — MatMulNBits needs packed weights |
 | memory pattern off / device-allocated initializers | 8.7 GB | — | no effect |
 | **embedding → fp16 Gather + Cast, LM head → int4 MatMulNBits** (`tools/shrink_embeddings.py`) | **6.1 GB** | **8.4 tok/s** | shipped; disk 3.25 → 2.73 GB after `tools/repack.py` |
-| GPU-resident decode, no CPU session (`BLACKHOLE_DECODE=gpu`) | 3.7 GB | 5–6 tok/s | **parked**: decodes garbage — DirectML's GQA kernel needs GenAI's cache convention (fixed-capacity buffers + its own seqlens handling), which neither "growing present" nor "shared past/present" reproduced; an allocator-lifetime crash on this path is fixed |
+| GPU-resident decode, no CPU session (`BLACKHOLE_DECODE=gpu`) | 2.2–3.7 GB | 5–6 tok/s dynamic, **~105 tok/s static** | **shipped** — see "GPU decode" below |
 
-Where the remaining ~6 GB goes: the DirectML session keeps ~2.5 GB of host memory alongside VRAM, the CPU
+Where the hybrid's ~6 GB went: the DirectML session keeps ~2.5 GB of host memory alongside VRAM, the CPU
 session holds the int4 weights plus their prepacked copies (~2.5 GB), embeddings + reranker ~0.6 GB, the rest
-is KV cache and arenas. Next steps in order of payoff: make the GPU-resident decode correct (removes the CPU
-session on GPU machines, → ~3.7 GB), or an ORT upgrade whose GQA/`GatherBlockQuantized` support lets the
-embedding itself be int4 (another ~0.75 GB).
+is KV cache and arenas. The GPU-decode path below removes the CPU session; the remaining lever is an ORT
+upgrade whose GQA/`GatherBlockQuantized` support lets the embedding itself be int4 (another ~0.75 GB).
 
 Model preparation recipe, in order: `last_logits.py` → `gemm_head.py` → `explicit_rotary.py` (GQA exports with
-`do_rotary=1`) → `shrink_embeddings.py` → `repack.py` (one data file, dead bytes dropped). All graph edits are
-streaming/low-memory and never rewrite the int4 weights.
+`do_rotary=1`) → `shrink_embeddings.py` (fp32 embeddings only) → `logit_index.py` → `repack.py` (one data
+file, dead bytes dropped). All graph edits are streaming/low-memory and never rewrite the int4 weights.
+
+## GPU decode (2026-09-16): from 5 to 105 tok/s on the same engine
+
+Everything runs on DirectML, so this works unchanged on AMD, NVIDIA and Intel GPUs, and on the Copilot+
+iGPUs; NPU providers plug in as further execution providers later.
+
+What the profiler said (`BLACKHOLE_LLM_OPTS=profile`, ORT's chrome trace): a decode step on the dynamic-shape
+graph was 186 ms, of which 166 ms was **CPU-side dispatch of ~400 DirectML operators, ~0.4 ms each**
+(MatMulNBits 350 µs, RotaryEmbedding 890 µs, SkipSimplifiedLayerNorm 435 µs) and 0 ms on the CPU provider.
+Not arithmetic: fp16 vs fp32 activations, a fixed-capacity mask, `ep.dml.enable_graph_capture`,
+`ep.dml.enable_cpu_sync_spinning` and `ep.dml.disable_graph_fusion` all left it at 5.3–5.5 tok/s.
+
+What fixed it: **pin every symbolic dimension** (`AddFreeDimensionOverrideByName`: `batch_size=1`,
+`sequence_length=1`, `past_sequence_length=total_sequence_length=4096`). With static shapes DirectML
+compiles the decoder into one fused operator at session load (~1.5 s extra) and a step is one dispatch:
+**9 ms, 105–112 tok/s** on the RX 9070 XT, answers byte-identical to the CPU path.
+
+Things learned on the way, so nobody repeats them:
+
+- **Padding a step corrupts DirectML's GroupQueryAttention.** A 64-token static width with one live token
+  plus 63 pads (mask counting the pads, so GQA appends after the live rows) produced "IQuestionQuestion…"
+  from the second token on, fused or not. Width 1 is exact. So the prompt cannot go through the static
+  session in chunks; it runs on a second, dynamic-shape DirectML session (~1 s for 1,300 tokens at fp16).
+  Both sessions bind the same fixed-capacity cache buffers as past *and* present (GenAI's shared-buffer
+  convention), so the prompt's cache is simply there when decode starts.
+- **The last-token pick must be an ordinary tensor op.** `logit_index.py` turns the `Slice(-1)` from
+  `last_logits.py` into `Gather(axis=1, indices=logit_index)` fed by an int64 graph input; Slice starts/ends
+  are CPU-side inputs and cannot vary inside a fused graph. The loader recognises the `logit_index` input
+  and only enables static shapes for graphs that have it.
+- Two DirectML sessions do **not** double host memory: peak working set is 3.7 GB either way (2.2 GB for one
+  dynamic session; the fused static graph accounts for the rest). VRAM holds the weights twice (~4.6 GB fp16).
+- fp16 activations (`model_q4f16`) beat fp32 on the GPU everywhere: prompt pass 1.0 s vs 6.8 s, 2.3 vs 2.7 GB
+  on disk, same answers. fp32 was only ever preferred for CPU decode, which this path no longer does.
+
+| Path | TTFT | Decode | Peak WS | Disk |
+|---|---|---|---|---|
+| hybrid: DirectML prompt, CPU decode (fp32 graph) | 1.2 s | 7–8 tok/s | 6.1 GB | 2.7 GB |
+| DirectML decode, dynamic shapes (fp16) | 1.1 s | 5.4 tok/s | 2.2 GB | 2.3 GB |
+| **DirectML decode, static shapes + dynamic prompt session (fp16)** | **1.1 s** | **~105 tok/s** | 3.7 GB | 2.3 GB |
+
+Default: GPU decode whenever a DirectML adapter exists; `BLACKHOLE_DECODE=cpu` restores the hybrid;
+`BLACKHOLE_KV_CAP` sets the cache capacity (4096 tokens ≈ 0.5 GB VRAM at fp16 for the 3B); `BLACKHOLE_SEQ`
+sets the static width (leave at 1). No GPU → CPU session for everything, as before.
 
 ## Windows-specific implementation notes
 
