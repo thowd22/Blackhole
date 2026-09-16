@@ -36,6 +36,11 @@ fn main() {
         mcp::run_stdio_proxy();
         return;
     }
+    // `--selftest` (CI smoke test): unpack the runtime, embed a sentence, open a scratch
+    // vault, add and search one item. Exit code 0 means the bundle works.
+    if std::env::args().any(|a| a == "--selftest") {
+        std::process::exit(selftest());
+    }
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         if OleInitialize(None).is_err() {
@@ -101,4 +106,46 @@ fn main() {
             DispatchMessageW(&msg);
         }
     }
+}
+
+fn selftest() -> i32 {
+    let step = |name: &str, r: Result<(), String>| -> bool {
+        match r {
+            Ok(()) => { println!("ok    {name}"); true }
+            Err(e) => { println!("FAIL  {name}: {e}"); false }
+        }
+    };
+    let t0 = std::time::Instant::now();
+    if !step("runtime", runtime::init().map(|_| ()).map_err(|e| e.to_string())) {
+        return 1;
+    }
+    let embedder = match embed::Embedder::load() {
+        Ok(e) => { println!("ok    embedder on {}", e.backend); e }
+        Err(e) => { println!("FAIL  embedder: {e}"); return 1; }
+    };
+    let vec = match embedder.embed("a small black hole that eats files") {
+        Ok(v) if v.len() == embed::DIM => { println!("ok    embed ({} dims)", v.len()); v }
+        Ok(v) => { println!("FAIL  embed: {} dims", v.len()); return 1; }
+        Err(e) => { println!("FAIL  embed: {e}"); return 1; }
+    };
+    let dir = std::env::temp_dir().join(format!("blackhole-selftest-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let db = dir.join("vault.db");
+    let ok = (|| -> Result<(), String> {
+        let store = std::sync::Mutex::new(store::Store::open(&db).map_err(|e| e.to_string())?);
+        let e = ingest::extract_text("The quick violet fox jumped over the accretion disk.");
+        let id = store.lock().unwrap().add(&e.title, e.kind, None, &e.content, &ingest::hash_of(&e), util::now_secs()).map_err(|e| e.to_string())?.ok_or("not added")?;
+        ingest::embed_item(&store, &embedder, id, &e.title, &e.content);
+        let hits = store.lock().unwrap().search("violet fox", Some(&vec), 5);
+        if hits.first().map(|h| h.id) != Some(id) {
+            return Err(format!("search returned {} hits, first {:?}", hits.len(), hits.first().map(|h| h.id)));
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    if !step("vault add + search", ok) {
+        return 1;
+    }
+    println!("selftest passed in {:.1}s", t0.elapsed().as_secs_f32());
+    0
 }

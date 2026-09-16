@@ -264,7 +264,15 @@ As built: the running dot hosts a Streamable-HTTP endpoint on `127.0.0.1:47811` 
 - Security: put/retrieve are local-only; an allowlist of client names and a per-client "may notify" toggle in settings so a noisy tool can be muted.
 - Ships as a `--mcp` flag on the same exe (no second binary): the running dot instance handles requests, so the animation and bubbles reflect agent activity.
 
-## 10. CI/CD — GitHub Actions — P1
+## 10. CI/CD — GitHub Actions — P1 — shipped 2026-09-16 (`.github/workflows/ci.yml`)
+
+As built: one workflow. Every push/PR cross-compiles the Windows exe on `ubuntu-latest` with MinGW (the dev
+flow), runs clippy, then a `windows-latest` job runs `blackhole.exe --selftest` (runtime unpack, embed, scratch
+vault add + search, CPU provider). Embedded assets come from `ci/fetch-assets.sh` (sha256-pinned, cached).
+Tags `v*` add a release job: `ci/prepare-model.sh` downloads Qwen3-4B and runs the graph tools, Inno Setup
+builds the installer, and a GitHub Release gets the portable zip, the installer split into <2 GiB parts
+(GitHub's per-asset cap) and `SHA256SUMS.txt`. The workflow file carries notes on the Linux/macOS plumbing.
+The plan as written follows.
 
 - **CI on every push/PR** (`windows-latest` runner, native `x86_64-pc-windows-gnu` or MSVC target): `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build --release`, unit tests for the pure parts (chunker, tokenizer, FTS query builder, store fusion).
 - **Model & runtime fetch step**: the build embeds bge-small (`model.onnx`, `vocab.txt`), the Qwen tokenizers and the ORT/DirectML DLLs via `include_bytes!`, so CI downloads them (Hugging Face + NuGet, pinned versions/hashes) into `models/` and `runtime/` and caches them between runs (`actions/cache` keyed on the pin file).

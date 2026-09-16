@@ -49,7 +49,9 @@ impl Embedder {
     /// Try the GPU first; fall back to the CPU provider of the same runtime.
     pub fn load() -> anyhow::Result<Embedder> {
         let tok = WordPiece::new(VOCAB_TXT);
-        if let Some(a) = crate::gpu::preferred() {
+        // BLACKHOLE_CPU: skip the GPU (CI runners, debugging).
+        let force_cpu = std::env::var_os("BLACKHOLE_CPU").is_some();
+        if let Some(a) = crate::gpu::preferred().filter(|_| !force_cpu) {
             if DirectML::default().is_available().unwrap_or(false) {
                 if let Ok(session) = gpu_session(a.index) {
                     return Ok(Embedder { session: Mutex::new(session), tok, backend: "DirectML" });

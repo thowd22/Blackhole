@@ -1,0 +1,202 @@
+# Blackhole CI/CD
+#
+# push / PR  → build the Windows x64 exe (cross-compiled from Linux with MinGW, exactly
+#              like the dev flow), clippy, then smoke-test the exe on a Windows runner.
+# tag v*     → the same, plus: prepare the LLM, build the Inno Setup installer, publish
+#              a GitHub Release with the portable exe, the installer (split into
+#              <2 GiB parts — GitHub's per-asset limit) and checksums.
+#
+# ── Plumbing for other platforms (not built yet) ─────────────────────────────────────
+# The app is Win32 today (src/dot.rs, search.rs, bubble.rs, tray.rs, drop.rs). When a
+# Linux or macOS front end exists, add a matrix entry per target here:
+#
+#   linux-x64:   runs-on ubuntu-latest, target x86_64-unknown-linux-gnu, no MinGW.
+#                Runtime: fetch onnxruntime-linux-x64-<ver>.tgz from the ONNX Runtime
+#                GitHub release instead of the NuGet DLLs (ci/fetch-assets.sh), embed
+#                libonnxruntime.so; GPU via the ROCm/CUDA EPs or WebGPU EP, CPU fallback.
+#                Package: AppImage or .deb; icon/desktop file replace build.rs's windres.
+#   macos-arm64: runs-on macos-latest, target aarch64-apple-darwin. Runtime:
+#                onnxruntime-osx-arm64-<ver>.tgz (CoreML EP for the Neural Engine).
+#                Package: .app bundle + notarised .dmg (needs Apple Developer certs in
+#                secrets: APPLE_CERT_P12, APPLE_CERT_PASSWORD, APPLE_ID, APPLE_TEAM_ID).
+#   Both: `cargo test` for the pure modules (chunk, expand, store fusion, pdf_layout)
+#                can run natively there — on Windows-only code they can't run here yet.
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write   # releases
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-pc-windows-gnu
+
+jobs:
+  build:
+    name: build (windows x64, cross from linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: MinGW cross toolchain (windres, linker)
+        run: sudo apt-get update -q && sudo apt-get install -y -q mingw-w64
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      # Models + runtime DLLs are compiled into the exe (include_bytes!). Pinned by
+      # sha256 in the script; cached on the script's hash so a pin change refetches.
+      - name: Cache embedded assets
+        id: assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            models/bge-small-en-v1.5
+            models/rerank-mxbai-int8
+            models/qwen2.5
+            runtime
+          key: assets-${{ hashFiles('ci/fetch-assets.sh') }}
+
+      - name: Fetch embedded assets
+        run: ci/fetch-assets.sh
+
+      - name: Clippy
+        run: cargo clippy --release --target ${{ env.TARGET }} --bin blackhole -- -A clippy::all -W clippy::correctness
+
+      - name: Build
+        run: cargo build --release --target ${{ env.TARGET }} --bin blackhole
+
+      - name: Version stamp
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT";
+          else echo "version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)"/\1/')-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blackhole-exe
+          path: target/${{ env.TARGET }}/release/blackhole.exe
+          if-no-files-found: error
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+
+  smoke:
+    name: smoke test (windows)
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: blackhole-exe
+      # No GPU on the runner: force the CPU provider. The exe unpacks its bundled
+      # ONNX Runtime + DirectML DLLs, loads the embedder, opens a scratch vault, adds
+      # one note and searches for it. A broken DLL/model bundle fails here, not on a user.
+      - name: blackhole.exe --selftest
+        shell: pwsh
+        env:
+          BLACKHOLE_CPU: "1"
+        run: |
+          .\blackhole.exe --selftest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  release:
+    name: release (installer + portable)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, smoke]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: blackhole-exe
+          path: target/${{ env.TARGET }}/release
+
+      - name: Runtime DLLs (installer stages them beside the exe)
+        shell: bash
+        run: ci/fetch-assets.sh
+
+      # ~2.8 GB from Hugging Face + the graph tools (python onnx). Cached on the
+      # script hash so repeated tags don't re-download.
+      - name: Cache prepared LLM
+        id: llm
+        uses: actions/cache@v4
+        with:
+          path: models/qwen3-4b
+          key: llm-${{ hashFiles('ci/prepare-model.sh', 'tools/*.py') }}
+      - uses: actions/setup-python@v5
+        if: steps.llm.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12"
+      - name: Prepare LLM
+        if: steps.llm.outputs.cache-hit != 'true'
+        shell: bash
+        run: pip install -q onnx numpy && ci/prepare-model.sh
+
+      - name: Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: bash
+        env:
+          BLACKHOLE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf dist/stage && mkdir -p dist/stage/qwen3-4b
+          cp target/$TARGET/release/blackhole.exe runtime/onnxruntime.dll runtime/DirectML.dll README.md installer/LICENSE-MODELS.txt dist/stage/
+          cp models/qwen3-4b/model_q4f16.onnx models/qwen3-4b/model_q4f16.onnx.data models/qwen3-4b/tokenizer.json dist/stage/qwen3-4b/
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" //Qp installer/blackhole.iss
+          ls -la dist
+
+      - name: Package release assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          # Portable: the exe alone is the app (DLLs and small models are embedded); the
+          # LLM is optional — without it search works and ask mode says so.
+          cp target/$TARGET/release/blackhole.exe installer/LICENSE-MODELS.txt README.md release/
+          (cd release && 7z a -bd -mx=5 "Blackhole-$VERSION-x64-portable.zip" blackhole.exe LICENSE-MODELS.txt README.md >/dev/null && rm blackhole.exe LICENSE-MODELS.txt README.md)
+          # Installer (~3 GB): GitHub caps release assets at 2 GiB, so ship it as
+          # 1900 MB parts. Re-join: `copy /b a.part1+a.part2 a.exe` (Windows) or `cat`.
+          SETUP=$(ls dist/Blackhole-*-x64-setup.exe)
+          split -b 1900m -d -a 1 "$SETUP" "release/$(basename "$SETUP").part"
+          (cd release && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          SETUP=$(basename "$(ls dist/Blackhole-*-x64-setup.exe)")
+          cat > notes.md <<EOF
+          Blackhole $VERSION — Windows x64 (any DirectML GPU: AMD, NVIDIA, Intel; CPU fallback).
+
+          **Installer**: download every \`$SETUP.part*\` file into one folder and join them, then run the result:
+          \`\`\`
+          copy /b $SETUP.part0 + $SETUP.part1 $SETUP
+          \`\`\`
+          (GitHub limits release assets to 2 GiB; the installer carries the 2.7 GB Qwen3-4B model.)
+
+          **Portable**: \`Blackhole-$VERSION-x64-portable.zip\` is just the exe — search and MCP work out of the
+          box; put a supported model folder beside it to enable ask mode.
+
+          Checksums in \`SHA256SUMS.txt\`. Built by GitHub Actions from tag \`${GITHUB_REF_NAME}\`.
+          EOF
+          gh release create "${GITHUB_REF_NAME}" release/* --title "Blackhole $VERSION" --notes-file notes.md --verify-tag

@@ -220,6 +220,11 @@ rustup target add x86_64-pc-windows-gnu
 cargo build --release --bin askeval   # end-to-end evaluation binary
 ```
 
+`ci/fetch-assets.sh` downloads every embedded asset (sha256-pinned) — the same script CI uses — and
+`ci/prepare-model.sh` reproduces the shipped LLM from the Hugging Face export. GitHub Actions
+(`.github/workflows/ci.yml`) builds and smoke-tests every push and publishes a Release for every `v*` tag:
+portable exe zip, the installer in <2 GiB parts, checksums.
+
 `.cargo/config.toml` caps cargo at 4 jobs — the inference crates at opt-level 3 across 24 cores can exhaust a
 15 GB WSL VM. SQLite is bundled; the app has no runtime dependencies beyond the GPU driver.
 

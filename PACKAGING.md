@@ -30,7 +30,14 @@
 
 Why the LLM is not compiled into the exe: a multi-GB executable is slow for antivirus to scan on every launch, awkward to code-sign, and forces a full re-download on every app update. Keeping it as a sibling file preserves "everything in one download" without those costs.
 
-### Installer (shipped 2026-09-16)
+### Installer (shipped 2026-09-16; built by CI on tags since the same day)
+
+Release assets: GitHub caps each asset at 2 GiB and the installer is ~3 GB with the model inside, so the
+release job splits it into 1900 MB parts (`copy /b a.part0 + a.part1 a.exe` to re-join) next to a portable
+exe zip and `SHA256SUMS.txt`. A web installer that downloads the model on install (Inno's
+`DownloadTemporaryFile`) would remove the split; it needs a host for the prepared model (a Hugging Face repo
+or the release parts themselves) and is the natural next step for packaging.
+
 - **Inno Setup 6** script `installer/blackhole.iss`, built from WSL by `build-installer.sh` (stages exe + DLLs +
   model under `dist/stage`, runs `ISCC.exe`). Output `dist/Blackhole-<version>-x64-setup.exe`, ≈2.9 GB; the int4
   model data is stored uncompressed (it does not compress), everything else lzma2.
