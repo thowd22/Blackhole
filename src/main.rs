@@ -16,6 +16,7 @@ mod gpu;
 mod llm_ort;
 mod mcp;
 mod nvim;
+mod ocr;
 mod rerank;
 mod runtime;
 mod screenshot;
@@ -37,6 +38,26 @@ fn main() {
     if std::env::args().any(|a| a == "--mcp") {
         mcp::run_stdio_proxy();
         return;
+    }
+    // `--ocr <image or pdf>`: print what the OCR reads and how long it took (benchmarks).
+    if let Some(i) = std::env::args().position(|a| a == "--ocr") {
+        if let Some(path) = std::env::args().nth(i + 1) {
+            if runtime::init().is_err() {
+                eprintln!("runtime failed");
+                std::process::exit(1);
+            }
+            let t = std::time::Instant::now();
+            let p = std::path::Path::new(&path);
+            let text = if p.extension().map(|e| e.eq_ignore_ascii_case("pdf")).unwrap_or(false) {
+                std::fs::read(p).ok().and_then(|b| ocr::read_pdf_images(&b))
+            } else {
+                ocr::read_file(p)
+            };
+            match text {
+                Some(t2) => { println!("{t2}"); eprintln!("[{:.0} ms]", t.elapsed().as_secs_f32() * 1000.0); std::process::exit(0) }
+                None => { eprintln!("no text / could not read"); std::process::exit(2) }
+            }
+        }
     }
     // `--selftest` (CI smoke test): unpack the runtime, embed a sentence, open a scratch
     // vault, add and search one item. Exit code 0 means the bundle works.

@@ -4,6 +4,8 @@ Bundled models and runtime
   https://huggingface.co/Qwen/Qwen3-4B/blob/main/LICENSE
   Export: onnx-community/Qwen3-4B-ONNX (model_q4f16), graph-edited by Blackhole's tools
   (last-token logits via Gather, Gemm LM head, single data file).
+- PP-OCRv4 text detector and PP-OCRv3 English recognizer (OCR), PaddlePaddle / PaddleOCR — Apache-2.0.
+  ONNX exports from the RapidOCR project (RapidAI, Apache-2.0); dictionary en_dict.txt from PaddleOCR.
 - bge-small-en-v1.5 (embeddings), BAAI — MIT.
 - mxbai-rerank-xsmall-v1 (reranker), Mixedbread — Apache-2.0.
 - Neovim 0.12.5 (nvim\, the notes editor), the Neovim contributors — Apache-2.0, with Vim's

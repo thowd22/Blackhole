@@ -67,6 +67,7 @@ jobs:
             models/bge-small-en-v1.5
             models/rerank-mxbai-int8
             models/qwen2.5
+            models/ocr
             runtime
           key: assets-${{ hashFiles('ci/fetch-assets.sh') }}
 

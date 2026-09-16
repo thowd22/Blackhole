@@ -68,15 +68,30 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
     let (kind, content): (&'static str, String) = if ext == "pdf" {
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
         // Layout-aware first (forms, tables); plain stream order if that fails.
-        let text = match crate::pdf_layout::extract(&bytes) {
+        let mut text = match crate::pdf_layout::extract(&bytes) {
             Ok(t) if !t.trim().is_empty() => t,
-            _ => pdf_extract::extract_text_from_mem(&bytes).map_err(|e| format!("{name}: could not read PDF ({e})"))?,
+            _ => pdf_extract::extract_text_from_mem(&bytes).unwrap_or_default(),
         };
+        // A scan has (almost) no glyphs: read the page images instead.
+        if text.split_whitespace().count() < 20 {
+            if let Some(ocr) = crate::ocr::read_pdf_images(&bytes) {
+                text = if text.trim().is_empty() { ocr } else { format!("{text}\n\n{ocr}") };
+            }
+        }
+        if text.trim().is_empty() {
+            return Err(format!("{name}: no readable text (vector text, JPEG or raw scans are supported)"));
+        }
         ("pdf", text)
     } else if TEXT_EXTS.contains(&ext.as_str()) {
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
         ("file", String::from_utf8_lossy(&bytes).into_owned())
-    } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") {
+    } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+        // OCR: the picture's words become its text (PP-OCR on the GPU, ~0.5 s).
+        let title = capture_title(path).unwrap_or_else(|| name.clone());
+        let text = crate::ocr::read_file(path).unwrap_or_default();
+        let content = if text.trim().is_empty() { title.clone() } else { format!("{title}\n\n{text}") };
+        return Ok(Extracted { content: truncate(&content, MAX_CONTENT).to_string(), title, kind: "image", source });
+    } else if matches!(ext.as_str(), "gif" | "webp" | "bmp") {
         // OCR / captioning lands with the model work; for now images are findable by name.
         if let Some(title) = capture_title(path) {
             // Our own screenshot (see screenshot.rs): "Screenshot 2026-09-16 14-03-22 412×188".
@@ -147,7 +162,8 @@ pub fn run(rx: Receiver<Input>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder
     // still exist (missing ones keep their old text and just re-chunk).
     let stale = store.lock().unwrap().stale_text;
     if stale {
-        let pdfs = store.lock().unwrap().items_with_source("pdf");
+        let mut pdfs = store.lock().unwrap().items_with_source("pdf");
+        pdfs.extend(store.lock().unwrap().items_with_source("image"));
         let mut redone = 0;
         for (id, source) in pdfs {
             let path = Path::new(&source);

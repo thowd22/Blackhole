@@ -101,6 +101,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - Handles text, rich text (HTML → text), images, and file lists on the clipboard.
 
 ### 3.3 Supported content — P0 / P1
+- OCR — done 2026-09-16: PNG/JPEG images and screenshots are read with PP-OCRv4 (detector) + PP-OCRv3 English (recognizer) on ONNX Runtime/DirectML (`src/ocr.rs`, models compiled into the exe, ~14 MB); scanned PDFs have their page images (JPEG, raw RGB/grey, 1-bit) OCR'd when no text layer exists; existing images/PDFs re-extract on upgrade. Synthetic benchmark (eval/ocr, gitignored): 98 % word accuracy, ~0.5 s/image on the GPU. Not yet: other languages' dictionaries, CCITT/JBIG2 scans, rotated text.
 | Type | Handling | Priority |
 |---|---|---|
 | Plain text, markdown, code | Direct | P0 |

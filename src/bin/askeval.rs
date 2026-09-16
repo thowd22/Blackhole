@@ -19,6 +19,7 @@
 #[path = "../llm_ort.rs"] mod llm_ort;
 #[path = "../ingest.rs"] mod ingest;
 #[path = "../pdf_layout.rs"] mod pdf_layout;
+#[path = "../ocr.rs"] mod ocr;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;

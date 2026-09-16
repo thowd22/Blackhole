@@ -54,6 +54,7 @@ impl AskEngine {
                 if let Ok(mut r) = self.reranker.try_lock() {
                     r.take();
                 }
+                crate::ocr::unload();
                 true
             }
             Err(_) => false,

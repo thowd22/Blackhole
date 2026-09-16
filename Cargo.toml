@@ -46,6 +46,8 @@ half = "2"
 tiny_http = "0.12"
 rmpv = "1.3"
 png = "0.18"
+zune-jpeg = "0.5"
+zune-core = "0.5"
 
 [profile.release]
 # Inference kernels (candle, tract) need real optimisation; size is dominated by the models anyway.

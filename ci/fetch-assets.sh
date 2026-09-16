@@ -35,6 +35,15 @@ fetch $HF/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/tokenizer.json \
 fetch $HF/Qwen/Qwen2.5-1.5B-Instruct/resolve/main/tokenizer.json \
       models/qwen2.5/tokenizer.json c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539
 
+# OCR: PP-OCRv4 detector + PP-OCRv3 English recognizer (RapidOCR's ONNX exports) and
+# PaddleOCR's English dictionary; compiled into the exe like the embedder.
+fetch $HF/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx \
+      models/ocr/det.onnx d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9
+fetch $HF/SWHL/RapidOCR/resolve/main/PP-OCRv3/en_PP-OCRv3_rec_infer.onnx \
+      models/ocr/rec_en.onnx ef7abd8bd3629ae57ea2c28b425c1bd258a871b93fd2fe7c433946ade9b5d9ea
+fetch https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/en_dict.txt \
+      models/ocr/en_dict.txt 5662df9d2d03f0e8ca0d3b0649d6acbab904b6a14b3d3521463c71c37c668ce3
+
 # ONNX Runtime (DirectML build) and DirectML itself come as NuGet packages (zip files).
 # Windows-only: these DLLs are what the x64 Windows exe embeds. A Linux build would
 # instead fetch libonnxruntime.so from the GitHub release tarball, macOS the

@@ -28,7 +28,7 @@ pub struct Embedder {
 }
 
 /// ort's builder errors carry non-Send state; flatten them to text for anyhow.
-fn ok<T, E: std::fmt::Display>(r: Result<T, E>) -> anyhow::Result<T> {
+pub(crate) fn ok<T, E: std::fmt::Display>(r: Result<T, E>) -> anyhow::Result<T> {
     r.map_err(|e| anyhow::anyhow!("{e}"))
 }
 

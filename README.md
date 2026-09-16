@@ -36,7 +36,7 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
 - Drop files or selected text on it, or hit **Ctrl+Shift+V** to swallow whatever is on the clipboard. The ring
   speeds up and specks spiral in while it digests; it pulses when it's done, flickers red if it couldn't read
   something. Every mood change eases over 150 ms rather than snapping.
-- **Ctrl+Shift+S** (Ctrl+Alt+S if another program already owns that key — the menu shows which; or "Take screenshot" in the menu) dims the screen; drag a rectangle and the region is saved
+- **Ctrl+Shift+S** (Ctrl+Alt+S if another program already owns that key — the menu shows which; or "Take screenshot" in the menu) dims the screen; drag a rectangle and the region is saved, OCR'd so its words are searchable and askable,
   as a PNG under `captures\` and swallowed like a dropped image. Esc cancels.
 - Left-click: a dark panel appears beside the dot. Results update on every keystroke in about 5 ms —
   keyword matches and semantic matches fused, with a tag showing which kind of match you're looking at.
@@ -123,8 +123,12 @@ run; nothing is linked at build time, so the app cross-compiles from Linux with 
 1. **Extraction.** Text and code files are read directly. PDFs go through a pure-Rust, *layout-aware*
    extractor (`src/pdf_layout.rs`): glyphs are re-assembled into rows and columns from their page positions,
    so a customs form comes out as `IMPORTING CARRIER | FROM PORT OF` over `TRANQUIL ACE | KOBE, JA` instead
-   of stream-order soup, and fake-bold overprints are collapsed. Other files are indexed by name and metadata
-   for now (OCR is on the roadmap).
+   of stream-order soup, and fake-bold overprints are collapsed. **Images and screenshots are read by OCR**
+   (`src/ocr.rs`): PaddleOCR's PP-OCRv4 text detector and PP-OCRv3 English recognizer, 14 MB together,
+   compiled into the exe and run on the same ONNX Runtime + DirectML — 98 % word accuracy on a synthetic
+   benchmark of terminals, tables, chat and UI text, ~0.5 s per image on the GPU, with the same row/column
+   assembly as PDFs so a table comes out as ` | `-separated columns. A **scanned PDF** (no text layer) has
+   its page images pulled out and OCR'd the same way. Other files are indexed by name and metadata.
 2. **Chunking.** Each document is split into ~100-word chunks with a 20-word overlap, paragraph-aware, and
    line breaks survive inside a chunk — a résumé's job headers and a form's rows only mean something as lines
    (flattening them cost the model three answers in the eval).
@@ -287,6 +291,7 @@ portable exe zip, the installer in <2 GiB parts, checksums.
 | `src/bubble.rs` | Pixel-art speech bubbles |
 | `src/mcp.rs` | MCP server (HTTP on localhost) and the `--mcp` stdio bridge |
 | `src/nvim.rs` | Embedded Neovim: msgpack-RPC, grid renderer in the pixel font, key/mouse translation |
+| `src/ocr.rs` | OCR: PP-OCR detector + recognizer on ONNX Runtime, DB post-processing, CTC decode, scanned-PDF images |
 | `src/search.rs` | Search panel: live results, ask box, keyboard handling, content-fit sizing, pixel scrollbars |
 | `src/screenshot.rs` | Drag-region screenshot overlay (Ctrl+Shift+S) |
 | `src/tray.rs`, `src/startup.rs` | Tray icon; start-at-sign-in |
@@ -303,8 +308,7 @@ portable exe zip, the installer in <2 GiB parts, checksums.
 
 ## Roadmap
 
-Rich snippets in the panel → OCR for images, screenshots and scanned PDFs → Copilot+ NPU providers →
-code signing. Details and the
+Copilot+ NPU providers → configurable hotkeys → web installer and code signing. Details and the
 reasoning behind each in [FEATURES.md](FEATURES.md).
 
 ## Credits
@@ -312,7 +316,7 @@ reasoning behind each in [FEATURES.md](FEATURES.md).
 - **Neovim** — the note editor is a stock Neovim build, embedded and drawn in Blackhole's style. Thank you to
   the Neovim contributors, and to Bram Moolenaar and the Vim project before them: Neovim is Apache-2.0 with
   Vim's licence for inherited code (<https://neovim.io>, <https://github.com/neovim/neovim>).
-- **Qwen3** (Alibaba Cloud), **bge-small** (BAAI), **mxbai-rerank** (Mixedbread) — the models.
+- **Qwen3** (Alibaba Cloud), **bge-small** (BAAI), **mxbai-rerank** (Mixedbread), **PaddleOCR** (PaddlePaddle; ONNX exports by RapidOCR) — the models.
 - **ONNX Runtime + DirectML** (Microsoft) — the one inference engine behind everything.
 - The Rust crates in `Cargo.toml`, `pdf-extract` in particular, and Inno Setup for the installer.
 
