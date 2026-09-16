@@ -248,9 +248,11 @@ Platform quirks to plan for:
 
 ---
 
-## 9. MCP support — P1
+## 9. MCP support — P1 — shipped 2026-09-16 (`src/mcp.rs`)
 
 Blackhole exposes itself as a local **MCP server** so agents and tools (Claude Code, IDE assistants, scripts) can use the vault as memory.
+
+As built: the running dot hosts a Streamable-HTTP endpoint on `127.0.0.1:47811` (bearer token in `%LOCALAPPDATA%\Blackhole\mcp.json`); `blackhole.exe --mcp` is a stdio proxy to it that starts the dot if needed. WSL clients run the same Windows exe through interop, so one command works everywhere. Tools shipped: `put` (text or path; `/mnt/c/...` paths are translated), `retrieve` (hybrid or keyword, best passage per hit), `notify`. The rest of this section is the original plan.
 
 - Transport: stdio (spawned by the client) and/or a local HTTP/SSE endpoint on localhost with a token; nothing listens off-machine.
 - Tools:

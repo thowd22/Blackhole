@@ -92,7 +92,7 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
     Ok(Extracted { title: name, kind, source, content })
 }
 
-fn hash_of(e: &Extracted) -> String {
+pub fn hash_of(e: &Extracted) -> String {
     let mut h = Sha256::new();
     h.update(e.kind.as_bytes());
     h.update(b"\0");

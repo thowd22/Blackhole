@@ -365,6 +365,22 @@ impl Store {
     }
 
     #[allow(dead_code)]
+    /// The item's chunk nearest to `qvec` (for agents doing RAG over the vault).
+    pub fn best_chunk(&self, item_id: i64, qvec: &[f32]) -> Option<String> {
+        let best = self
+            .index
+            .iter()
+            .filter(|e| e.item_id == item_id)
+            .map(|e| (cosine(qvec, &e.vec), e.chunk_id))
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))?;
+        self.conn.query_row("SELECT text FROM chunks WHERE id = ?1 AND ord >= 0", params![best.1], |r| r.get(0)).ok()
+    }
+
+    pub fn id_by_hash(&self, hash: &str) -> Option<i64> {
+        self.conn.query_row("SELECT id FROM items WHERE hash = ?1", params![hash], |r| r.get(0)).ok()
+    }
+
+    #[allow(dead_code)] // askeval
     pub fn title_of(&self, id: i64) -> Option<String> {
         self.conn.query_row("SELECT title FROM items WHERE id = ?1", params![id], |r| r.get(0)).ok()
     }

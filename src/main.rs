@@ -14,6 +14,7 @@ mod ingest;
 mod pdf_layout;
 mod gpu;
 mod llm_ort;
+mod mcp;
 mod rerank;
 mod runtime;
 mod search;
@@ -30,6 +31,11 @@ use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CON
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 fn main() {
+    // `blackhole.exe --mcp`: stdio MCP proxy to the running dot (starts one if needed).
+    if std::env::args().any(|a| a == "--mcp") {
+        mcp::run_stdio_proxy();
+        return;
+    }
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         if OleInitialize(None).is_err() {
@@ -72,6 +78,10 @@ fn main() {
         let hwnd = dot::Dot::create(tx, store.clone(), embedder.clone(), ask);
         if hwnd.is_invalid() {
             return;
+        }
+        match mcp::start(store.clone(), embedder.clone(), hwnd.0 as usize) {
+            Some(port) => util::log(&format!("mcp: listening on 127.0.0.1:{port}")),
+            None => util::log("mcp: could not bind a local port"),
         }
 
         // The worker owns a raw HWND value; posting to it is thread-safe.

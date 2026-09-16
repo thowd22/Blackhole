@@ -176,6 +176,25 @@ the DirectML findings and the memory work are in [PACKAGING.md](PACKAGING.md).
   colloquial questions with no word in common with a one-line note can't be retrieved. Those are the open
   items below; RAG.md records every step that was measured, including the ones that made things worse.
 
+## Using it from agents (MCP)
+
+Blackhole is an **MCP server**, so Claude Code (or any MCP client) can use your vault as memory: `retrieve`
+to look things up, `put` to remember something, `notify` to pop a speech bubble from the dot when a job is
+done. The running dot serves it on `127.0.0.1` only; `blackhole.exe --mcp` is a stdio bridge that starts the
+dot if it isn't running. Because WSL can run Windows programs, the same command works from both sides:
+
+```sh
+# Windows (PowerShell / cmd)
+claude mcp add --scope user blackhole -- "C:\Users\<you>\AppData\Local\Programs\Blackhole\blackhole.exe" --mcp
+# WSL
+claude mcp add --scope user blackhole -- /mnt/c/Users/<you>/AppData/Local/Programs/Blackhole/blackhole.exe --mcp
+```
+
+Any other client: command `blackhole.exe`, args `["--mcp"]`, stdio transport. Or talk HTTP directly: `POST
+http://127.0.0.1:47811/mcp` with `Authorization: Bearer <token>` from `%LOCALAPPDATA%\Blackhole\mcp.json`.
+`put` goes through the same pipeline as a drop (extract → chunk → embed) and the dot animates; `retrieve`
+returns each hit's title, source path, snippet and best-matching passage.
+
 ## Installing
 
 Download `Blackhole-<version>-x64-setup.exe` (≈2.9 GB: app + ONNX Runtime/DirectML + Qwen3-4B) and run
@@ -212,6 +231,7 @@ cargo build --release --bin askeval   # end-to-end evaluation binary
 | `src/dot.rs` | The dot: rendering, drag, hotkeys, menu, moods, tutorial, notifications |
 | `src/sprite.rs` | Procedural 32×32 pixel-art renderer |
 | `src/bubble.rs` | Pixel-art speech bubbles |
+| `src/mcp.rs` | MCP server (HTTP on localhost) and the `--mcp` stdio bridge |
 | `src/search.rs` | Search panel: live results, ask box, keyboard handling |
 | `src/tray.rs`, `src/startup.rs` | Tray icon; start-at-sign-in |
 | `src/drop.rs` | OLE drop target and clipboard reading |
@@ -227,8 +247,7 @@ cargo build --release --bin askeval   # end-to-end evaluation binary
 
 ## Roadmap
 
-MCP server (`put` / `retrieve` / `notify`)
-so agents can use the vault as memory → CI/CD → search-panel polish (auto-resize, on-theme scrollbars, rich
+CI/CD → search-panel polish (auto-resize, on-theme scrollbars, rich
 snippets) → OCR for images and scanned PDFs → Copilot+ NPU providers → code signing. Details and the
 reasoning behind each in [FEATURES.md](FEATURES.md).
 
