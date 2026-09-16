@@ -68,7 +68,7 @@ const MENU_THINK: usize = 13;
 const MENU_VIEW_FILES: usize = 15;
 const MENU_VIEW_NOTES: usize = 16;
 const MENU_NEW_NOTE: usize = 17;
-const MENU_SCREENSHOT: usize = 14;
+pub const MENU_SCREENSHOT: usize = 14;
 
 /// First-run tutorial. Each step waits for the action it describes.
 pub const TUTORIAL: &[&str] = &[

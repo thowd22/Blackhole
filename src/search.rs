@@ -165,9 +165,19 @@ pub struct SearchWin {
     /// (started on first use of the Notes tab); the plain EDIT otherwise.
     nvim: Option<nvim::Host>,
     editor_rc: RECT,
-    /// Tab strip and "+ new note" button rects from the last layout (client coords).
+    /// Tab strip, "+ new note" and camera button rects from the last layout (client coords).
     tab_rc: [RECT; 2],
     new_rc: RECT,
+    cam_rc: RECT,
+    /// Files tab: the selected hit is shown in full below the list (Tab toggles).
+    preview: bool,
+    preview_id: Option<i64>,
+    /// Cursor per note (session only), restored when a note is reopened.
+    carets: std::collections::HashMap<i64, (i64, i64)>,
+    /// The running ask rewrites the note when it finishes (`:Tidy`).
+    tidy: bool,
+    /// Del pressed once on this item; a second press within a few seconds forgets it.
+    confirm_forget: Option<(i64, Instant)>,
 }
 
 unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut SearchWin> {
@@ -235,6 +245,12 @@ impl SearchWin {
                 editor_rc: RECT::default(),
                 tab_rc: [RECT::default(); 2],
                 new_rc: RECT::default(),
+                cam_rc: RECT::default(),
+                preview: false,
+                preview_id: None,
+                carets: std::collections::HashMap::new(),
+                tidy: false,
+                confirm_forget: None,
             });
             let ptr = Box::into_raw(boxed);
             let hwnd = CreateWindowExW(
@@ -366,7 +382,7 @@ impl SearchWin {
             w = w.max(need).min(self.px(MAX_AUTO_W));
         }
         let cap = self.px(if self.user_h > 0 { self.user_h } else { DEFAULT_CAP_H });
-        let h = if self.tab == Tab::Notes {
+        let h = if self.tab == Tab::Notes || self.preview {
             // The editor wants room: the Notes tab always uses the full (dragged or default) height.
             cap.max(self.min_h())
         } else {
@@ -390,14 +406,14 @@ impl SearchWin {
         self.tab_rc[0] = RECT { left: pad, top: pad, right: pad + tw, bottom: pad + th };
         self.tab_rc[1] = RECT { left: pad + tw + u, top: pad, right: pad + 2 * tw + u, bottom: pad + th };
         self.new_rc = RECT { left: w - pad - th, top: pad, right: w - pad, bottom: pad + th };
+        self.cam_rc = RECT { left: w - pad - 2 * th - u, top: pad, right: w - pad - th - u, bottom: pad + th };
         let edit_y = pad + self.tab_h();
         let _ = SetWindowPos(self.edit, None, pad, edit_y, w - 2 * pad, edit_h, SWP_NOZORDER | SWP_NOACTIVATE);
         let mut y = edit_y + edit_h + pad;
         let status_y = h - pad - status_h;
         if self.tab == Tab::Notes {
-            // Notes: a short list of notes on top, the editor takes the rest.
-            let _ = ShowWindow(self.answer, SW_HIDE);
-            self.answer_rc = RECT::default();
+            // Notes: a short list of notes on top, an answer box when a question was asked
+            // about the note, the editor takes the rest.
             let rows = (self.hits.len() as i32).min(NOTE_ROWS_MAX);
             let list_h = rows * self.row_height();
             self.list_rc = RECT { left: pad, top: y, right: pad + inner_w, bottom: y + list_h };
@@ -405,6 +421,11 @@ impl SearchWin {
             let _ = ShowWindow(self.list, if rows > 0 { SW_SHOWNA } else { SW_HIDE });
             let _ = InvalidateRect(Some(self.list), None, true);
             y += if rows > 0 { list_h + pad } else { 0 };
+            let answer_h = if self.answer_shown { self.answer_wanted_h().min((status_y - y) / 2) } else { 0 };
+            self.answer_rc = RECT { left: pad, top: y, right: pad + inner_w, bottom: y + (answer_h - pad).max(0) };
+            let _ = SetWindowPos(self.answer, None, pad, y, inner_w, (answer_h - pad).max(0), SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = ShowWindow(self.answer, if self.answer_shown && !self.thinking { SW_SHOWNA } else { SW_HIDE });
+            y += answer_h;
             let ed_h = (status_y - pad / 2 - y).max(self.line_h * 2);
             self.editor_rc = RECT { left: pad, top: y, right: pad + inner_w, bottom: y + ed_h };
             let ed = self.editor_hwnd();
@@ -418,8 +439,10 @@ impl SearchWin {
             return;
         }
         let _ = ShowWindow(self.editor, SW_HIDE);
-        if let Some(h) = &self.nvim {
-            let _ = ShowWindow(h.hwnd, SW_HIDE);
+        if !self.preview {
+            if let Some(h) = &self.nvim {
+                let _ = ShowWindow(h.hwnd, SW_HIDE);
+            }
         }
         let _ = ShowWindow(self.list, SW_SHOWNA);
         self.editor_rc = RECT::default();
@@ -432,13 +455,23 @@ impl SearchWin {
         let _ = SetWindowPos(self.answer, None, pad, y, inner_w, (answer_h - pad).max(0), SWP_NOZORDER | SWP_NOACTIVATE);
         let _ = ShowWindow(self.answer, if self.answer_shown && !self.thinking { SW_SHOWNA } else { SW_HIDE });
         y += answer_h;
-        let list_h = (h - y - pad / 2 - status_h - pad).max(0);
+        let mut list_h = (h - y - pad / 2 - status_h - pad).max(0);
+        if self.preview && self.nvim.is_some() {
+            // Preview: the list keeps up to three rows, the hit's text fills the rest.
+            list_h = list_h.min((self.hits.len() as i32).clamp(1, MIN_ROWS) * self.row_height());
+            let py = y + list_h + pad;
+            let ph = (h - py - pad / 2 - status_h - pad).max(self.line_h * 2);
+            self.editor_rc = RECT { left: pad, top: py, right: pad + inner_w, bottom: py + ph };
+            let hv = self.nvim.as_ref().unwrap().hwnd;
+            let _ = SetWindowPos(hv, None, pad + u, py + u, inner_w - 2 * u, ph - 2 * u, SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = ShowWindow(hv, SW_SHOWNA);
+        }
         self.list_rc = RECT { left: pad, top: y, right: pad + inner_w, bottom: y + list_h };
         let _ = SetWindowPos(self.list, None, pad, y, inner_w, list_h, SWP_NOZORDER | SWP_NOACTIVATE);
         // Owner-drawn rows are only repainted where newly exposed; ellipses need the new width.
         let _ = InvalidateRect(Some(self.list), None, true);
         let status_w = w - 2 * pad - self.grip_size() - u;
-        let _ = SetWindowPos(self.status, None, pad, y + list_h + pad / 2, status_w, status_h, SWP_NOZORDER | SWP_NOACTIVATE);
+        let _ = SetWindowPos(self.status, None, pad, status_y, status_w, status_h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     /// Set the window size now, keeping the top-left corner unless that runs off the work area.
@@ -518,7 +551,7 @@ impl SearchWin {
         match c {
             Ctl::List => true,
             Ctl::Answer => self.tab == Tab::Files && self.answer_shown && !self.thinking,
-            Ctl::Editor => self.tab == Tab::Notes,
+            Ctl::Editor => self.tab == Tab::Notes || (self.preview && self.nvim.is_some()),
         }
     }
 
@@ -651,8 +684,8 @@ impl SearchWin {
         self.paint_tabs(hdc);
         self.paint_bar(hdc, Ctl::List);
         self.paint_bar(hdc, Ctl::Answer);
-        if self.tab == Tab::Notes {
-            // The editor sits inside a one-unit orange frame like the rest of the chrome.
+        if self.tab == Tab::Notes || (self.preview && self.nvim.is_some()) {
+            // The editor (or preview) sits inside a one-unit orange frame like the rest of the chrome.
             self.frame_rect(hdc, self.editor_rc);
             self.paint_bar(hdc, Ctl::Editor);
         }
@@ -693,6 +726,15 @@ impl SearchWin {
             let mut tr = r;
             DrawTextW(hdc, &mut text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
+        // Camera button: a framed square with a pixel camera (body, lens, viewfinder bump).
+        let r = self.cam_rc;
+        FillRect(hdc, &r, self.brush_bg);
+        self.frame_rect(hdc, r);
+        let (cx, cy) = ((r.left + r.right) / 2 / u * u, (r.top + r.bottom) / 2 / u * u);
+        FillRect(hdc, &RECT { left: cx - 3 * u, top: cy - 2 * u, right: cx + 4 * u, bottom: cy + 3 * u }, self.brush_accent);
+        FillRect(hdc, &RECT { left: cx - u, top: cy - 3 * u, right: cx + 2 * u, bottom: cy - 2 * u }, self.brush_accent);
+        FillRect(hdc, &RECT { left: cx - u, top: cy - u, right: cx + 2 * u, bottom: cy + 2 * u }, self.brush_bg);
+        FillRect(hdc, &RECT { left: cx, top: cy, right: cx + u, bottom: cy + u }, self.brush_accent);
         // "+" button: a pixel plus in a framed square.
         let r = self.new_rc;
         FillRect(hdc, &r, self.brush_bg);
@@ -734,6 +776,12 @@ impl SearchWin {
         }
         if PtInRect(&self.new_rc, pt).as_bool() {
             return self.new_note();
+        }
+        if PtInRect(&self.cam_rc, pt).as_bool() {
+            // The overlay covers the screen; the panel gets out of the way first.
+            SearchWin::hide(self.hwnd);
+            let _ = PostMessageW(Some(self.dot), WM_COMMAND, WPARAM(crate::dot::MENU_SCREENSHOT), LPARAM(0));
+            return;
         }
         for c in [Ctl::List, Ctl::Answer, Ctl::Editor] {
             if !self.ctl_visible(c) || !PtInRect(&self.bar_rect(c), pt).as_bool() {
@@ -793,6 +841,7 @@ impl SearchWin {
             return;
         }
         self.flush_note();
+        self.set_preview(false);
         self.tab = tab;
         self.restored = false;
         let _ = SetWindowTextW(self.edit, w!(""));
@@ -862,13 +911,72 @@ impl SearchWin {
     /// Load a note into the editor (saving whatever was there first).
     unsafe fn open_note(&mut self, id: i64) {
         self.flush_note();
+        self.remember_caret();
         let text = self.store.lock().unwrap().content(id).unwrap_or_default();
         self.ensure_nvim();
         self.editing = Some(id);
         self.dirty = false;
         self.set_editor_text(&text);
+        if let (Some(h), Some(pos)) = (&self.nvim, self.carets.get(&id).copied()) {
+            h.set_cursor(pos);
+        }
         self.set_status(&format!("{} notes   ↵ opens · Ctrl+Del forgets · Ctrl+N new · :Name <title>", self.hits.len()));
         self.invalidate_bar(Ctl::Editor);
+    }
+
+    unsafe fn remember_caret(&mut self) {
+        if let (Some(h), Some(id)) = (&self.nvim, self.editing) {
+            if let Some(pos) = h.cursor() {
+                self.carets.insert(id, pos);
+            }
+        }
+    }
+
+    // ---- preview (Files tab) ----
+
+    /// Filetype for Neovim's colours, from the hit's title/path extension.
+    fn filetype_of(hit: &Hit) -> &'static str {
+        let name = hit.source.as_deref().unwrap_or(&hit.title).to_lowercase();
+        let ext = name.rsplit('.').next().unwrap_or("");
+        match ext {
+            "rs" => "rust", "py" => "python", "js" | "mjs" => "javascript", "ts" => "typescript", "lua" => "lua",
+            "md" | "markdown" => "markdown", "json" => "json", "toml" => "toml", "yml" | "yaml" => "yaml",
+            "c" | "h" => "c", "cpp" | "cc" | "hpp" => "cpp", "go" => "go", "sh" | "bash" => "sh", "ps1" => "ps1",
+            "html" | "htm" => "html", "css" => "css", "sql" => "sql", "xml" => "xml", "java" => "java", "cs" => "cs",
+            _ => if hit.kind == "text" || hit.kind == "note" { "markdown" } else { "text" },
+        }
+    }
+
+    unsafe fn set_preview(&mut self, on: bool) {
+        if std::env::var_os("BLACKHOLE_NVIM_DEBUG").is_some() {
+            crate::util::log(&format!("preview: on={on} was={} nvim={} sel={:?}", self.preview, self.nvim.is_some(), self.selected().map(|h| h.id)));
+        }
+        if on && self.nvim.is_none() {
+            self.ensure_nvim();
+        }
+        if on == self.preview && (!on || self.preview_id == self.selected().map(|h| h.id)) {
+            return;
+        }
+        self.preview = on && self.nvim.is_some();
+        if self.preview {
+            if let Some(hit) = self.selected() {
+                let id = hit.id;
+                let ft = Self::filetype_of(hit);
+                let text = self.store.lock().unwrap().content(id).unwrap_or_default();
+                let raw = self.query_text();
+                let q = Self::question_of(&raw).unwrap_or(&raw);
+                let terms: Vec<String> = q.split(|c: char| !c.is_alphanumeric()).filter(|t| t.len() >= 2).map(str::to_string).collect();
+                self.nvim.as_ref().unwrap().preview(&text, ft, &terms);
+                self.preview_id = Some(id);
+            } else {
+                self.preview = false;
+            }
+        } else if let Some(h) = &self.nvim {
+            h.end_preview();
+            self.preview_id = None;
+        }
+        self.fit(true);
+        let _ = InvalidateRect(Some(self.hwnd), None, true);
     }
 
     /// Automatic title: the first non-empty line without markdown heading marks; a note
@@ -887,7 +995,38 @@ impl SearchWin {
 
     /// A command from inside Neovim: `:w`, `:wq`/`:x`/ZZ, `:q`, `:Name <title>`, `:new`.
     unsafe fn editor_command(&mut self, action: &str, arg: &str) {
+        if self.preview {
+            // Commands while previewing a search hit: :Name renames it, :Copy copies it.
+            match action {
+                "name" if !arg.trim().is_empty() => {
+                    if let Some(id) = self.preview_id {
+                        let _ = self.store.lock().unwrap().set_note_title(id, arg);
+                        self.set_status(&format!("renamed to \"{}\"", arg.trim()));
+                        self.refresh_keep_sel();
+                    }
+                }
+                "copy" => {
+                    if let Some(id) = self.preview_id {
+                        let text = self.store.lock().unwrap().content(id).unwrap_or_default();
+                        set_clipboard_text(self.hwnd, &text);
+                        self.set_status("copied");
+                    }
+                }
+                "q" => self.set_preview(false),
+                _ => {}
+            }
+            return;
+        }
         match action {
+            "copy" => {
+                set_clipboard_text(self.hwnd, &self.editor_text());
+                self.set_status("note copied to the clipboard");
+            }
+            "ask" => self.ask_note(arg, false),
+            "tidy" => self.ask_note(
+                "Rewrite this note so it is tidy: fix typos and spacing, make lists and headings consistent markdown, keep every fact, name, number and the author's own wording, add nothing. Output only the rewritten note.",
+                true,
+            ),
             "write" => {
                 self.dirty = self.dirty || self.editing.is_none();
                 self.flush_note();
@@ -974,6 +1113,58 @@ impl SearchWin {
         self.invalidate_bar(Ctl::Editor);
     }
 
+    /// Ask the model about the open note only (no retrieval). `tidy`: the answer
+    /// replaces the note when it arrives.
+    unsafe fn ask_note(&mut self, question: &str, tidy: bool) {
+        let question = question.trim();
+        if question.is_empty() {
+            return;
+        }
+        let text = self.editor_text();
+        if text.trim().is_empty() {
+            self.set_status("the note is empty");
+            return;
+        }
+        self.flush_note();
+        self.cancel_job();
+        self.tidy = tidy;
+        self.answer_text.clear();
+        let _ = SetWindowTextW(self.answer, w!(""));
+        self.answer_shown = true;
+        self.set_thinking(true);
+        let id = self.next_job;
+        self.next_job += 1;
+        self.set_status(if tidy { "tidying…" } else { "thinking…" });
+        let title = self.editing.and_then(|id| self.hits.iter().find(|h| h.id == id)).map(|h| h.title.clone()).unwrap_or_else(|| "this note".into());
+        self.job = Some(self.ask.ask_about(question.to_string(), title, text, self.hwnd, id));
+        self.fit(true);
+        let _ = PostMessageW(Some(self.dot), WM_ASK_STARTED, WPARAM(0), LPARAM(0));
+    }
+
+    /// Reload the list from the store without losing the selection.
+    unsafe fn refresh_keep_sel(&mut self) {
+        let sel = SendMessageW(self.list, LB_GETCURSEL, None, None).0;
+        let raw = self.query_text();
+        let q = Self::question_of(&raw).unwrap_or(&raw).to_string();
+        let ids: Vec<i64> = self.hits.iter().map(|h| h.id).collect();
+        self.hits = if self.tab == Tab::Notes {
+            self.store.lock().unwrap().notes(MAX_NOTES)
+        } else {
+            let qvec = if q.trim().is_empty() { None } else { self.embedder.embed(&q).ok() };
+            let store = self.store.lock().unwrap();
+            let mut hits = if q.trim().is_empty() { store.recent(MAX_HITS) } else { store.search(&q, qvec.as_deref(), MAX_HITS) };
+            // Keep the previous order where possible so the selection stays put.
+            hits.sort_by_key(|h| ids.iter().position(|i| *i == h.id).unwrap_or(usize::MAX));
+            hits
+        };
+        SendMessageW(self.list, LB_RESETCONTENT, None, None);
+        for i in 0..self.hits.len() {
+            SendMessageW(self.list, LB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(i as isize)));
+        }
+        SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(sel.max(0) as usize)), None);
+        let _ = InvalidateRect(Some(self.list), None, true);
+    }
+
     // ---- ask mode ----
 
     /// Everything after a leading `?` is a question for ask mode.
@@ -1037,6 +1228,20 @@ impl SearchWin {
                     self.set_status(&text);
                 }
                 self.job = None;
+                if self.tidy {
+                    // The rewritten note replaces the text (one undo step in Neovim: `u` brings it back).
+                    self.tidy = false;
+                    let clean = self.answer_text.trim().to_string();
+                    if !clean.is_empty() && !text.starts_with("stopped") && !text.starts_with("error") {
+                        self.set_editor_text(&clean);
+                        self.dirty = true;
+                        self.flush_note();
+                        self.set_status("tidied — u in the editor undoes it");
+                    }
+                    self.answer_shown = false;
+                    self.answer_text.clear();
+                    let _ = SetWindowTextW(self.answer, w!(""));
+                }
             }
             _ => {}
         }
@@ -1112,6 +1317,7 @@ impl SearchWin {
             let _ = ShowWindow(hwnd, SW_HIDE);
             if let Some(s) = state(hwnd) {
                 s.flush_note();
+                s.remember_caret();
                 s.stop_anim();
                 s.drag = Drag::None;
                 let _ = PostMessageW(Some(s.dot), WM_SEARCH_CLOSED, WPARAM(0), LPARAM(0));
@@ -1141,8 +1347,9 @@ impl SearchWin {
     unsafe fn refresh(&mut self) {
         let raw = self.query_text();
         if self.tab == Tab::Notes {
-            // The search box filters notes by title/preview; the editor keeps its note.
-            let q = raw.trim().to_lowercase();
+            // The search box filters notes by title/preview; "? question" asks about the open
+            // note on Enter instead. The editor keeps its note.
+            let q = if Self::question_of(&raw).is_some() { String::new() } else { raw.trim().to_lowercase() };
             let all = self.store.lock().unwrap().notes(MAX_NOTES);
             self.hits = if q.is_empty() { all } else { all.into_iter().filter(|h| h.title.to_lowercase().contains(&q) || h.snippet.to_lowercase().contains(&q)).collect() };
             SendMessageW(self.list, LB_RESETCONTENT, None, None);
@@ -1151,7 +1358,9 @@ impl SearchWin {
             }
             let sel = self.editing.and_then(|id| self.hits.iter().position(|h| h.id == id));
             SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(sel.unwrap_or(usize::MAX))), None);
-            if self.editing.is_none() && self.hits.is_empty() {
+            if Self::question_of(&raw).is_some() {
+                self.set_status("↵ asks about the open note");
+            } else if self.editing.is_none() && self.hits.is_empty() {
                 self.set_status("no notes yet — type below or press + · Ctrl+Shift+N from anywhere");
             } else if self.editing.is_none() {
                 self.set_status(&format!("{} notes   ↵ opens · Ctrl+Del forgets · Ctrl+N new", self.hits.len()));
@@ -1203,7 +1412,7 @@ impl SearchWin {
         self.hits.get(i as usize)
     }
 
-    unsafe fn move_sel(&self, delta: i32) {
+    unsafe fn move_sel(&mut self, delta: i32) {
         if self.hits.is_empty() {
             return;
         }
@@ -1211,6 +1420,9 @@ impl SearchWin {
         let next = (cur + delta).clamp(0, self.hits.len() as i32 - 1);
         SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(next as usize)), None);
         self.invalidate_bar(Ctl::List);
+        if self.preview {
+            self.set_preview(true);
+        }
     }
 
     unsafe fn open_selected(&mut self, reveal: bool) {
@@ -1246,6 +1458,17 @@ impl SearchWin {
     unsafe fn forget_selected(&mut self) {
         let Some(hit) = self.selected() else { return };
         let id = hit.id;
+        let title: String = hit.title.chars().take(40).collect();
+        let armed = matches!(self.confirm_forget, Some((cid, t)) if cid == id && t.elapsed().as_secs() < 5);
+        if !armed {
+            self.confirm_forget = Some((id, Instant::now()));
+            self.set_status(&format!("forget \"{title}\"?  press Del again to let it escape"));
+            return;
+        }
+        self.confirm_forget = None;
+        if self.preview_id == Some(id) {
+            self.set_preview(false);
+        }
         if self.editing == Some(id) {
             self.dirty = false;
             self.editing = None;
@@ -1330,6 +1553,8 @@ unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 let page = s.scroll_info(Ctl::List).1;
                 match key {
                     VK_ESCAPE if s.job.is_some() => { s.cancel_job(); s.set_status("stopped"); s.fit(true); return LRESULT(0); }
+                    VK_ESCAPE if s.preview => { s.set_preview(false); return LRESULT(0); }
+                    VK_TAB if !ctrl && s.tab == Tab::Files => { let on = !s.preview; s.set_preview(on); return LRESULT(0); }
                     // Esc on a restored view forgets it; otherwise the panel just closes (and keeps the view).
                     VK_ESCAPE if s.restored => { s.clear_view(); SearchWin::hide(parent); return LRESULT(0); }
                     VK_ESCAPE => { SearchWin::hide(parent); return LRESULT(0); }
@@ -1339,6 +1564,11 @@ unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                     VK_UP => { s.move_sel(-1); return LRESULT(0); }
                     VK_NEXT => { s.move_sel(page); return LRESULT(0); }
                     VK_PRIOR => { s.move_sel(-page); return LRESULT(0); }
+                    VK_RETURN if s.tab == Tab::Notes && SearchWin::question_of(&s.query_text()).is_some() => {
+                        let q = SearchWin::question_of(&s.query_text()).unwrap_or("").to_string();
+                        s.ask_note(&q, false);
+                        return LRESULT(0);
+                    }
                     VK_RETURN if SearchWin::question_of(&s.query_text()).is_some() => { s.start_ask(); return LRESULT(0); }
                     VK_RETURN => { s.open_selected(ctrl); return LRESULT(0); }
                     VK_DELETE if !s.query_text().is_empty() && ctrl => { s.forget_selected(); return LRESULT(0); }
@@ -1355,7 +1585,7 @@ unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 }
             }
         }
-        WM_CHAR if wparam.0 == 27 || wparam.0 == 13 => return LRESULT(0), // swallow beep
+        WM_CHAR if wparam.0 == 27 || wparam.0 == 13 || wparam.0 == 9 => return LRESULT(0), // swallow beep
         WM_MOUSEWHEEL => return SendMessageW(parent, msg, Some(wparam), Some(lparam)),
         _ => {}
     }
@@ -1515,6 +1745,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_NVIM_ESCAPE => {
             if let Some(s) = state(hwnd) {
+                if s.preview {
+                    s.set_preview(false);
+                    let _ = SetFocus(Some(s.edit));
+                    return LRESULT(0);
+                }
                 s.flush_note();
             }
             SearchWin::hide(hwnd);
@@ -1559,6 +1794,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         }
                         let _ = SetFocus(Some(s.editor_hwnd()));
                     } else {
+                        if s.preview {
+                            s.set_preview(true);
+                        }
                         let _ = SetFocus(Some(s.edit));
                     }
                 }

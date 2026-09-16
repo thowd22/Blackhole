@@ -40,7 +40,10 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
   as a PNG under `captures\` and swallowed like a dropped image. Esc cancels.
 - Left-click: a dark panel appears beside the dot. Results update on every keystroke in about 5 ms —
   keyword matches and semantic matches fused, with a tag showing which kind of match you're looking at.
-  **↵** opens the file, **Ctrl+↵** reveals it in Explorer, **Ctrl+C** copies a pasted note, **Del** forgets it.
+  **↵** opens the file, **Ctrl+↵** reveals it in Explorer, **Ctrl+C** copies a pasted note, **Del** forgets it
+  (press it twice — the first press asks). **Tab** previews the selected hit in place: the full text with
+  your search terms highlighted and code or markdown coloured by type (the preview is Neovim, read-only), and
+  `:Name new title` there renames any item. The camera button in the panel takes a screenshot.
   The panel sizes itself to what it shows; drag the pixel grip in its bottom-right corner to set your own size,
   which is remembered. Closing it keeps the query and answer for next time; **Esc** twice clears them. The
   scrollbars are drawn in the same pixel style as everything else.
@@ -65,7 +68,10 @@ doesn't look like a terminal glued on. New notes open in insert mode; Esc in nor
 The file commands mean what you'd hope: `:w` saves, `:wq` / `:x` / `ZZ` save and start a fresh note, `:q`
 saves and closes the panel, `:new` starts another. A note is titled by its first line (a `# Heading` loses
 the `#`), or "Note 2026-09-16 15:40" while it's still empty; `:Name Shopping ideas` names it explicitly and
-that name sticks through edits (`:Name` alone goes back to automatic titles).
+that name sticks through edits (`:Name` alone goes back to automatic titles). Type `? a question` in the
+Notes search box (or `:Ask …` in the editor) and the model answers from the open note alone; `:Tidy` has it
+rewrite the note as clean markdown without changing a fact (`u` undoes); `:Copy` / Ctrl+Shift+C copies the note.
+Each note remembers where your cursor was. Agents can write notes too: MCP `put` with `kind: "note"`.
 
 ## Using it from agents (MCP)
 

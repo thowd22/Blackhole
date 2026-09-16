@@ -113,7 +113,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 | Anything else | Metadata + filename + any extractable strings | P0 |
 
 ### 3.6 Screenshot tool — P1 (2026-09-16)
-- **Drag-region only**: a global shortcut (Ctrl+Shift+S) or the panel's camera button dims the screen; drag a rectangle; release swallows it. No full-screen or window modes — one gesture, on purpose. — done 2026-09-16
+- **Drag-region only**: a global shortcut (Ctrl+Shift+S) or the panel's camera button (done 2026-09-16) dims the screen; drag a rectangle; release swallows it. No full-screen or window modes — one gesture, on purpose. — done 2026-09-16
 - The capture is ingested like a dropped image: PNG stored in the vault, findable by time/title, and OCR'd once §3.3's OCR lands so its text is searchable. It is also put on the clipboard (CF_DIB) so it pastes anywhere. A quiet speech bubble confirms for ~2.5 s without moving the dot ("Swallowed a screenshot, 412×188 — it's on the clipboard too"). — done 2026-09-16
 - Esc cancels; multi-monitor and per-monitor DPI respected (capture in physical pixels). — done 2026-09-16
 
@@ -200,8 +200,8 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 ### 5.6 Rich results — P1
 - **Code blocks**: snippets and previews from code files / fenced ```` ``` ```` blocks render monospace with the language tag, preserving indentation; a hit inside a code block shows the enclosing block, not a one-line fragment.
 - **Rich text formatting**: markdown headings, bold/italics, lists and links render styled in snippets and in an item preview pane, rather than as raw `#`/`*` markup; HTML clippings keep basic structure.
-- **Match highlighting**: the matched terms in a snippet are drawn in the accent colour (FTS5 already marks them; the panel currently strips the markers).
-- **Preview pane**: expand a result (→ or Tab) to read the full item inline with the above formatting, without opening the source app.
+- **Match highlighting**: the matched terms in a snippet are drawn in the accent colour (FTS5 already marks them; the panel currently strips the markers). — done 2026-09-16 in the preview (query terms highlighted in the accent colour via Neovim `matchadd`); snippets in the list still plain
+- **Preview pane**: expand a result (→ or Tab) to read the full item inline with the above formatting, without opening the source app. — done 2026-09-16: Tab shows the hit in a read-only Neovim buffer below the list, filetype from the extension (code and markdown coloured), Esc/Tab returns; needs the bundled nvim
 
 ### 5.6b On-theme scrollbars — P1
 - The stock Windows scrollbars (grey, rounded, anti-aliased) break the pixel look on the result list and the answer box. Replace them app-wide with custom-drawn pixel-art scrollbars: dark track, 1-unit orange border, blocky thumb, no arrows (or 1-unit stepped arrows), sized in the same integer units as the dot. — done 2026-09-16
@@ -209,8 +209,8 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
 - Implementation: hide the native bars (`ShowScrollBar(..., FALSE)` / owner-draw the controls) and paint the bar in the parent, handling drag, wheel and keyboard so behaviour matches the native control.
 
 ### 5.7 Item actions — P1
-- Open, copy, reveal, re-index, delete ("let it escape" — with confirmation).
-- Tag / rename display title.
+- Open, copy, reveal, re-index, delete ("let it escape" — with confirmation). — done 2026-09-16 except re-index: Del asks and a second Del within 5 s forgets
+- Tag / rename display title. — rename done 2026-09-16 (`:Name <title>` while previewing an item, sticky); tags still open
 
 ### 5.8 Notes tab — built-in editor — P1 (2026-09-16)
 - The panel gets two tabs: **Files** (today's search/ask view) and **Notes**: direct note-taking inside Blackhole. A note is a vault item like any other (searchable, askable, MCP-retrievable) that stays editable; saving is automatic on every pause. — done 2026-09-16 (pixel tab strip, "+" button, notes list above the editor, autosave 600 ms after a pause with re-embedding on a worker, Ctrl+Tab switches tabs, Ctrl+N new, Ctrl+Del forgets; a note found in Files opens in Notes)
@@ -219,7 +219,8 @@ Still open: a third blind question set (~30), reranker cost on 4-core laptops (d
   1. **Package Neovim**: ship `nvim` (≈10 MB, MIT) and embed it — either a terminal control hosting `nvim --embed`/`--headless` over its msgpack-RPC UI protocol, drawn with the panel's pixel font (the "external UI" route Neovim supports natively), or launch it in a Windows Terminal/ConHost window positioned over the panel. Gives LSP, treesitter, the user's own config for free; the cost is a modal editor for non-vim users (a `-u` starter config with insert-mode defaults mitigates that).
   2. A native pixel-styled edit control with an LSP client speaking to external servers (`rust-analyzer`, `marksman`, …): full control of the look, much more work.
   Leaning to (1): it is the only way "LSP support" is honest at this project's size. — done 2026-09-16, option (1): `:w` saves, `:wq`/`:x`/ZZ save and start a new note, `:q` saves and closes, `:new`; titles from the first line (heading marks stripped) or "Note <date time>" when empty, `:Name <title>` for an explicit, sticky name; `src/nvim.rs` runs the stock `nvim.exe` shipped beside the app as `nvim --embed` and renders its grid (ext_linegrid) in the panel's font and palette; line numbers on, markdown by default with treesitter, LSP started for any server on PATH, insert mode for new notes, Esc in normal mode closes the panel, Ctrl+Tab/N/Del remain the panel's. The plain edit control stays as the fallback when nvim.exe is absent.
-- Notes render with §5.6's rich formatting in the Files view and previews; the raw text is what's stored.
+- Notes render with §5.6's rich formatting in the Files view and previews; the raw text is what's stored. — previews done 2026-09-16 (Neovim markdown colours)
+- Notes follow-ups — done 2026-09-16: `:Copy`/Ctrl+Shift+C copies the note; `? question` in the Notes search box or `:Ask` answers from the open note only; `:Tidy` rewrites it as clean markdown (undoable); MCP `put` with `kind: "note"`; cursor position remembered per note for the session.
 
 ---
 

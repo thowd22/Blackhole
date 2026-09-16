@@ -111,6 +111,54 @@ impl AskEngine {
         Job { id, cancel }
     }
 
+    /// Answer about one text only (a note): no retrieval, the note is the whole context.
+    pub fn ask_about(self: &Arc<Self>, question: String, title: String, text: String, target: HWND, id: u64) -> Job {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let engine = self.clone();
+        let flag = cancel.clone();
+        let hwnd = target.0 as usize;
+        std::thread::spawn(move || engine.run_about(question, title, text, hwnd, id, flag));
+        Job { id, cancel }
+    }
+
+    fn run_about(&self, question: String, title: String, text: String, hwnd: usize, id: u64, cancel: Arc<AtomicBool>) {
+        let post = |msg: u32, text: String| unsafe {
+            let boxed = Box::into_raw(Box::new(text));
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(id as usize), LPARAM(boxed as isize));
+        };
+        let Some(path) = &self.model_path else {
+            post(WM_ASK_DONE, "No model found next to blackhole.exe.".into());
+            return;
+        };
+        let mut guard = self.llm.lock().unwrap();
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        if guard.is_none() {
+            post(WM_ASK_STATUS, "loading model…".into());
+            match Llm::load(path) {
+                Ok(l) => *guard = Some(l),
+                Err(e) => {
+                    post(WM_ASK_DONE, format!("Could not load model: {e}"));
+                    return;
+                }
+            }
+        }
+        let llm = guard.as_mut().unwrap();
+        // Keep the note within the cache: ~1,400 words is what ask mode uses too.
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let clipped = if words.len() > 1400 { words[..1400].join(" ") } else { text.clone() };
+        let sources = [Source { title: &title, text: &clipped }];
+        post(WM_ASK_STATUS, format!("thinking over this note ({} words) on {}…  Esc to stop", words.len(), llm.backend));
+        let result = llm.answer(&question, &sources, &cancel, |tok| post(WM_ASK_TOKEN, tok.to_string()));
+        let status = match result {
+            Ok(_) if cancel.load(Ordering::Relaxed) => "stopped".to_string(),
+            Ok(_) => format!("from \"{title}\""),
+            Err(e) => format!("error: {e}"),
+        };
+        post(WM_ASK_DONE, status);
+    }
+
     fn run(&self, question: String, hwnd: usize, id: u64, cancel: Arc<AtomicBool>) {
         let post = |msg: u32, text: String| unsafe {
             let boxed = Box::into_raw(Box::new(text));

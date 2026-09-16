@@ -36,6 +36,8 @@ pub const WM_NVIM_ESCAPE: u32 = 0x8043;
 pub const WM_NVIM_CMD: u32 = 0x8044;
 
 const NVIM_VERSION: &str = "0.12.5";
+/// Neovim's initial buffer: the note being edited. Previews use a scratch buffer.
+const NOTE_BUF: i64 = 1;
 
 /// `<exe dir>\nvim\bin\nvim.exe` (the installer's layout), or NVIM on the path as a fallback.
 pub fn find_nvim() -> Option<PathBuf> {
@@ -91,6 +93,10 @@ fn v_u64(v: &Value) -> u64 {
     v.as_u64().or_else(|| v.as_i64().map(|i| i.max(0) as u64)).unwrap_or(0)
 }
 fn v_i64(v: &Value) -> i64 {
+    // Buffer/window handles come back as msgpack EXT values wrapping the id.
+    if let Value::Ext(_, bytes) = v {
+        return rmpv::decode::read_value(&mut &bytes[..]).ok().map(|inner| v_i64(&inner)).unwrap_or(0);
+    }
     v.as_i64().or_else(|| v.as_u64().map(|i| i as i64)).unwrap_or(0)
 }
 fn v_str(v: &Value) -> String {
@@ -302,6 +308,7 @@ vim.o.fillchars = 'eob: '
 vim.o.shortmess = 'aoOstTIcCF'
 vim.o.timeoutlen = 400
 vim.o.updatetime = 300
+vim.cmd('syntax enable')
 
 -- Blackhole's palette: dark violet ground, orange accent, dim lilac secondary text.
 local bg, bg_dark, sel, accent, fg, dim = '#301424', '#180A14', '#782860', '#FFA040', '#FFE8F0', '#B090A0'
@@ -401,6 +408,9 @@ vim.api.nvim_create_user_command('BhWriteQuit', function() send('wq') end, {})
 vim.api.nvim_create_user_command('BhQuit', function() send('q') end, {})
 vim.api.nvim_create_user_command('Name', function(o) send('name', o.args) end, { nargs = '?' })
 vim.api.nvim_create_user_command('BhNew', function() send('new') end, {})
+vim.api.nvim_create_user_command('Copy', function() send('copy') end, {})
+vim.api.nvim_create_user_command('Ask', function(o) send('ask', o.args) end, { nargs = '+' })
+vim.api.nvim_create_user_command('Tidy', function() send('tidy') end, {})
 local redirect = { w = 'BhWrite', write = 'BhWrite', wq = 'BhWriteQuit', x = 'BhWriteQuit', xit = 'BhWriteQuit',
   wqa = 'BhWriteQuit', wqall = 'BhWriteQuit', q = 'BhQuit', quit = 'BhQuit', qa = 'BhQuit', qall = 'BhQuit',
   ['q!'] = 'BhQuit', ['wq!'] = 'BhWriteQuit', ['x!'] = 'BhWriteQuit', new = 'BhNew', enew = 'BhNew' }
@@ -412,6 +422,7 @@ end
 vim.keymap.set('n', 'ZZ', '<Cmd>BhWriteQuit<CR>', { silent = true })
 vim.keymap.set('n', 'ZQ', '<Cmd>BhQuit<CR>', { silent = true })
 vim.keymap.set({ 'n', 'i' }, '<C-s>', '<Cmd>BhWrite<CR>', { silent = true })
+vim.keymap.set({ 'n', 'i', 'v' }, '<C-S-c>', '<Cmd>Copy<CR>', { silent = true })
 "##;
     std::fs::write(&path, lua)?;
     Ok(path)
@@ -529,7 +540,8 @@ impl Host {
             opts.push((Value::from("ext_linegrid"), Value::from(true)));
             if let Some(rpc) = &h.rpc {
                 let _ = rpc.request("nvim_ui_attach", vec![Value::from(40), Value::from(10), Value::Map(opts)]);
-                let _ = rpc.request("nvim_buf_attach", vec![Value::from(0), Value::from(false), Value::Map(vec![])]);
+                // The note lives in the initial buffer (id 1); previews get their own buffer.
+                let _ = rpc.request("nvim_buf_attach", vec![Value::from(NOTE_BUF), Value::from(false), Value::Map(vec![])]);
                 crate::util::log(&format!("nvim: embedded {} from {}", NVIM_VERSION, exe.display()));
             }
             // Move out of the box: the window owns the state now; return a handle copy for the panel.
@@ -545,7 +557,8 @@ impl Host {
     pub fn set_text(&self, text: &str, insert: bool) {
         let Some(rpc) = self.rpc() else { return };
         let lines: Vec<Value> = text.split('\n').map(|l| Value::from(l.trim_end_matches('\r'))).collect();
-        let _ = rpc.request("nvim_buf_set_lines", vec![Value::from(0), Value::from(0), Value::from(-1), Value::from(false), Value::Array(lines)]);
+        self.end_preview();
+        let _ = rpc.request("nvim_buf_set_lines", vec![Value::from(NOTE_BUF), Value::from(0), Value::from(-1), Value::from(false), Value::Array(lines)]);
         // One command each: `normal!` would swallow the rest of a `|`-joined line as keys.
         for cmd in ["stopinsert", "silent! normal! gg0", "setlocal nomodified"] {
             let _ = rpc.request("nvim_command", vec![Value::from(cmd)]);
@@ -553,7 +566,7 @@ impl Host {
         if insert {
             let _ = rpc.request("nvim_command", vec![Value::from("startinsert")]);
         }
-        let tick = rpc.request("nvim_buf_get_changedtick", vec![Value::from(0)]).map(|v| v_u64(&v)).unwrap_or(0);
+        let tick = rpc.request("nvim_buf_get_changedtick", vec![Value::from(NOTE_BUF)]).map(|v| v_u64(&v)).unwrap_or(0);
         unsafe {
             if let Some(h) = state(self.hwnd) {
                 h.own_tick = tick;
@@ -563,9 +576,81 @@ impl Host {
 
     pub fn text(&self) -> String {
         let Some(rpc) = self.rpc() else { return String::new() };
-        match rpc.request("nvim_buf_get_lines", vec![Value::from(0), Value::from(0), Value::from(-1), Value::from(false)]) {
+        match rpc.request("nvim_buf_get_lines", vec![Value::from(NOTE_BUF), Value::from(0), Value::from(-1), Value::from(false)]) {
             Ok(v) => v.as_array().map(|a| a.iter().map(v_str).collect::<Vec<_>>().join("\n")).unwrap_or_default(),
             Err(_) => String::new(),
+        }
+    }
+
+    /// Show read-only text (a search hit) in a scratch buffer with its filetype's colours
+    /// and the query terms highlighted; `end_preview` returns to the note.
+    pub fn preview(&self, text: &str, filetype: &str, terms: &[String]) {
+        let Some(rpc) = self.rpc() else { return };
+        let dbg = std::env::var_os("BLACKHOLE_NVIM_DEBUG").is_some();
+        let existing = rpc.request("nvim_eval", vec![Value::from("get(g:, 'bh_preview', 0)")]);
+        if dbg {
+            crate::util::log(&format!("nvim preview: existing {existing:?}"));
+        }
+        let buf = match existing.map(|v| v_i64(&v)).unwrap_or(0) {
+            0 => {
+                let b = rpc.request("nvim_create_buf", vec![Value::from(false), Value::from(true)]);
+                if dbg {
+                    crate::util::log(&format!("nvim preview: create_buf {b:?}"));
+                }
+                let b = b.map(|v| v_i64(&v)).unwrap_or(0);
+                let _ = rpc.request("nvim_set_var", vec![Value::from("bh_preview"), Value::from(b)]);
+                b
+            }
+            b => b,
+        };
+        if buf == 0 {
+            return;
+        }
+        let lines: Vec<Value> = text.split('\n').map(|l| Value::from(l.trim_end_matches('\r'))).collect();
+        let r1 = rpc.request("nvim_set_option_value", vec![Value::from("modifiable"), Value::from(true), Value::Map(vec![(Value::from("buf"), Value::from(buf))])]);
+        let r2 = rpc.request("nvim_buf_set_lines", vec![Value::from(buf), Value::from(0), Value::from(-1), Value::from(false), Value::Array(lines)]);
+        let r3 = rpc.request("nvim_win_set_buf", vec![Value::from(0), Value::from(buf)]);
+        if dbg {
+            crate::util::log(&format!("nvim preview: buf {buf} modifiable {r1:?} lines {} win_set_buf {r3:?}", r2.is_ok()));
+        }
+        let ft = filetype.replace(|c: char| !c.is_ascii_alphanumeric(), "");
+        for cmd in [
+            "stopinsert".to_string(),
+            format!("setlocal nomodifiable buftype=nofile bufhidden=hide noswapfile filetype={ft} nonumber"),
+            "silent! call clearmatches()".to_string(),
+            "silent! normal! gg0".to_string(),
+        ] {
+            let _ = rpc.request("nvim_command", vec![Value::from(cmd)]);
+        }
+        for t in terms.iter().filter(|t| t.len() >= 2).take(8) {
+            let pat = format!("\\c\\V{}", t.replace('\\', "\\\\").replace('\'', "''"));
+            let _ = rpc.request("nvim_command", vec![Value::from(format!("silent! call matchadd('Search', '{pat}')"))]);
+        }
+    }
+
+    /// Back to the note buffer (no-op when it is already showing).
+    pub fn end_preview(&self) {
+        let Some(rpc) = self.rpc() else { return };
+        let cur = rpc.request("nvim_get_current_buf", vec![]).map(|v| v_i64(&v)).unwrap_or(NOTE_BUF);
+        if cur != NOTE_BUF {
+            let _ = rpc.request("nvim_win_set_buf", vec![Value::from(0), Value::from(NOTE_BUF)]);
+            let _ = rpc.request("nvim_command", vec![Value::from("silent! call clearmatches() | setlocal number")]);
+        }
+    }
+
+    /// Cursor (1-based row, 0-based col) in the note, for remembering it per note.
+    pub fn cursor(&self) -> Option<(i64, i64)> {
+        let rpc = self.rpc()?;
+        let v = rpc.request("nvim_win_get_cursor", vec![Value::from(0)]).ok()?;
+        let a = v.as_array()?;
+        Some((v_i64(a.first()?), v_i64(a.get(1)?)))
+    }
+
+    pub fn set_cursor(&self, pos: (i64, i64)) {
+        if let Some(rpc) = self.rpc() {
+            // Out-of-range positions error harmlessly (the note may have shrunk).
+            let _ = rpc.request("nvim_win_set_cursor", vec![Value::from(0), Value::Array(vec![Value::from(pos.0), Value::from(pos.1)])]);
+            let _ = rpc.request("nvim_command", vec![Value::from("normal! zz")]);
         }
     }
 

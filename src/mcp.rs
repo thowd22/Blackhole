@@ -139,7 +139,8 @@ fn tools() -> Value {
                 "properties": {
                     "text": { "type": "string", "description": "Content to store." },
                     "path": { "type": "string", "description": "Path of a file to swallow instead of text (Windows path, or /mnt/c/... from WSL)." },
-                    "title": { "type": "string", "description": "Optional title; the first line of the text otherwise." }
+                    "title": { "type": "string", "description": "Optional title; the first line of the text otherwise." },
+                    "kind": { "type": "string", "enum": ["note"], "description": "\"note\" stores the text as an editable note in the Notes tab instead of a plain swallowed text." }
                 }
             }
         },
@@ -201,6 +202,24 @@ fn windows_path(p: &str) -> String {
 
 fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
     let title = args.get("title").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
+    if args.get("kind").and_then(|v| v.as_str()) == Some("note") {
+        // An editable note: created like the panel does it, named if a title was given.
+        let text = args.get("text").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty()).ok_or("a note needs text")?;
+        let now = crate::util::now_secs();
+        let id = ctx.store.lock().unwrap().add_note(now).map_err(|e| e.to_string())?.ok_or("could not create the note")?;
+        let auto: String = text.lines().map(|l| l.trim().trim_start_matches('#').trim()).find(|l| !l.is_empty()).unwrap_or("Note").chars().take(80).collect();
+        {
+            let mut st = ctx.store.lock().unwrap();
+            st.update_note(id, &auto, text).map_err(|e| e.to_string())?;
+            if let Some(t) = title {
+                st.set_note_title(id, t).map_err(|e| e.to_string())?;
+            }
+        }
+        ingest::embed_item(&ctx.store, &ctx.embedder, id, title.unwrap_or(&auto), text);
+        let report = ingest::Report { added: 1, duplicates: 0, failed: 0, errors: Vec::new() };
+        post(ctx.hwnd, crate::dot::WM_INGEST_DONE, Box::into_raw(Box::new(report)) as isize);
+        return Ok(json!({ "id": id, "title": title.unwrap_or(&auto), "kind": "note", "words": text.split_whitespace().count(), "duplicate": false }).to_string());
+    }
     let mut e = if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         ingest::extract_file(Path::new(&windows_path(path)))?
     } else if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
