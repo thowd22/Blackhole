@@ -35,6 +35,12 @@ impl Default for Config {
 
 /// `%LOCALAPPDATA%\Blackhole`, created on demand.
 pub fn data_dir() -> PathBuf {
+    // BLACKHOLE_DATA_DIR: run a second, isolated instance (testing) with its own vault/config.
+    if let Some(d) = std::env::var_os("BLACKHOLE_DATA_DIR") {
+        let dir = PathBuf::from(d);
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
     let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = base.join("Blackhole");
     let _ = std::fs::create_dir_all(&dir);
