@@ -1,108 +1,199 @@
 # Blackhole
 
-A tiny pixel-art black hole that floats above every window. Drop files or text
-on it (or paste with **Ctrl+Shift+V**) and it swallows them into a local vault.
-Click it — or press **Ctrl+Shift+Space** to summon it to the mouse — and search.
+<p align="center"><img src="installer/blackhole-256.png" width="128" alt="Blackhole"></p>
 
-Design notes: [CONCEPT.md](CONCEPT.md) · [FEATURES.md](FEATURES.md) · [PACKAGING.md](PACKAGING.md)
+**A tiny pixel-art black hole that eats your files and answers questions about them — entirely on your PC.**
 
-Issues and PRs are welcome: https://github.com/thowd22/Blackhole
+Blackhole is a small always-on-top dot for Windows. Drop a PDF, a screenshot of text, a web page, a
+receipt, a résumé, a pasted snippet — anything — onto it and it disappears into a local vault. Click the dot
+and you can search everything you've ever fed it by *meaning*, not just by filename. Start a search with `?`
+and a small language model answers from your own documents, citing what it read. Nothing leaves the
+machine: no accounts, no cloud, no telemetry.
 
-## Status: MVP (Windows x64)
+Issues and PRs are welcome — https://github.com/thowd22/Blackhole
 
-Working now:
-- Layered, always-on-top, no-taskbar dot with procedurally rendered pixel-art sprite and mood animations
-- Drag to move (position remembered), left-click to search, right-click menu (size, vault folder, quit)
-- Drag-and-drop of files and text; clipboard swallow via hotkey/menu
-- Ingest: plain text, text/code/markdown files, PDFs (text extraction); other files by name
-- SQLite vault (`%LOCALAPPDATA%\Blackhole\vault.db`) with FTS5 keyword search (BM25)
-- On-device embeddings: bge-small-en-v1.5 (384-dim, CLS-pooled) on **ONNX Runtime + DirectML** (any GPU;
-  CPU provider fallback). The runtime DLLs and the model are compiled into the exe; the DLLs are unpacked
-  beside it on first run. Items are chunked (~100 words, overlapping), each chunk embedded with its title
-- Hybrid search: keyword + semantic (cosine over chunks and one title-only document unit per item),
-  score-fused (keyword weight scales with query-term coverage); English stopwords never count as
-  distinctive terms; results are tagged `≈` (semantic), `≈=` (both) or untagged (keyword)
-- "Not in your vault" gate: ≥2 content words, none anywhere in the vault, no strong semantic match →
-  the panel shows nothing and ask mode answers without calling the LLM (2/2 absent, 0 false absents on
-  dev + held-out question sets)
-- Ask-mode retrieval adds a vault-anchored synonym expansion of the dense query and a cross-encoder
-  reranker (mxbai-rerank-xsmall-v1 int8 on ORT, top-10 candidates, ~110 ms) that decides the top document;
-  18/18 Hit@1 on dev + held-out. Live search stays at ~5 ms/query. Method and numbers: RAG.md §2b
-- Search panel: live results, ↵ open, Ctrl+↵ reveal in Explorer, Ctrl+C copy text, Del forget
-- Ask mode: start a query with `?` and press ↵ — **Llama 3.2 3B Instruct** (int4 ONNX) on ONNX Runtime,
-  hybrid execution: prompt pass on DirectML (the GPU with the most VRAM, picked via DXGI), decode on the CPU
-  provider. Measured end to end on 18 questions: 14/18 correct (Qwen2.5-1.5B: 9/18), ~1 s to first text,
-  ~7.6 tok/s. Any instruct model dropped beside the exe works if its `tokenizer.json` sits next to it: the
-  chat template (ChatML / Llama 3 / Phi / Gemma) and stop tokens are detected from the tokenizer; fp16 or fp32
-  KV caches are both handled. Exports go through `tools/last_logits.py` → `gemm_head.py` → `explicit_rotary.py` →
-  `shrink_embeddings.py` → `repack.py` (PACKAGING.md § LLM selection round and § Memory); the shipped Llama is
-  2.7 GB on disk and peaks at ~6 GB of RAM while answering. The largest `*.onnx` (graph + external data)
-  in the exe folder or its subfolders wins.
-  Context = best chunks with neighbours in document order, or the whole document when the top hit is small.
-  Order/time questions get a forced "Timeline:" scratchpad. Pre-loaded when the panel opens, unloaded 60 s
-  after it closes. The exact prompt of the last question goes to `%LOCALAPPDATA%\Blackhole\last_ask.txt`;
-  `cargo build --release --bin askeval` builds the end-to-end evaluation binary.
-- Tray icon (the sprite) with the same menu; **Show dot** toggles dot visibility, **Start at login**
-  writes the per-user Run key, **Center on new message** warps the dot to screen centre for notifications
-- Pixel-art speech bubbles: a 6-step first-run tutorial (each step waits for the action it describes;
-  the orange × skips the tour; "Show tutorial" in the menu replays it) and notifications (ingest failures now; MCP `notify` later).
-  Notifications pre-empt a tutorial step and it resumes afterwards; click a bubble to dismiss.
-- Diagnostics: `%LOCALAPPDATA%\Blackhole\log.txt` (ingest failures), `last_ask.txt` (last ask prompt)
+---
 
-Not yet: OCR & image captions, GPU/NPU acceleration, panel resizing / rich snippets, MCP server (see FEATURES.md).
+## What it feels like
+
+- The dot floats above every window at whatever size you like. Drag it anywhere; **Ctrl+Shift+Space**
+  summons it to your mouse and opens search; press again and it goes home.
+- Drop files or selected text on it, or hit **Ctrl+Shift+V** to swallow whatever is on the clipboard. The ring
+  speeds up and specks spiral in while it digests; it pulses when it's done, flickers red if it couldn't read
+  something.
+- Left-click: a dark panel appears beside the dot. Results update on every keystroke in about 5 ms —
+  keyword matches and semantic matches fused, with a tag showing which kind of match you're looking at.
+  **↵** opens the file, **Ctrl+↵** reveals it in Explorer, **Ctrl+C** copies a pasted note, **Del** forgets it.
+- Type `? how much did shipping cost` and press ↵: a second box streams the answer, the results below show
+  what it drew on, and the status line tells you which documents it read and how long it took. If none of
+  your words appear anywhere in the vault it says so instead of inventing something.
+- A pixel speech bubble walks you through this the first time you run it. The same bubbles carry
+  notifications later; a right-click menu has sizes, tray options, start-at-sign-in and a "center on new
+  message" toggle. There's a tray icon so the dot can hide.
+
+## How it works
+
+Everything below runs inside one 275 MB executable plus a 2.7 GB model folder. There is exactly one
+inference engine in the whole app — **ONNX Runtime**, driven through **DirectML** so the same binary uses an
+AMD, NVIDIA or Intel GPU, and the same models run on the Copilot+ NPU providers (Qualcomm QNN, AMD Ryzen AI,
+Intel OpenVINO) when those land. The engine DLLs are compiled into the exe and unpacked beside it on first
+run; nothing is linked at build time, so the app cross-compiles from Linux with plain MinGW.
+
+### Swallowing
+
+1. **Extraction.** Text and code files are read directly; PDFs go through a pure-Rust extractor; other files
+   are indexed by name and metadata for now (OCR is on the roadmap).
+2. **Chunking.** Each document is split into ~100-word chunks with a 20-word overlap, paragraph-aware.
+3. **Embedding.** Every chunk — prefixed with its document's title — becomes a 384-dimensional vector from
+   **bge-small-en-v1.5**, run on the GPU. One extra vector per document holds just the *title*: a
+   whole-document handle that lets "which file has my career history" match `Resume.pdf` when no single
+   chunk does. A new item is searchable a few seconds after you drop it.
+4. **Storage.** Everything lives in one SQLite file in `%LOCALAPPDATA%\Blackhole`: the original text, an
+   FTS5 full-text index, and the vectors. The vault is stamped with the embedding model's id; change the
+   model and it re-embeds itself in the background.
+
+### Searching
+
+Live search fuses two rankers on every keystroke:
+
+- **Keyword** (SQLite FTS5, BM25): typo-tolerant — terms are OR-ed with a prefix match on the last one, so a
+  typo in one word doesn't empty the list, and a document matching more of your terms scores higher.
+- **Semantic** (cosine over all chunk and title vectors, brute force — trivially fast at this scale).
+
+They're fused by *score*, not rank: a strong semantic match contributes its normalised cosine, a keyword hit
+contributes weight × (fraction of your terms it contains)², and distinctive terms (rare in *your* vault —
+names, numbers, jargon, never English function words) add a small boost. This shape was chosen by
+measurement: reciprocal-rank fusion looked great on the first question set and collapsed on a blind one.
+
+An **absent gate** stops the two failure modes that make local assistants untrustworthy: if your query has two
+or more content words and none of them occurs anywhere in the vault (and nothing matches strongly by
+meaning), the panel shows nothing and ask mode never calls the model. Cosine thresholds couldn't do this —
+unanswerable questions score as high as real ones — the lexical test could.
+
+### Asking
+
+`?` questions go through a heavier pipeline that's allowed ~250 ms before the model starts:
+
+1. The question is expanded with synonyms — only ones that actually occur in your vault, so it never drifts
+   toward things you don't have — and embedded.
+2. The top candidates are re-scored by a **cross-encoder reranker** (mxbai-rerank-xsmall, int4), which reads
+   query and passage *together* and decides the top document. On a blind question set this lifted top-1
+   retrieval from 62 % to 73 %.
+3. **Context assembly**: if the winning document is small enough (a résumé, a receipt) the model gets the
+   *whole* thing; otherwise it gets the best chunks with their neighbours, in document order, up to ~1,400
+   words. Questions about order or time get a forced `Timeline:` scratchpad — small models list dates
+   correctly far more often than they reason about them in one shot.
+4. **Generation**: **Llama 3.2 3B Instruct**, int4, on ONNX Runtime. The prompt pass (~2,000 tokens) runs on
+   the GPU; tokens stream into the panel as they're produced. The model is pre-loaded the moment you open
+   the panel and unloaded 60 s after you close it, so RAM is only spent while you're actually asking.
+
+The exact prompt of your last question is written to `%LOCALAPPDATA%\Blackhole\last_ask.txt`, and
+`log.txt` records the retrieval trace, so "why did it say that?" is always answerable.
+
+### The graph surgery that makes it possible
+
+Off-the-shelf ONNX exports of chat models are not built for a desktop app on DirectML. Blackhole ships small,
+weight-preserving graph tools (`tools/`) that turn a Hugging Face export into something that runs well:
+
+| Problem in stock exports | Fix |
+|---|---|
+| The prompt pass returns logits for *every* position (~1 GB for a long prompt) | `last_logits.py` slices the last token before the LM head |
+| The tied 1.5 GB embedding matrix is transposed at runtime on every pass | `gemm_head.py` swaps in `Gemm(transB)` |
+| DirectML's GroupQueryAttention silently returns prompt-independent output when rotary is done inside the op | `explicit_rotary.py` moves rotary into explicit `RotaryEmbedding` nodes — the layout Microsoft's own DirectML exports use |
+| The embedding/LM-head matrix is fp32 (1.5 GB, held twice) | `shrink_embeddings.py` streams it into an fp16 lookup and an int4 `MatMulNBits` head — −2.6 GB RAM, *faster* decode |
+| Split, partly dead external data files | `repack.py` writes one file with only referenced weights |
+
+Any instruct model dropped beside the exe works if its `tokenizer.json` sits next to it: the chat template
+(ChatML, Llama 3, Phi, Gemma), stop tokens and fp16/fp32 cache layout are detected from the tokenizer and the
+graph. The largest model in the exe folder or its subfolders is used.
+
+### Measured, not guessed
+
+Every retrieval and model decision in this repo was made against question sets over a real vault, with a
+Python harness (`eval/harness.py`) that reproduces the app's math to cosine 1.0000, and an end-to-end
+binary (`askeval`) that runs the actual pipeline and checks answers against regexes. The current numbers on a
+**blind** 30-question set (written by an agent that saw only the vault):
+
+| | Live search | Ask mode |
+|---|---|---|
+| Right document first | 62 % | 73 % |
+| Right document in top 3 | 92 % | 88 % |
+| "Not in your vault" | 4/4, no false alarms | |
+| Correct answers (Llama 3.2 3B) | | **65 %** |
+| Latency | 5 ms | ~1.2 s to first text, ~8 tok/s |
+
+The full story — what was tried, what won, what lost and why (bigger embedders lost; LLM chunk enrichment
+lost; RRF lost out of sample; the reranker and title units won) — is in [RAG.md](RAG.md). Model selection,
+the DirectML findings and the memory work are in [PACKAGING.md](PACKAGING.md).
+
+### Why these choices
+
+- **One engine, vendor-neutral.** ONNX Runtime + DirectML covers every consumer GPU from one binary, and the
+  identical model files are what the NPU vendors ship. No CUDA, no llama.cpp, no per-vendor builds.
+- **Small models, strong pipeline.** A 33M-parameter embedder plus a 22M reranker beat a bigger embedder
+  alone in our tests, as the literature predicts. The 3B chat model was chosen over 1.5B and 4B candidates on
+  measured answers, speed and memory, not parameter count.
+- **Pixel art on purpose.** The dot is a procedurally rendered 32×32 sprite scaled with nearest-neighbour, drawn
+  into a per-pixel-alpha layered window; the bubbles and panel match. It should feel like a desktop sticker,
+  not an app.
+- **Honest about limits.** A 3B model misreads "before/after" off its own correct timeline sometimes, decoy-heavy
+  forms trip it, and one-line notes get buried under big PDFs in search. Those are the open items below.
 
 ## Installing
 
-Download `Blackhole-<version>-x64-setup.exe` (≈2.9 GB: the app, the ONNX Runtime + DirectML runtime and the
-Llama 3.2 3B model) and run it. It installs per user by default (no admin needed), can start at sign-in, and
-puts the dot on your desktop. Your vault lives in `%LOCALAPPDATA%\Blackhole` and survives updates; uninstall
-asks before deleting it. Requires Windows 10 1903+ / Windows 11, x64, any GPU with DirectML (the CPU is used
-otherwise). Build it yourself with `./build-installer.sh` (needs Inno Setup: `winget install JRSoftware.InnoSetup`).
+Download `Blackhole-<version>-x64-setup.exe` (≈2.9 GB: app + ONNX Runtime/DirectML + Llama 3.2 3B) and run
+it. Per-user install by default (no admin), optional start-at-sign-in and desktop shortcut. Your vault in
+`%LOCALAPPDATA%\Blackhole` survives updates; uninstall asks before deleting it. Requires Windows 10 1903+ /
+Windows 11 x64; any GPU with DirectML (the CPU is used otherwise, more slowly). While answering, the app uses
+about 6 GB of RAM in the current hybrid mode; a pure-GPU mode that needs ~2.4 GB is working and being tuned.
 
 ## Building (from WSL)
 
 ```sh
 sudo apt install mingw-w64
 rustup target add x86_64-pc-windows-gnu
-# model files (not committed):
-#   models/bge-small-en-v1.5/{model.onnx,vocab.txt}  from https://huggingface.co/BAAI/bge-small-en-v1.5
-#   models/qwen2.5/tokenizer.json                    from https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct
-#   models/rerank-mxbai-int8/{model.onnx,tokenizer.json} = onnx/model_quantized.onnx + tokenizer.json from https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1
-#   runtime/{onnxruntime.dll,DirectML.dll}           from NuGet Microsoft.ML.OnnxRuntime.DirectML 1.20.1 / Microsoft.AI.DirectML 1.15.4
-./build.sh            # builds and copies the exe to /mnt/c/Users/<you>/blackhole/
-# Ask mode model (beside the exe): onnx/model_q4.onnx from https://huggingface.co/onnx-community/Qwen2.5-1.5B-Instruct,
-# run through tools/last_logits.py so the prompt pass only returns the last token's logits
-# (GenAI-builder exports additionally need tools/trim_gqa.py for ORT 1.20).
-# cargo build --release --bin ortllm gives a console bench for the LLM path.
-# Build memory: .cargo/config.toml caps cargo at 4 jobs — 24 parallel rustc on candle/tract at
-# opt-level 3 can take down a 15 GB WSL VM. Avoid running a second heavy cargo build concurrently.
+# not committed (see PACKAGING.md for exact sources):
+#   models/bge-small-en-v1.5/{model.onnx,vocab.txt}        BAAI/bge-small-en-v1.5
+#   models/rerank-mxbai-int8/{model.onnx,tokenizer.json}  mixedbread-ai/mxbai-rerank-xsmall-v1 (onnx/model_quantized.onnx)
+#   models/qwen2.5/tokenizer.json                         Qwen/Qwen2.5-1.5B-Instruct (built-in fallback tokenizer)
+#   runtime/{onnxruntime.dll,DirectML.dll}                NuGet Microsoft.ML.OnnxRuntime.DirectML 1.20.1 / Microsoft.AI.DirectML 1.15.4
+#   models/llama-3.2-3b/                                  onnx-community/Llama-3.2-3B-Instruct model_q4 → tools/ pipeline → repack
+./build.sh             # cross-compiles and deploys over the installed app
+./build-installer.sh   # stages exe + runtime + model and runs Inno Setup (winget install JRSoftware.InnoSetup)
+cargo build --release --bin askeval   # end-to-end evaluation binary
 ```
 
-SQLite is bundled. `onnxruntime.dll` + `DirectML.dll` (from the `Microsoft.ML.OnnxRuntime.DirectML` 1.20.1 and
-`Microsoft.AI.DirectML` 1.15.4 NuGet packages) live in `runtime/` (not committed) and are embedded at build time.
+`.cargo/config.toml` caps cargo at 4 jobs — the inference crates at opt-level 3 across 24 cores can exhaust a
+15 GB WSL VM. SQLite is bundled; the app has no runtime dependencies beyond the GPU driver.
 
 ## Layout
 
 | File | What |
 |---|---|
-| `src/main.rs` | Startup, message loop, ingest worker thread |
-| `src/dot.rs` | The dot window: rendering, drag, hotkeys, menu, moods |
+| `src/main.rs` | Startup, ONNX Runtime bootstrap, message loop, ingest worker thread |
+| `src/dot.rs` | The dot: rendering, drag, hotkeys, menu, moods, tutorial, notifications |
 | `src/sprite.rs` | Procedural 32×32 pixel-art renderer |
-| `src/drop.rs` | OLE `IDropTarget` and clipboard reading |
-| `src/ingest.rs` | Text extraction per file type, chunk + embed on the worker thread |
-| `src/chunk.rs` | Paragraph-aware overlapping chunker |
-| `src/runtime.rs` | Unpacks and loads ONNX Runtime (+DirectML) dynamically |
-| `src/embed.rs` | bge-small embedder (ONNX Runtime, DirectML→CPU) + WordPiece tokenizer |
-| `src/rerank.rs` | mxbai cross-encoder reranker (ask mode only) |
-| `src/expand.rs` | Vault-anchored synonym expansion of the dense query (ask mode only) |
-| `eval/harness.py` | Retrieval measurement harness (Hit@k, latency) over a vault snapshot |
-| `src/llm_ort.rs` | Qwen2.5 ONNX generation: DirectML prompt pass + CPU decode, prompt template |
-| `src/gpu.rs` | Picks the DirectML adapter (most dedicated VRAM) via DXGI |
-| `src/bin/ortllm.rs` | Console bench for the LLM path |
-| `src/ask.rs` | Ask worker: retrieval → generation, streams tokens to the panel |
-| `src/store.rs` | SQLite + FTS5 vault |
-| `src/search.rs` | Search panel window |
-| `src/config.rs` | Position / scale / settings / tutorial progress |
-| `src/bubble.rs` | Pixel-art speech bubble window (tutorial + notifications) |
-| `src/tray.rs` | System tray icon built from the sprite |
-| `src/startup.rs` | Start-at-login (HKCU Run key) |
+| `src/bubble.rs` | Pixel-art speech bubbles |
+| `src/search.rs` | Search panel: live results, ask box, keyboard handling |
+| `src/tray.rs`, `src/startup.rs` | Tray icon; start-at-sign-in |
+| `src/drop.rs` | OLE drop target and clipboard reading |
+| `src/ingest.rs`, `src/chunk.rs` | Extraction, chunking, embedding on the worker thread |
+| `src/store.rs` | SQLite + FTS5 vault, hybrid search, absent gate, context assembly |
+| `src/embed.rs`, `src/rerank.rs`, `src/expand.rs` | Embedder, cross-encoder reranker, vault-anchored synonyms |
+| `src/llm_ort.rs`, `src/ask.rs` | Model loading, chat templates, generation; the ask worker |
+| `src/runtime.rs`, `src/gpu.rs` | Unpack/load ONNX Runtime + DirectML; pick the GPU with the most VRAM |
+| `src/bin/askeval.rs`, `eval/harness.py` | End-to-end and retrieval evaluation |
+| `tools/*.py` | Model preparation (last-token logits, Gemm head, explicit rotary, shrink, repack, GQA trim) |
+| `installer/`, `build-installer.sh` | Inno Setup script, icon, model licences |
+
+## Roadmap
+
+Pure-GPU decode as the default (working, being tuned for speed) → MCP server (`put` / `retrieve` / `notify`)
+so agents can use the vault as memory → CI/CD → search-panel polish (auto-resize, on-theme scrollbars, rich
+snippets) → OCR for images and scanned PDFs → Copilot+ NPU providers → code signing. Details and the
+reasoning behind each in [FEATURES.md](FEATURES.md).
+
+## Licence notes
+
+Blackhole bundles Llama 3.2 3B Instruct (Meta, Llama 3.2 Community License — "Built with Llama"), bge-small
+(MIT), mxbai-rerank-xsmall (Apache-2.0) and ONNX Runtime + DirectML (Microsoft). See `installer/LICENSE-MODELS.txt`.
