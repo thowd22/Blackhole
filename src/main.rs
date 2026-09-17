@@ -19,6 +19,7 @@ mod hotkeys;
 mod theme;
 mod nvim;
 mod ocr;
+mod office;
 mod rerank;
 mod runtime;
 mod screenshot;
@@ -28,6 +29,7 @@ mod startup;
 mod store;
 mod tray;
 mod util;
+mod web;
 
 use std::sync::{mpsc, Arc, Mutex};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};

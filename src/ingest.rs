@@ -41,12 +41,20 @@ const MAX_CONTENT: usize = 4 * 1024 * 1024;
 
 const TEXT_EXTS: &[&str] = &[
     "txt", "md", "markdown", "rst", "csv", "tsv", "json", "yaml", "yml", "toml", "ini", "cfg",
-    "conf", "log", "xml", "html", "htm", "css", "js", "ts", "jsx", "tsx", "rs", "py", "c", "h",
+    "conf", "log", "xml", "css", "js", "ts", "jsx", "tsx", "rs", "py", "c", "h",
     "cpp", "hpp", "cs", "java", "kt", "go", "rb", "php", "sh", "ps1", "bat", "cmd", "sql", "lua",
     "swift", "m", "tex", "bib", "org", "srt", "vtt",
 ];
 
 pub fn extract_text(text: &str) -> Extracted {
+    // Pasted or dropped a bare URL: the page behind it is what was meant, not the
+    // seven words of the link. A fetch that fails keeps the text.
+    if let Some(url) = crate::web::bare_url(text) {
+        match extract_url(&url) {
+            Ok(e) => return e,
+            Err(err) => crate::util::log(&format!("web: {err}")),
+        }
+    }
     let first = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Text");
     Extracted {
         title: truncate(first, 80).to_string(),
@@ -56,6 +64,21 @@ pub fn extract_text(text: &str) -> Extracted {
         bytes_hash: None,
         stored: None,
     }
+}
+
+/// Fetch a page and turn it into an item: the URL is its identity, so the same
+/// page swallowed again refreshes the text it had instead of piling up copies.
+pub fn extract_url(url: &str) -> Result<Extracted, String> {
+    let page = crate::web::fetch_page(url)?;
+    let content = format!("{}\n\n{}", page.url, page.text);
+    Ok(Extracted {
+        title: truncate(page.title.trim(), 120).to_string(),
+        kind: "web",
+        source: Some(page.url.clone()),
+        content: truncate(&content, MAX_CONTENT).to_string(),
+        bytes_hash: Some(sha_hex(page.url.as_bytes())),
+        stored: None,
+    })
 }
 
 fn sha_hex(bytes: &[u8]) -> String {
@@ -139,6 +162,35 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
             return Err(format!("{name}: no readable text (vector text, JPEG or raw scans are supported)"));
         }
         ("pdf", text)
+    } else if crate::office::is_office(&ext) {
+        // docx / xlsx / pptx: zip containers of XML (see office.rs). Like a PDF, the
+        // bytes are the identity and a copy is kept so the file can always be opened.
+        let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
+        let hash = sha_hex(&bytes);
+        stored = stored_copy(path, &bytes, &hash, &ext);
+        bytes_hash = Some(hash);
+        let text = crate::office::extract(&ext, &bytes).map_err(|e| format!("{name}: {e}"))?;
+        (crate::office::kind_of(&ext), text)
+    } else if matches!(ext.as_str(), "url" | "website" | "webloc") {
+        // A saved shortcut: what the user kept is the page, so fetch it.
+        let url = crate::web::url_from_shortcut(path).ok_or_else(|| format!("{name}: no URL in this shortcut"))?;
+        return extract_url(&url).map_err(|e| format!("{name}: {e}"));
+    } else if matches!(ext.as_str(), "html" | "htm" | "xhtml") {
+        // A saved page: read it the way a browser would show it, without going online.
+        let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
+        let hash = sha_hex(&bytes);
+        let html = String::from_utf8_lossy(&bytes);
+        let (title, text) = crate::web::readable(&html);
+        let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| name.clone());
+        let content = if text.trim().is_empty() { html.into_owned() } else { text };
+        return Ok(Extracted {
+            title: truncate(&title, 120).to_string(),
+            kind: "web",
+            source,
+            content: truncate(&content, MAX_CONTENT).to_string(),
+            bytes_hash: Some(hash),
+            stored: None,
+        });
     } else if TEXT_EXTS.contains(&ext.as_str()) {
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
         ("file", String::from_utf8_lossy(&bytes).into_owned())
