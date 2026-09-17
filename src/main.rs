@@ -15,6 +15,7 @@ mod pdf_layout;
 mod gpu;
 mod llm_ort;
 mod mcp;
+mod models;
 mod hotkeys;
 mod theme;
 mod nvim;
@@ -61,6 +62,15 @@ fn main() {
                 Some(t2) => { println!("{t2}"); eprintln!("[{:.0} ms]", t.elapsed().as_secs_f32() * 1000.0); std::process::exit(0) }
                 None => { eprintln!("no text / could not read"); std::process::exit(2) }
             }
+        }
+    }
+    // `--move-vault <from> <to>`: the vault mover, spawned by the instance that is
+    // quitting (Settings -> "Vault folder"). Waits for that process to let go of
+    // vault.db, moves everything but config.json, then starts as the app.
+    if let Some(i) = std::env::args().position(|a| a == "--move-vault") {
+        let args: Vec<String> = std::env::args().collect();
+        if let (Some(from), Some(to)) = (args.get(i + 1), args.get(i + 2)) {
+            move_vault_now(std::path::Path::new(from), std::path::Path::new(to));
         }
     }
     // `--selftest` (CI smoke test): unpack the runtime, embed a sentence, open a scratch
@@ -132,6 +142,40 @@ fn main() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+/// Retry the move for a few seconds: the process that asked for it is still exiting
+/// and Windows will not rename an open vault.db. On failure the config goes back to
+/// the old folder so the vault is never "lost" behind a setting.
+fn move_vault_now(from: &std::path::Path, to: &std::path::Path) {
+    // Until the move is done, this process's own log lines belong in the old folder —
+    // a log.txt written into the new one would collide with the one being moved.
+    config::set_vault_dir(from);
+    let mut last = String::new();
+    for attempt in 0..30 {
+        // The first seconds insist on a rename (the old process is still letting go);
+        // after that a copy is allowed, which is what a move to another drive needs.
+        match config::move_vault(from, to, attempt >= 12) {
+            Ok(()) => {
+                config::set_vault_dir(to);
+                util::log(&format!("vault moved to {}", to.display()));
+                return;
+            }
+            Err(e) => last = e,
+        }
+        std::thread::sleep(std::time::Duration::from_millis(if attempt < 10 { 200 } else { 500 }));
+    }
+    // Put it back: whatever did move is moved back, and the config points home again.
+    let _ = config::move_vault(to, from, true);
+    let mut cfg = config::load();
+    cfg.vault_dir = if from == config::base_dir() { String::new() } else { from.display().to_string() };
+    config::save(&cfg);
+    config::set_vault_dir(from);
+    util::log(&format!("vault move to {} failed: {last}", to.display()));
+    unsafe {
+        let msg = util::wide(&format!("Could not move the vault to\n{}\n\n{last}\n\nIt stays in {}.", to.display(), from.display()));
+        MessageBoxW(None, windows::core::PCWSTR(msg.as_ptr()), windows::core::w!("Blackhole"), MB_ICONERROR);
     }
 }
 

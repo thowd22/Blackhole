@@ -155,8 +155,18 @@ fn detect_family(tok: &Tokenizer) -> Family {
     }
 }
 
-/// Find an ONNX LLM: next to the exe, then in the vault folder. Largest model wins.
+/// Find an ONNX LLM: the one `config.model_name` picks (Settings → "Ask model"),
+/// else next to the exe, then in the vault folder, largest model wins.
 pub fn find_model(extra_dir: &Path) -> Option<PathBuf> {
+    if let Some(m) = crate::models::active(extra_dir) {
+        return Some(m.path);
+    }
+    find_largest(extra_dir)
+}
+
+/// The original scan, kept as the fallback when `models::list` sees nothing (a graph
+/// two levels down, say): next to the exe, then in the vault folder.
+fn find_largest(extra_dir: &Path) -> Option<PathBuf> {
     let mut dirs = vec![extra_dir.to_path_buf()];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(d) = exe.parent() {

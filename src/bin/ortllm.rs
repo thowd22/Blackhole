@@ -8,6 +8,7 @@
 #[path = "../util.rs"] mod util;
 #[path = "../runtime.rs"] mod runtime;
 #[path = "../gpu.rs"] mod gpu;
+#[path = "../models.rs"] mod models;
 #[path = "../llm_ort.rs"] mod llm_ort;
 
 use std::io::Write;

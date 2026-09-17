@@ -117,6 +117,25 @@ enum Tab {
     Settings,
 }
 
+/// `C:\\Users\\me\\Documents\\Vaults\\Blackhole` -> `…\\Vaults\\Blackhole`: the value column
+/// is narrow, and the last folders are the ones that say where a vault is.
+fn short_path(path: &std::path::Path, max: usize) -> String {
+    let full = path.display().to_string();
+    if full.chars().count() <= max {
+        return full;
+    }
+    let parts: Vec<&str> = full.split('\\').collect();
+    let mut out = String::new();
+    for part in parts.iter().rev() {
+        let next = if out.is_empty() { part.to_string() } else { format!("{part}\\{out}") };
+        if next.chars().count() + 2 > max {
+            break;
+        }
+        out = next;
+    }
+    format!("…\\{out}")
+}
+
 /// One row of the Settings tab.
 #[derive(Clone)]
 struct Setting {
@@ -1056,6 +1075,41 @@ impl SearchWin {
             kind: SettingKind::Command(crate::dot::MENU_UNDIGESTED),
         });
         rows.push(Setting { label: "Start at sign-in".into(), value: onoff(crate::startup::enabled()), hint: "run Blackhole when you log in".into(), kind: SettingKind::Command(crate::dot::MENU_START_LOGIN_PUB) });
+        let data = crate::config::data_dir();
+        rows.push(Setting { label: "Vault folder".into(), value: short_path(&data, 34), hint: format!("{} · click to move it somewhere else", data.display()), kind: SettingKind::Command(crate::dot::MENU_VAULT_FOLDER) });
+        let policy = crate::config::StorePolicy::parse(&cfg.store_policy);
+        let policy_hint = match policy {
+            crate::config::StorePolicy::Copy => "images and PDFs are copied into the vault, so they open even if you move the original",
+            crate::config::StorePolicy::CopySmall => "copies files under 25 MB; bigger ones are only referenced",
+            crate::config::StorePolicy::Reference => "nothing is copied — an item stops opening once you move or delete the original",
+        };
+        rows.push(Setting { label: "Keep copies of files".into(), value: policy.label().into(), hint: policy_hint.into(), kind: SettingKind::Command(crate::dot::MENU_STORE_POLICY) });
+        let models = crate::models::list(&data);
+        let downloading = crate::models::downloading();
+        match crate::models::active(&data) {
+            Some(m) if !downloading => {
+                let hint = match crate::models::next_after(&data, &m.name) {
+                    Some(n) if n.name != m.name => format!("click for {} ({}) · {} models found", n.name, n.size_text(), models.len()),
+                    _ => format!("the only one found · {}", m.path.display()),
+                };
+                rows.push(Setting { label: "Ask model".into(), value: format!("{} ({})", m.name, m.size_text()), hint, kind: SettingKind::Command(crate::dot::MENU_MODEL_NEXT) });
+            }
+            active => {
+                // A model already found while a download runs: the row that matters is
+                // the one with the progress on it.
+                if let Some(m) = active {
+                    rows.push(Setting { label: "Ask model".into(), value: format!("{} ({})", m.name, m.size_text()), hint: "in use until the download finishes".into(), kind: SettingKind::Command(crate::dot::MENU_MODEL_NEXT) });
+                }
+                let value = if downloading { crate::models::progress_text() } else { crate::models::size_text(crate::models::default_size()) };
+                let hint = if downloading {
+                    "click to stop · what is downloaded is kept and resumes".to_string()
+                } else {
+                    let note = crate::models::progress_text();
+                    if note.is_empty() { "Qwen3-4B, so ? questions get answers; search works without it".to_string() } else { format!("{note} · click to try again") }
+                };
+                rows.push(Setting { label: "Download the default model".into(), value, hint, kind: SettingKind::Command(crate::dot::MENU_MODEL_DOWNLOAD) });
+            }
+        }
         let nv = if cfg.nvim_init.is_empty() { "built-in".to_string() } else { cfg.nvim_init.rsplit(['\\', '/']).next().unwrap_or("").to_string() };
         rows.push(Setting { label: "Neovim config".into(), value: nv, hint: "click to load your init.lua / init.vim".into(), kind: SettingKind::Command(crate::dot::MENU_NVIM_CONFIG) });
         if !cfg.nvim_init.is_empty() {
@@ -2786,6 +2840,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if let Some(s) = state(hwnd) {
                 if s.nvim.as_ref().map(|h| h.is_user_change(wparam.0 as u64)).unwrap_or(false) {
                     s.note_changed();
+                }
+            }
+            LRESULT(0)
+        }
+        // Download progress: redraw the rows without touching the focus.
+        crate::models::WM_MODEL_DOWNLOAD => {
+            if let Some(s) = state(hwnd) {
+                if s.tab == Tab::Settings {
+                    s.refresh();
                 }
             }
             LRESULT(0)
