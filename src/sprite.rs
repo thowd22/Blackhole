@@ -11,7 +11,7 @@
 
 pub const SIZE: usize = 32;
 /// Side of the speck overlay: four sub-pixels per sprite pixel, so a speck can move
-/// in quarter-pixel steps (smooth at every dot size, still snapped to a grid).
+/// at continuous positions with per-cell coverage (it slides rather than hops).
 pub const SPECK_SIZE: usize = SIZE * 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -220,25 +220,36 @@ pub fn render(buf: &mut [u32], anim: &Anim) {
 }
 
 /// Draw one speck as a 4×4 block of sub-pixels (one sprite pixel wide) at a
-/// quarter-pixel position; `weight` scales its alpha during a transition.
+/// continuous position; `weight` scales its alpha during a transition.
 fn speck(over: &mut [u32], hx: f32, hy: f32, c: Rgb, a: u8, weight: f32) {
-    let a = (a as f32 * weight).round() as u8;
-    if a == 0 {
+    let a = a as f32 * weight;
+    if a < 0.5 {
         return;
     }
-    // Round to the quarter-pixel grid: a block centred on sprite pixel p covers
-    // sub-pixels 4p..4p+3, i.e. exactly that pixel.
-    let x0 = (hx * 4.0).round() as i32;
-    let y0 = (hy * 4.0).round() as i32;
-    let px = pixel(c, a);
-    for y in y0..y0 + 4 {
-        for x in x0..x0 + 4 {
-            if (0..SPECK_SIZE as i32).contains(&x) && (0..SPECK_SIZE as i32).contains(&y) {
-                let i = y as usize * SPECK_SIZE + x as usize;
-                // Later specks win only where they are brighter; keeps overlaps crisp.
-                if (over[i] >> 24) < a as u32 {
-                    over[i] = px;
-                }
+    // A one-sprite-pixel block (4×4 sub-pixels) at a continuous position: every
+    // sub-pixel it touches gets the block's alpha scaled by how much of the cell it
+    // covers, so a speck slides between cells instead of hopping. The overlay is
+    // premultiplied, so `pixel()` with the scaled alpha is the whole blend.
+    let (bx, by) = (hx * 4.0, hy * 4.0);
+    let (x0, y0) = (bx.floor() as i32, by.floor() as i32);
+    for y in y0..=y0 + 4 {
+        let cy = ((y as f32 + 1.0).min(by + 4.0) - (y as f32).max(by)).max(0.0);
+        if cy <= 0.0 || !(0..SPECK_SIZE as i32).contains(&y) {
+            continue;
+        }
+        for x in x0..=x0 + 4 {
+            let cx = ((x as f32 + 1.0).min(bx + 4.0) - (x as f32).max(bx)).max(0.0);
+            if cx <= 0.0 || !(0..SPECK_SIZE as i32).contains(&x) {
+                continue;
+            }
+            let aa = (a * cx * cy).round() as u8;
+            if aa == 0 {
+                continue;
+            }
+            let i = y as usize * SPECK_SIZE + x as usize;
+            // Later specks win only where they are brighter; keeps overlaps crisp.
+            if (over[i] >> 24) < aa as u32 {
+                over[i] = pixel(c, aa);
             }
         }
     }
