@@ -197,19 +197,27 @@ fn graph_size(path: &Path) -> u64 {
 /// The model ask mode uses: the one named in the config if it is still there,
 /// else the largest found (what Blackhole always did).
 pub fn active(extra_dir: &Path) -> Option<Model> {
-    let models = list(extra_dir);
-    let want = crate::config::load().model_name;
+    active_in(&list(extra_dir), &crate::config::load().model_name)
+}
+
+/// `active` over a list already in hand, so a caller that has both the models and the
+/// config does not walk the model folders (or read config.json) a second time.
+pub fn active_in(models: &[Model], want: &str) -> Option<Model> {
     if !want.is_empty() {
         if let Some(m) = models.iter().find(|m| m.name == want) {
             return Some(m.clone());
         }
     }
-    models.into_iter().max_by_key(|m| m.bytes)
+    models.iter().max_by_key(|m| m.bytes).cloned()
 }
 
 /// The one after `name` in `list` order (wraps); None when there are fewer than two.
 pub fn next_after(extra_dir: &Path, name: &str) -> Option<Model> {
-    let models = list(extra_dir);
+    next_after_in(&list(extra_dir), name)
+}
+
+/// `next_after` over a list already in hand.
+pub fn next_after_in(models: &[Model], name: &str) -> Option<Model> {
     if models.len() < 2 {
         return None;
     }
@@ -324,8 +332,16 @@ fn run_download(hwnd: usize) -> Result<PathBuf, String> {
             continue;
         }
         let part = dir.join(format!("{}.part", a.file));
-        crate::util::log(&format!("model download: {} -> {}", a.url, part.display()));
-        fetch(a.url, &part, base, hwnd)?;
+        // A .part that is already the whole file came down in an earlier run that was
+        // cancelled (or killed) between the last byte and the rename: verify it as it
+        // stands rather than asking the server for a range it cannot serve.
+        let whole = a.bytes > 0 && std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0) == a.bytes;
+        if whole {
+            DONE_BYTES.store(base + a.bytes, Ordering::Relaxed);
+        } else {
+            crate::util::log(&format!("model download: {} -> {}", a.url, part.display()));
+            fetch(a.url, &part, base, a.bytes, hwnd)?;
+        }
         if !a.sha256.is_empty() {
             *NOTE.write().unwrap() = format!("checking {}…", a.file);
             post_progress(hwnd);
@@ -397,10 +413,53 @@ fn split_url(url: &str) -> Result<(String, u16, String, bool), String> {
 }
 
 /// Download `url` into `part`, resuming from whatever is already there.
-/// `base` is how many bytes of the whole job finished before this file.
-fn fetch(url: &str, part: &Path, base: u64, hwnd: usize) -> Result<(), String> {
+/// `base` is how many bytes of the whole job finished before this file, `expected`
+/// the file's full length (0 when unknown).
+fn fetch(url: &str, part: &Path, base: u64, expected: u64, hwnd: usize) -> Result<(), String> {
+    let mut have = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
+    // A prefix that is already the whole file is not a resume point: `Range: bytes=len-`
+    // is unsatisfiable, so the file would fail with HTTP 416 forever. Start it again.
+    if expected > 0 && have >= expected {
+        have = 0;
+    }
+    match fetch_from(url, part, base, have, hwnd) {
+        // The server refused the range anyway (a stale or overlong .part): take the
+        // whole file instead of leaving the download stuck on 416.
+        Err(FetchErr::Range) if have > 0 => fetch_from(url, part, base, 0, hwnd).map_err(FetchErr::text),
+        other => other.map_err(FetchErr::text),
+    }
+}
+
+/// Why a `fetch_from` attempt stopped. `Range` is worth retrying from zero.
+enum FetchErr {
+    Range,
+    Other(String),
+}
+
+impl FetchErr {
+    fn text(self) -> String {
+        match self {
+            FetchErr::Range => "HTTP 416".to_string(),
+            FetchErr::Other(s) => s,
+        }
+    }
+}
+
+impl From<String> for FetchErr {
+    fn from(s: String) -> FetchErr {
+        FetchErr::Other(s)
+    }
+}
+
+impl From<&str> for FetchErr {
+    fn from(s: &str) -> FetchErr {
+        FetchErr::Other(s.to_string())
+    }
+}
+
+/// One GET, resuming at `have` bytes (0 = from the start, truncating `part`).
+fn fetch_from(url: &str, part: &Path, base: u64, have: u64, hwnd: usize) -> Result<(), FetchErr> {
     let (host, port, path, secure) = split_url(url)?;
-    let have = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
     let agent = crate::util::wide("Blackhole");
     let whost = crate::util::wide(&host);
     let verb = crate::util::wide("GET");
@@ -414,7 +473,7 @@ fn fetch(url: &str, part: &Path, base: u64, hwnd: usize) -> Result<(), String> {
         let _ = WinHttpSetTimeouts(session.0, 15_000, 20_000, 30_000, 60_000);
         let conn = Handle(WinHttpConnect(session.0, PCWSTR(whost.as_ptr()), port, 0));
         if conn.0.is_null() {
-            return Err(format!("cannot reach {host}"));
+            return Err(format!("cannot reach {host}").into());
         }
         let flags = if secure { WINHTTP_FLAG_SECURE } else { WINHTTP_OPEN_REQUEST_FLAGS(0) };
         let req = Handle(WinHttpOpenRequest(conn.0, PCWSTR(verb.as_ptr()), PCWSTR(wpath.as_ptr()), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), flags));
@@ -436,10 +495,13 @@ fn fetch(url: &str, part: &Path, base: u64, hwnd: usize) -> Result<(), String> {
         // 206 = the server honoured the resume; 200 with a resume means it did not,
         // so start the file again rather than appending to a stale prefix.
         let mut from = have;
+        if status == 416 {
+            return Err(FetchErr::Range);
+        }
         if status == 200 && have > 0 {
             from = 0;
         } else if status != 200 && status != 206 {
-            return Err(format!("HTTP {status}"));
+            return Err(format!("HTTP {status}").into());
         }
 
         let mut file = if from > 0 {

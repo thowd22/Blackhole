@@ -172,9 +172,13 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
         let hash = sha_hex(&bytes);
         let html = String::from_utf8_lossy(&bytes);
-        let (title, text) = crate::web::readable(&html);
+        // Reading a page costs several times its size (lowercase copy, a token per tag),
+        // so a saved page gets the same ceiling a fetched one does — a 200 MB "save page
+        // complete" dump with its images inlined is read down to its first 5 MB.
+        let html = truncate(&html, crate::web::MAX_BYTES);
+        let (title, text) = crate::web::readable(html);
         let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| name.clone());
-        let content = if text.trim().is_empty() { html.into_owned() } else { text };
+        let content = if text.trim().is_empty() { html.to_string() } else { text };
         return Ok(Extracted { title: truncate(&title, 120).to_string(), kind: "web", source, content: truncate(&content, MAX_CONTENT).to_string(), bytes_hash: Some(hash), stored: None });
     } else if TEXT_EXTS.contains(&ext.as_str()) {
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;

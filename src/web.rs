@@ -19,8 +19,8 @@ use std::ffi::c_void;
 use windows::core::PCWSTR;
 use windows::Win32::Networking::WinHttp::*;
 
-/// Hard ceiling on a fetched page (the cap the lane asks for).
-const MAX_BYTES: usize = 5 * 1024 * 1024;
+/// Hard ceiling on a page, fetched or read off disk.
+pub const MAX_BYTES: usize = 5 * 1024 * 1024;
 /// Resolve / connect / send / receive timeout.
 const TIMEOUT_MS: i32 = 10_000;
 

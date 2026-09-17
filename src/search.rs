@@ -726,7 +726,9 @@ impl SearchWin {
             Ctl::List => {
                 let count = SendMessageW(self.list, LB_GETCOUNT, None, None).0 as i32;
                 let pos = SendMessageW(self.list, LB_GETTOPINDEX, None, None).0 as i32;
-                let avg = if count > 0 { (self.rows_total_h() / count).max(self.px(8)) } else { self.row_height() };
+                // Only the Files tab has rows of different heights; on Notes and Settings the
+                // count comes from a different list than the one `rows_total_h` sums.
+                let avg = if self.tab == Tab::Files && count > 0 { (self.rows_total_h() / count).max(self.px(8)) } else { self.row_height() };
                 let page = ((self.list_rc.bottom - self.list_rc.top) / avg).max(1);
                 (pos, page, count)
             }
@@ -1169,11 +1171,13 @@ impl SearchWin {
             crate::config::StorePolicy::Reference => "nothing is copied — an item stops opening once you move or delete the original",
         };
         rows.push(Setting { label: "Keep copies of files".into(), value: policy.label().into(), hint: policy_hint.into(), kind: SettingKind::Command(crate::dot::MENU_STORE_POLICY) });
+        // One scan of the model folders for the whole row, not one per helper: this
+        // rebuild runs a few times a second while a model download ticks.
         let models = crate::models::list(&data);
         let downloading = crate::models::downloading();
-        match crate::models::active(&data) {
+        match crate::models::active_in(&models, &cfg.model_name) {
             Some(m) if !downloading => {
-                let hint = match crate::models::next_after(&data, &m.name) {
+                let hint = match crate::models::next_after_in(&models, &m.name) {
                     Some(n) if n.name != m.name => format!("click for {} ({}) · {} models found", n.name, n.size_text(), models.len()),
                     _ => format!("the only one found · {}", m.path.display()),
                 };
@@ -1210,6 +1214,20 @@ impl SearchWin {
             rows.push(Setting { label: "Use built-in Neovim config".into(), value: String::new(), hint: "forget the loaded config".into(), kind: SettingKind::Command(crate::dot::MENU_NVIM_BUILTIN) });
         }
         self.settings = rows;
+    }
+
+    /// A download progress tick: rewrite the one row that changed (from atomics) and
+    /// repaint. False when there is no such row, and the caller rebuilds the lot —
+    /// rebuilding on every tick would walk the model folders twice a second.
+    unsafe fn tick_download_row(&mut self) -> bool {
+        let Some(row) = self.settings.iter_mut().find(|r| r.kind == SettingKind::Command(crate::dot::MENU_MODEL_DOWNLOAD)) else { return false };
+        let value = crate::models::progress_text();
+        if value == row.value {
+            return true;
+        }
+        row.value = value;
+        let _ = InvalidateRect(Some(self.list), None, false);
+        true
     }
 
     /// Enter / click on a settings row.
@@ -1864,6 +1882,8 @@ impl SearchWin {
             let (tags, rest) = crate::store::split_tags(&raw);
             let q = if Self::question_of(&raw).is_some() { String::new() } else { rest.trim().to_lowercase() };
             let all = self.store.lock().unwrap().notes(MAX_NOTES);
+            // The row plans belong to the Files tab; a note must not draw a file's snippet.
+            self.rows.clear();
             self.hits = all
                 .into_iter()
                 .filter(|h| tags.iter().all(|t| h.tags.split(' ').any(|x| x == t)))
@@ -2389,10 +2409,17 @@ impl SearchWin {
         let (_, text) = crate::store::split_tags(&unfiltered);
         let terms: Vec<String> = text.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|t| t.chars().count() >= 3).map(str::to_lowercase).collect();
         let (row_h, lh) = (self.row_height(), self.snip_h());
+        // The detail rows' bodies in one pass under one lock: this runs on every debounced
+        // keystroke and the ingest worker wants the same mutex to write. `content_capped`
+        // leaves an oversized body in SQLite instead of copying it out only to drop it.
+        let bodies: Vec<Option<String>> = {
+            let store = self.store.lock().unwrap();
+            self.hits.iter().take(DETAIL_ROWS).map(|h| if matches!(h.kind.as_str(), "image" | "pdf") { None } else { store.content_capped(h.id, MAX_SCAN_BYTES) }).collect()
+        };
         let mut rows = Vec::with_capacity(self.hits.len());
         for (i, hit) in self.hits.iter().enumerate() {
             let code = code_hit(hit);
-            let lines = self.snippet_block(hit, &terms, i < DETAIL_ROWS).unwrap_or_else(|| vec![snippet_line(&hit.snippet, !code, code)]);
+            let lines = bodies.get(i).and_then(|b| b.as_deref()).and_then(|body| Self::snippet_block(hit, body, &terms)).unwrap_or_else(|| vec![snippet_line(&hit.snippet, !code, code)]);
             let n = lines.len().max(1) as i32;
             rows.push(RowPlan { lines, height: row_h + (n - 1) * lh });
         }
@@ -2400,21 +2427,24 @@ impl SearchWin {
     }
 
     /// The whole fenced block (or a window of a code file) around the hit, up to
-    /// SNIP_MAX_LINES lines. None for anything that keeps the cheap one-line snippet.
-    fn snippet_block(&self, hit: &Hit, terms: &[String], detail: bool) -> Option<Vec<SnipLine>> {
-        if !detail || matches!(hit.kind.as_str(), "image" | "pdf") {
-            return None;
-        }
+    /// SNIP_MAX_LINES lines, out of the item's body as `build_rows` read it. None for
+    /// anything that keeps the cheap one-line snippet.
+    fn snippet_block(hit: &Hit, content: &str, terms: &[String]) -> Option<Vec<SnipLine>> {
         let code_file = code_hit(hit);
-        let content = self.store.lock().unwrap().content(hit.id)?;
-        if content.len() > MAX_SCAN_BYTES {
-            return None;
-        }
         let lines: Vec<&str> = content.lines().collect();
         if lines.is_empty() {
             return None;
         }
-        let at = terms.iter().filter_map(|t| lines.iter().position(|l| l.to_lowercase().contains(t.as_str()))).min();
+        // The first line holding any term is the first line the old per-term minimum
+        // found, at one lowercase copy per line instead of one per line per term.
+        let at = if terms.is_empty() {
+            None
+        } else {
+            lines.iter().position(|l| {
+                let low = l.to_lowercase();
+                terms.iter().any(|t| low.contains(t.as_str()))
+            })
+        };
         // A fenced block or a code file is shown as code, keeping its blank lines;
         // prose and markdown show the hit's line and its neighbours, blanks skipped.
         let (start, end, code, want) = match (at.and_then(|i| fence_around(&lines, i)), code_file, at) {
@@ -3090,7 +3120,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         // Download progress: redraw the rows without touching the focus.
         crate::models::WM_MODEL_DOWNLOAD => {
             if let Some(s) = state(hwnd) {
-                if s.tab == Tab::Settings {
+                if s.tab == Tab::Settings && !(wparam.0 == crate::models::DL_PROGRESS && s.tick_download_row()) {
                     s.refresh();
                 }
             }

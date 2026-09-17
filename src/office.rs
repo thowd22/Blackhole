@@ -12,10 +12,18 @@
 //! formulas (a formula cell contributes its cached value). Text is what the
 //! vault searches, so text is all this extracts.
 
+use std::cell::Cell;
 use std::io::Read;
 
 /// Refuse to inflate more than this from one zip member (zip-bomb guard).
 const MAX_ENTRY: u64 = 64 * 1024 * 1024;
+/// …and no more than this from the whole container, however many members it has.
+/// Four times what an item can hold (`ingest::MAX_CONTENT`), so a real document is
+/// never clipped, while a bomb of a hundred highly compressible parts stops here
+/// instead of growing a multi-gigabyte String on the ingest worker.
+const MAX_TOTAL: u64 = 16 * 1024 * 1024;
+/// Most sheets / slides one document is read from.
+const MAX_PARTS: usize = 512;
 
 // ---------------------------------------------------------------- zip reader
 
@@ -24,13 +32,14 @@ struct Entry {
     method: u16,
     /// Compressed size from the central directory (trustworthy even with a data descriptor).
     csize: u64,
-    plain_size: u64,
     local_offset: u64,
 }
 
 pub struct Zip<'a> {
     bytes: &'a [u8],
     entries: Vec<Entry>,
+    /// What is left of the container's shared inflate budget.
+    budget: Cell<u64>,
 }
 
 fn u16_at(b: &[u8], o: usize) -> u16 {
@@ -54,6 +63,7 @@ impl<'a> Zip<'a> {
         let count = u16_at(bytes, eocd + 10) as usize;
         let mut off = u32_at(bytes, eocd + 16) as usize;
         let mut entries = Vec::with_capacity(count.min(4096));
+        let mut seen = std::collections::HashSet::new();
         while off + 46 <= bytes.len() && u32_at(bytes, off) == 0x0201_4b50 {
             let nlen = u16_at(bytes, off + 28) as usize;
             let elen = u16_at(bytes, off + 30) as usize;
@@ -61,19 +71,18 @@ impl<'a> Zip<'a> {
             if off + 46 + nlen > bytes.len() {
                 break;
             }
-            entries.push(Entry {
-                name: String::from_utf8_lossy(&bytes[off + 46..off + 46 + nlen]).into_owned(),
-                method: u16_at(bytes, off + 10),
-                csize: u32_at(bytes, off + 20) as u64,
-                plain_size: u32_at(bytes, off + 24) as u64,
-                local_offset: u32_at(bytes, off + 42) as u64,
-            });
+            let name = String::from_utf8_lossy(&bytes[off + 46..off + 46 + nlen]).into_owned();
+            // A name repeated in the central directory would be read (and inflated)
+            // once per record while always resolving to the same member: keep the first.
+            if seen.insert(name.clone()) {
+                entries.push(Entry { name, method: u16_at(bytes, off + 10), csize: u32_at(bytes, off + 20) as u64, local_offset: u32_at(bytes, off + 42) as u64 });
+            }
             off += 46 + nlen + elen + clen;
         }
         if entries.is_empty() {
             return Err("empty or unreadable zip container".into());
         }
-        Ok(Zip { bytes, entries })
+        Ok(Zip { bytes, entries, budget: Cell::new(MAX_TOTAL) })
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -84,8 +93,13 @@ impl<'a> Zip<'a> {
         self.entries.iter().any(|e| e.name == name)
     }
 
-    /// One member's bytes, inflated if it is deflated. None if missing or unreadable.
+    /// One member's bytes, inflated if it is deflated. None if missing, unreadable, or
+    /// once the container's shared inflate budget is spent.
     pub fn read(&self, name: &str) -> Option<Vec<u8>> {
+        let budget = self.budget.get();
+        if budget == 0 {
+            return None;
+        }
         let e = self.entries.iter().find(|e| e.name == name)?;
         let lo = e.local_offset as usize;
         if lo + 30 > self.bytes.len() || u32_at(self.bytes, lo) != 0x0403_4b50 {
@@ -99,15 +113,21 @@ impl<'a> Zip<'a> {
             return None;
         }
         let raw = &self.bytes[start..end];
-        match e.method {
-            0 => Some(raw.to_vec()),
+        let cap = budget.min(MAX_ENTRY);
+        let out = match e.method {
+            0 => raw[..(cap as usize).min(raw.len())].to_vec(),
             8 => {
-                let mut out = Vec::with_capacity(e.plain_size.min(MAX_ENTRY) as usize);
-                flate2::read::DeflateDecoder::new(raw).take(MAX_ENTRY).read_to_end(&mut out).ok()?;
-                Some(out)
+                // The central directory's uncompressed size is the file's word, not a
+                // fact: grow from the compressed size instead of trusting a claim of
+                // 64 MiB, and stop at whatever budget is left.
+                let mut out = Vec::with_capacity(e.csize.saturating_mul(4).min(1 << 20) as usize);
+                flate2::read::DeflateDecoder::new(raw).take(cap).read_to_end(&mut out).ok()?;
+                out
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        self.budget.set(budget.saturating_sub(out.len() as u64));
+        Some(out)
     }
 
     /// One member as text (Office parts are UTF-8).
@@ -491,6 +511,7 @@ fn sheets(zip: &Zip) -> Vec<(String, String)> {
         parts.sort_by_key(|n| part_number(n));
         out = parts.iter().enumerate().map(|(i, p)| (format!("Sheet {}", i + 1), p.clone())).collect();
     }
+    out.truncate(MAX_PARTS);
     out
 }
 
@@ -561,6 +582,7 @@ pub fn pptx(zip: &Zip) -> Result<String, String> {
         return Err("no slides in this .pptx".into());
     }
     slides.sort_by_key(|n| part_number(n));
+    slides.truncate(MAX_PARTS);
     let mut out = String::new();
     for (i, part) in slides.iter().enumerate() {
         let Some(xml) = zip.text(part) else { continue };

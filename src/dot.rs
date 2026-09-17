@@ -757,19 +757,21 @@ impl Dot {
         if MessageBoxW(Some(self.hwnd), PCWSTR(question.as_ptr()), w!("Blackhole"), MB_OKCANCEL | MB_ICONQUESTION) != IDOK {
             return;
         }
-        self.cfg.vault_dir = if to == config::base_dir() { String::new() } else { to.display().to_string() };
-        config::save(&self.cfg);
+        // The config only learns the new folder once the mover is really on its way:
+        // bailing out after saving it would point the next launch at an empty folder
+        // (and an empty vault_dir means %LOCALAPPDATA%, not "wherever it is now").
+        let next_dir = if to == config::base_dir() { String::new() } else { to.display().to_string() };
         let Ok(exe) = std::env::current_exe() else { return };
         let spawned = std::process::Command::new(exe).arg("--move-vault").arg(from.as_os_str()).arg(to.as_os_str()).spawn();
         match spawned {
             Ok(_) => {
+                self.cfg.vault_dir = next_dir;
+                config::save(&self.cfg);
                 crate::util::log(&format!("vault move: {} -> {}, restarting", from.display(), to.display()));
                 let _ = DestroyWindow(self.hwnd);
             }
             Err(e) => {
-                // Could not restart: leave the vault where it is.
-                self.cfg.vault_dir = String::new();
-                config::save(&self.cfg);
+                // Could not restart: the vault stays where it is and so does the config.
                 let msg = wide(&format!("Could not restart to move the vault:\n{e}"));
                 MessageBoxW(Some(self.hwnd), PCWSTR(msg.as_ptr()), w!("Blackhole"), MB_ICONERROR);
             }

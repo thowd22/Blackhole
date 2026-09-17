@@ -1283,6 +1283,13 @@ impl Store {
         self.conn.query_row("SELECT content FROM items WHERE id = ?1", params![id], |r| r.get(0)).optional().ok().flatten()
     }
 
+    /// The item's text only while it is at most `max` bytes long — the size test runs in
+    /// SQLite, so a multi-megabyte body is never copied out just to be thrown away.
+    /// (`length()` on text counts characters, so the blob cast is what makes it bytes.)
+    pub fn content_capped(&self, id: i64, max: usize) -> Option<String> {
+        self.conn.query_row("SELECT content FROM items WHERE id = ?1 AND length(CAST(content AS BLOB)) <= ?2", params![id, max as i64], |r| r.get(0)).optional().ok().flatten()
+    }
+
     // ---- undigested: things that could not be read (FEATURES.md §3.5) ----
 
     /// Remember a failed ingest. One row per path (a retry replaces the old error);
