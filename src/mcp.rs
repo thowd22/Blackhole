@@ -7,7 +7,7 @@
 //! configured the same way: `blackhole.exe --mcp`. If the dot isn't running the
 //! proxy starts it.
 //!
-//! Tools: `put` (swallow text or a file, tags), `retrieve` (hybrid / keyword /
+//! Tools: `put` (swallow text, a file or a URL, tags), `retrieve` (hybrid / keyword /
 //! semantic search with the best chunk per hit, tag and kind filters), `get` (one
 //! item in full), `list_recent`, `forget`, `ask` (ask mode as a call), `notify`
 //! (speech bubble with an optional click action; mutable in Settings). Resources:
@@ -146,12 +146,13 @@ fn tools() -> Value {
     json!([
         {
             "name": "put",
-            "description": "Swallow something into the user's Blackhole vault so it can be searched and asked about later. Give text (a note, a snippet, a fact worth remembering) or the path of a file on this machine.",
+            "description": "Swallow something into the user's Blackhole vault so it can be searched and asked about later. Give text (a note, a snippet, a fact worth remembering), the path of a file on this machine, or the URL of a page to fetch and store as readable text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "Content to store." },
-                    "path": { "type": "string", "description": "Path of a file to swallow instead of text (Windows path, or /mnt/c/... from WSL)." },
+                    "path": { "type": "string", "description": "Path of a file to swallow instead of text (Windows path, or /mnt/c/... from WSL). Reads .pdf, .docx, .xlsx, .pptx, images (OCR), .html and plain text." },
+                    "url": { "type": "string", "description": "http(s) URL to fetch (10 s, 5 MB cap) and store as the page's readable text; the URL is the item's identity, so putting it again refreshes it." },
                     "title": { "type": "string", "description": "Optional title; the first line of the text otherwise." },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags (\"work\", \"ideas\"); searchable as #tag." },
                     "kind": { "type": "string", "enum": ["note"], "description": "\"note\" stores the text as an editable note in the Notes tab instead of a plain swallowed text." }
@@ -375,7 +376,11 @@ fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
         post(ctx.hwnd, crate::dot::WM_INGEST_DONE, Box::into_raw(Box::new(report)) as isize);
         return Ok(json!({ "id": id, "title": title.unwrap_or(&auto), "kind": "note", "words": text.split_whitespace().count(), "duplicate": false }).to_string());
     }
-    let mut e = if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+    let mut e = if let Some(url) = args.get("url").and_then(|v| v.as_str()).map(str::trim).filter(|u| !u.is_empty()) {
+        // Explicitly asked for: the only way a page is fetched without the user
+        // dropping or pasting it (see web.rs). The URL lands in log.txt either way.
+        ingest::extract_url(url)?
+    } else if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         ingest::extract_file(Path::new(&windows_path(path)))?
     } else if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
         if text.trim().is_empty() {
@@ -383,7 +388,7 @@ fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
         }
         ingest::extract_text(text)
     } else {
-        return Err("give text or path".into());
+        return Err("give text, path or url".into());
     };
     if let Some(t) = title {
         e.title = t.to_string();

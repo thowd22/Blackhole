@@ -20,6 +20,8 @@
 #[path = "../ingest.rs"] mod ingest;
 #[path = "../pdf_layout.rs"] mod pdf_layout;
 #[path = "../ocr.rs"] mod ocr;
+#[path = "../office.rs"] mod office;
+#[path = "../web.rs"] mod web;
 #[path = "../hotkeys.rs"] mod hotkeys;
 #[path = "../theme.rs"] mod theme;
 

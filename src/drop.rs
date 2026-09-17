@@ -7,7 +7,7 @@ use std::sync::mpsc::Sender;
 use windows::core::implement;
 use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, POINTL, WPARAM};
 use windows::Win32::System::Com::{IDataObject, FORMATETC, DVASPECT_CONTENT, TYMED_HGLOBAL};
-use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard};
+use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW};
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::{IDropTarget, IDropTarget_Impl, ReleaseStgMedium, CF_DIB, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE};
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
@@ -41,8 +41,20 @@ fn fmt(cf: u16) -> FORMATETC {
     }
 }
 
+/// `CFSTR_INETURLW`: what a browser puts on the clipboard (and in the drag) for a
+/// link. Registered once; 0 if Windows refuses, which no format ever matches.
+fn url_format() -> u16 {
+    use std::sync::OnceLock;
+    static F: OnceLock<u16> = OnceLock::new();
+    *F.get_or_init(|| unsafe { RegisterClipboardFormatW(windows::core::w!("UniformResourceLocatorW")) as u16 })
+}
+
 fn acceptable(obj: &IDataObject) -> bool {
-    unsafe { obj.QueryGetData(&fmt(CF_HDROP.0)).is_ok() || obj.QueryGetData(&fmt(CF_UNICODETEXT.0)).is_ok() }
+    unsafe {
+        obj.QueryGetData(&fmt(CF_HDROP.0)).is_ok()
+            || obj.QueryGetData(&fmt(CF_UNICODETEXT.0)).is_ok()
+            || obj.QueryGetData(&fmt(url_format())).is_ok()
+    }
 }
 
 unsafe fn files_from_hdrop(h: HDROP) -> Vec<PathBuf> {
@@ -123,6 +135,16 @@ pub fn read_data_object(obj: &IDataObject) -> Option<Input> {
                 return Some(Input::Files(files));
             }
         }
+        // A dragged link: the URL itself, which ingest turns into the page behind it.
+        if url_format() != 0 {
+            if let Ok(mut med) = obj.GetData(&fmt(url_format())) {
+                let text = text_from_hglobal(med.u.hGlobal);
+                ReleaseStgMedium(&mut med);
+                if let Some(u) = text.as_deref().and_then(crate::web::bare_url) {
+                    return Some(Input::Text(u));
+                }
+            }
+        }
         if let Ok(mut med) = obj.GetData(&fmt(CF_UNICODETEXT.0)) {
             let text = text_from_hglobal(med.u.hGlobal);
             ReleaseStgMedium(&mut med);
@@ -144,6 +166,14 @@ pub fn read_clipboard(owner: HWND) -> Option<Input> {
                 let files = files_from_hdrop(HDROP(h.0));
                 if !files.is_empty() {
                     return Some(Input::Files(files));
+                }
+            }
+            // A copied link ("copy link address"): swallow the page, not the text.
+            if url_format() != 0 && IsClipboardFormatAvailable(url_format() as u32).is_ok() {
+                if let Ok(h) = GetClipboardData(url_format() as u32) {
+                    if let Some(u) = text_from_hglobal(HGLOBAL(h.0)).as_deref().and_then(crate::web::bare_url) {
+                        return Some(Input::Text(u));
+                    }
                 }
             }
             if IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32).is_ok() {
