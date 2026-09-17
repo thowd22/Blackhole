@@ -379,7 +379,16 @@ fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
         return Ok(json!({ "id": id, "title": title.unwrap_or(&auto), "kind": "note", "words": text.split_whitespace().count(), "duplicate": false }).to_string());
     }
     let mut e = if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-        ingest::extract_file(Path::new(&windows_path(path)))?
+        let path = windows_path(path);
+        match ingest::extract_file(Path::new(&path)) {
+            Ok(e) => e,
+            Err(msg) => {
+                // Unreadable: remember it in the undigested list (FEATURES.md §3.5) before failing.
+                let title = ingest::failure_title(&path, &msg);
+                ctx.store.lock().unwrap().record_failure(&path, &title, ingest::strip_title(&msg, &title), crate::util::now_secs());
+                return Err(msg);
+            }
+        }
     } else if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
         if text.trim().is_empty() {
             return Err("text is empty".into());
@@ -411,6 +420,9 @@ fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
     };
     if let (Some(t), true) = (&tags, id != 0) {
         let _ = ctx.store.lock().unwrap().set_tags(id, t);
+    }
+    if let Some(src) = &e.source {
+        ctx.store.lock().unwrap().clear_failure_path(src);
     }
     let report = ingest::Report { added: usize::from(!duplicate), updated: 0, duplicates: usize::from(duplicate), failed: 0, errors: Vec::new() };
     post(ctx.hwnd, crate::dot::WM_INGEST_DONE, Box::into_raw(Box::new(report)) as isize);
