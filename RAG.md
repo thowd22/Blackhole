@@ -165,7 +165,34 @@ b09/b11/b12 (retrieval of one-liners with no lexical overlap), b22 (refusal). Th
 the way (prompt passes 8–14 s when the prompt is 45–64 % of the cache capacity) and its fix are in
 PACKAGING.md.
 
-## 3. Scaled-down design for Blackhole
+## 2f. Cell-aware forms and the VRAM question (2026-09-16)
+
+**Forms as cells.** `pdf_layout.rs` now also collects the page's ruled lines (from `pdf-extract`'s
+`stroke`/`fill` callbacks: axis-aligned segments and thin filled rectangles). When a page has enough of
+them, every glyph is assigned to the cell that boxes it in (nearest rules left/above/right/below), and a
+cell becomes one line: `LABEL: value` when a small-font or all-caps first row is followed by the value,
+the rows kept as lines when the cell is a block of text (status logs, declarations), plain rows for text
+outside any cell. The customs form now yields `15. VESSEL CODE/NAME: TRANQUIL ACE`, `10. Country of
+Origin: JP`, `44. Total: 3211.71` instead of labels and values on separate rows.
+
+| | Answers | Hit@1 | Absent |
+|---|---|---|---|
+| Qwen3-4B think ≤128, row layout (§2e) | 36/44 | 37 | 6/6 |
+| same, cell-aware forms (first cut: big cells flattened to one line) | 34/44 | 37 | 6/6 — lost the cargo-release dates |
+| **same, cell-aware with multi-row cells kept as lines — shipped** | 35/44 | 37 | 6/6 — the one flip (b22) is a refusal on a CONCEPT.md question whose answer is in the context |
+
+So: no measurable accuracy change within the ±1–2 noise band, but the text is unambiguously better for
+the model and for a person reading a preview, and the two multi-hop customs questions (b23, b24) now
+fail on arithmetic/reasoning with the right numbers in front of the model rather than on extraction.
+
+**Sharing weights between the two DirectML sessions.** Investigated and not possible with ONNX Runtime
+1.20: initializer sharing (`AddInitializer`, prepacked-weight containers) works for CPU memory, but the
+DirectML provider uploads each session's initializers to its own GPU resources, and the single-session
+alternative (padded decode steps) corrupts GroupQueryAttention (PACKAGING.md). What shipped instead: a
+**low-VRAM mode** — adapters with under 7 GB of dedicated VRAM keep the DirectML prompt pass but decode
+on the CPU (one weight copy in VRAM, one in RAM; `BLACKHOLE_DECODE=gpu` forces the two-session path).
+
+
 
 Everything below runs on what we already ship (ONNX Runtime + DirectML, bge-small, Qwen2.5-1.5B) plus one
 22 M-parameter cross-encoder. Total added download ≈ 23 MB (int8) or 90 MB (fp32).

@@ -53,6 +53,8 @@ fn think_budget() -> usize {
     }
     if THINK_ENABLED.load(Ordering::Relaxed) { THINK_BUDGET } else { 0 }
 }
+/// Dedicated VRAM below which GPU decode (two weight copies) is not attempted by default.
+const LOW_VRAM_MB: u64 = 7000;
 /// GPU-resident cache capacity (tokens) for the GPU-decode mode; BLACKHOLE_KV_CAP overrides.
 const GPU_KV_CAPACITY: usize = 4096;
 
@@ -268,8 +270,20 @@ impl Llm {
         let force_cpu = std::env::var_os("BLACKHOLE_CPU").is_some();
         // Decode on DirectML too (default when a GPU is present: ~100 tok/s on a static-shape
         // session, no CPU session in memory). BLACKHOLE_DECODE=cpu keeps the old hybrid path.
-        let want_gpu_decode = std::env::var("BLACKHOLE_DECODE").map(|v| v != "cpu").unwrap_or(true);
         let adapter = if force_cpu { None } else { crate::gpu::preferred() };
+        // GPU decode keeps the weights twice in VRAM (prompt session + static decode
+        // session; DirectML can't share initializers between sessions). Below ~7 GB that
+        // does not fit next to the cache and the desktop, so small cards keep the prompt
+        // pass on the GPU and decode on the CPU — one copy in VRAM, one in RAM.
+        let low_vram = adapter.as_ref().map(|a| a.vram_mb > 0 && a.vram_mb < LOW_VRAM_MB).unwrap_or(false);
+        let want_gpu_decode = match std::env::var("BLACKHOLE_DECODE").as_deref() {
+            Ok("cpu") => false,
+            Ok(_) => true,
+            Err(_) => !low_vram,
+        };
+        if low_vram && !want_gpu_decode {
+            crate::util::log(&format!("llm: {} MB of VRAM: decoding on the CPU (set BLACKHOLE_DECODE=gpu to force GPU decode)", adapter.as_ref().map(|a| a.vram_mb).unwrap_or(0)));
+        }
         // Graph-only files are small; a `logit_index` input marks a graph prepared for static shapes.
         let has_logit_index = std::fs::metadata(path).map(|m| m.len() < 64 << 20).unwrap_or(false)
             && std::fs::read(path).map(|b| b.windows(11).any(|w| w == b"logit_index")).unwrap_or(false);

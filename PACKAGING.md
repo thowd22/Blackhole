@@ -218,7 +218,9 @@ Things learned on the way, so nobody repeats them:
 | DirectML decode, dynamic shapes (fp16) | 1.1 s | 5.4 tok/s | 2.2 GB | 2.3 GB |
 | **DirectML decode, static shapes + dynamic prompt session (fp16)** | **1.1 s** | **~105 tok/s** | 3.7 GB | 2.3 GB |
 
-Default: GPU decode whenever a DirectML adapter exists; `BLACKHOLE_DECODE=cpu` restores the hybrid;
+Default: GPU decode whenever a DirectML adapter with ≥ 7 GB of dedicated VRAM exists (two copies of the
+weights live in VRAM: DirectML cannot share initializers between sessions — investigated 2026-09-16,
+RAG.md §2f); smaller cards fall back to the hybrid automatically. `BLACKHOLE_DECODE=cpu` restores the hybrid;
 `BLACKHOLE_KV_CAP` sets the cache capacity (4096 tokens ≈ 0.5 GB VRAM at fp16 for the 3B); `BLACKHOLE_SEQ`
 sets the static width (leave at 1). No GPU → CPU session for everything, as before.
 

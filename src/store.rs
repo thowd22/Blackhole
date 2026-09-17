@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Bump when extraction or chunking changes in a way stored text should follow.
-pub const TEXT_VERSION: &str = "3";
+pub const TEXT_VERSION: &str = "4";
 
 pub struct Store {
     /// Set at open when the stored text predates the current extraction/chunking.

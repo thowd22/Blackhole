@@ -122,8 +122,9 @@ run; nothing is linked at build time, so the app cross-compiles from Linux with 
 
 1. **Extraction.** Text and code files are read directly. PDFs go through a pure-Rust, *layout-aware*
    extractor (`src/pdf_layout.rs`): glyphs are re-assembled into rows and columns from their page positions,
-   so a customs form comes out as `IMPORTING CARRIER | FROM PORT OF` over `TRANQUIL ACE | KOBE, JA` instead
-   of stream-order soup, and fake-bold overprints are collapsed. **Images and screenshots are read by OCR**
+   and on ruled forms the drawn cell borders are used to pair each label with its value, so a customs form
+   comes out as `15. VESSEL CODE/NAME: TRANQUIL ACE` and `44. Total: 3211.71` instead of stream-order
+   soup; fake-bold overprints are collapsed. **Images and screenshots are read by OCR**
    (`src/ocr.rs`): PaddleOCR's PP-OCRv4 text detector and PP-OCRv3 English recognizer, 14 MB together,
    compiled into the exe and run on the same ONNX Runtime + DirectML — 98 % word accuracy on a synthetic
    benchmark of terminals, tables, chat and UI text, ~0.5 s per image on the GPU, with the same row/column
