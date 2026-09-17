@@ -3,6 +3,7 @@
 //! Usage: ortllm <model.onnx> [prompt words]
 
 #[path = "../config.rs"] mod config;
+#[path = "../hotkeys.rs"] mod hotkeys;
 #[path = "../util.rs"] mod util;
 #[path = "../runtime.rs"] mod runtime;
 #[path = "../gpu.rs"] mod gpu;
