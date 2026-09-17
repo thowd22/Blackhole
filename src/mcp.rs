@@ -7,8 +7,11 @@
 //! configured the same way: `blackhole.exe --mcp`. If the dot isn't running the
 //! proxy starts it.
 //!
-//! Tools: `put` (swallow text or a file), `retrieve` (hybrid search with the best
-//! chunk per hit), `notify` (speech bubble). See FEATURES.md §9.
+//! Tools: `put` (swallow text or a file, tags), `retrieve` (hybrid / keyword /
+//! semantic search with the best chunk per hit, tag and kind filters), `get` (one
+//! item in full), `list_recent`, `forget`, `ask` (ask mode as a call), `notify`
+//! (speech bubble with an optional click action; mutable in Settings). Resources:
+//! `blackhole://item/{id}`. See FEATURES.md §9.
 
 use crate::embed::Embedder;
 use crate::ingest;
@@ -42,18 +45,19 @@ fn token() -> String {
 struct Ctx {
     store: Arc<Mutex<Store>>,
     embedder: Arc<Embedder>,
+    ask: Arc<crate::ask::AskEngine>,
     hwnd: usize,
 }
 
 /// Start the HTTP endpoint in a background thread. Returns the port.
-pub fn start(store: Arc<Mutex<Store>>, embedder: Arc<Embedder>, hwnd: usize) -> Option<u16> {
+pub fn start(store: Arc<Mutex<Store>>, embedder: Arc<Embedder>, ask: Arc<crate::ask::AskEngine>, hwnd: usize) -> Option<u16> {
     let server = tiny_http::Server::http(("127.0.0.1", DEFAULT_PORT))
         .or_else(|_| tiny_http::Server::http(("127.0.0.1", 0)))
         .ok()?;
     let port = server.server_addr().to_ip().map(|a| a.port())?;
     let tok = token();
     let _ = std::fs::write(info_path(), json!({ "port": port, "token": tok, "pid": std::process::id() }).to_string());
-    let ctx = Arc::new(Ctx { store, embedder, hwnd });
+    let ctx = Arc::new(Ctx { store, embedder, ask, hwnd });
     std::thread::spawn(move || {
         for mut req in server.incoming_requests() {
             let authed = req
@@ -106,12 +110,21 @@ fn dispatch(ctx: &Ctx, msg: &Value) -> Option<Value> {
     let result = match method {
         "initialize" => Ok(json!({
             "protocolVersion": params.get("protocolVersion").and_then(|v| v.as_str()).unwrap_or(PROTOCOL),
-            "capabilities": { "tools": {} },
+            "capabilities": { "tools": {}, "resources": {} },
             "serverInfo": { "name": "blackhole", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Blackhole is the user's local vault of files and notes. Use retrieve to look things up, put to remember something, notify to show the user a speech bubble."
+            "instructions": "Blackhole is the user's local vault of files and notes. Use retrieve to look things up (get for an item in full), put to remember something, ask for a grounded answer from the local model, notify to show the user a speech bubble."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
+        "resources/list" => Ok(resources_list(ctx)),
+        "resources/templates/list" => Ok(json!({ "resourceTemplates": [{ "uriTemplate": "blackhole://item/{id}", "name": "Vault item", "description": "The full text of one vault item (see retrieve / list_recent for ids).", "mimeType": "text/plain" }] })),
+        "resources/read" => match params.get("uri").and_then(|v| v.as_str()).and_then(|u| u.strip_prefix("blackhole://item/")).and_then(|i| i.parse::<i64>().ok()) {
+            Some(id) => match item_json(ctx, id, usize::MAX) {
+                Some(v) => Ok(json!({ "contents": [{ "uri": format!("blackhole://item/{id}"), "mimeType": "text/plain", "text": v.get("content").and_then(|c| c.as_str()).unwrap_or("") }] })),
+                None => Err((-32002, format!("no item {id}"))),
+            },
+            None => Err((-32602, "uri must be blackhole://item/<id>".to_string())),
+        },
         "tools/call" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -140,31 +153,81 @@ fn tools() -> Value {
                     "text": { "type": "string", "description": "Content to store." },
                     "path": { "type": "string", "description": "Path of a file to swallow instead of text (Windows path, or /mnt/c/... from WSL)." },
                     "title": { "type": "string", "description": "Optional title; the first line of the text otherwise." },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags (\"work\", \"ideas\"); searchable as #tag." },
                     "kind": { "type": "string", "enum": ["note"], "description": "\"note\" stores the text as an editable note in the Notes tab instead of a plain swallowed text." }
                 }
             }
         },
         {
             "name": "retrieve",
-            "description": "Search the user's vault (keyword + semantic). Returns ranked items with a snippet and the best-matching passage, for grounding an answer in the user's own files.",
+            "description": "Search the user's vault. Returns ranked items with a snippet and the best-matching passage, for grounding an answer in the user's own files. Use get for an item's full text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 25, "default": 8 },
-                    "mode": { "type": "string", "enum": ["hybrid", "keyword"], "default": "hybrid" }
+                    "mode": { "type": "string", "enum": ["hybrid", "keyword", "semantic"], "default": "hybrid", "description": "hybrid = keyword + semantic fused; keyword = exact words only; semantic = embeddings only." },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Only items carrying all of these tags." },
+                    "kind": { "type": "string", "description": "Only this kind: note, text, pdf, image, md, code…" }
                 },
                 "required": ["query"]
             }
         },
         {
+            "name": "get",
+            "description": "One vault item in full: title, kind, tags, the path of the stored file if any, and its text.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Item id from retrieve / list_recent." },
+                    "max_chars": { "type": "integer", "default": 20000, "description": "Truncate the text after this many characters." }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "list_recent",
+            "description": "The most recently swallowed items, newest first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+                    "kind": { "type": "string", "description": "Only this kind (e.g. note)." }
+                }
+            }
+        },
+        {
+            "name": "forget",
+            "description": "Delete one item from the vault (its text, chunks and stored copy). Ask the user before forgetting something they did not tell you to remove.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "integer" } },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "ask",
+            "description": "Ask Blackhole's local model a question grounded in the vault (its own retrieval + reranking). Slower than retrieve (seconds); returns the answer and the source titles. Says so when nothing in the vault matches.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "question": { "type": "string" } },
+                "required": ["question"]
+            }
+        },
+        {
             "name": "notify",
-            "description": "Show the user a pixel speech bubble from the Blackhole dot (for finished work, reminders, questions).",
+            "description": "Show the user a pixel speech bubble from the Blackhole dot (for finished work, reminders, questions). Optionally clickable: open the vault search with a query, or an http(s) URL.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "text": { "type": "string" },
-                    "title": { "type": "string" }
+                    "title": { "type": "string" },
+                    "action": {
+                        "type": "object",
+                        "description": "What a click on the bubble does: { \"open_search\": \"query\" } or { \"open_url\": \"https://…\" }.",
+                        "properties": { "open_search": { "type": "string" }, "open_url": { "type": "string" } }
+                    },
+                    "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 60000, "description": "How long the bubble stays (default depends on length)." }
                 },
                 "required": ["text"]
             }
@@ -176,9 +239,97 @@ fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<String, String> {
     match name {
         "put" => put(ctx, args),
         "retrieve" => retrieve(ctx, args),
+        "get" => get(ctx, args),
+        "list_recent" => list_recent(ctx, args),
+        "forget" => forget(ctx, args),
+        "ask" => ask(ctx, args),
         "notify" => notify(ctx, args),
         _ => Err(format!("unknown tool: {name}")),
     }
+}
+
+fn id_arg(args: &Value) -> Result<i64, String> {
+    args.get("id").and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).ok_or_else(|| "id is required".to_string())
+}
+
+/// "a, b" / ["a", "b"] → "a b" for `Store::set_tags`.
+fn tags_arg(args: &Value) -> Option<String> {
+    match args.get("tags")? {
+        Value::Array(a) => Some(a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" ")),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+    .filter(|t| !t.trim().is_empty())
+}
+
+/// Keyword snippets carry the panel's highlight markers (\u{1}/\u{2}); agents get plain text.
+fn plain(s: &str) -> String {
+    s.replace(['\u{1}', '\u{2}'], "")
+}
+
+fn hit_json(h: &crate::store::Hit) -> Value {
+    json!({ "id": h.id, "title": h.title, "kind": h.kind, "source": h.source, "tags": h.tags.split(' ').filter(|t| !t.is_empty()).collect::<Vec<_>>(), "snippet": plain(&h.snippet) })
+}
+
+fn item_json(ctx: &Ctx, id: i64, max_chars: usize) -> Option<Value> {
+    let store = ctx.store.lock().unwrap();
+    let h = store.item(id)?;
+    let content = store.content(id).unwrap_or_default();
+    let truncated = content.chars().count() > max_chars;
+    let shown: String = content.chars().take(max_chars).collect();
+    let mut v = hit_json(&h);
+    v["path"] = json!(store.open_path(id));
+    v["chars"] = json!(content.chars().count());
+    v["truncated"] = json!(truncated);
+    v["content"] = json!(shown);
+    Some(v)
+}
+
+fn resources_list(ctx: &Ctx) -> Value {
+    let store = ctx.store.lock().unwrap();
+    let list: Vec<Value> = store
+        .recent(100)
+        .iter()
+        .map(|h| json!({ "uri": format!("blackhole://item/{}", h.id), "name": h.title, "description": format!("{} · {}", h.kind, h.snippet.chars().take(80).collect::<String>()), "mimeType": "text/plain" }))
+        .collect();
+    json!({ "resources": list })
+}
+
+fn get(ctx: &Ctx, args: &Value) -> Result<String, String> {
+    let id = id_arg(args)?;
+    let max = args.get("max_chars").and_then(|v| v.as_u64()).unwrap_or(20000).max(200) as usize;
+    item_json(ctx, id, max).map(|v| v.to_string()).ok_or_else(|| format!("no item with id {id}"))
+}
+
+fn list_recent(ctx: &Ctx, args: &Value) -> Result<String, String> {
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).clamp(1, 100) as usize;
+    let kind = args.get("kind").and_then(|v| v.as_str()).map(str::to_string);
+    let store = ctx.store.lock().unwrap();
+    let mut hits = store.recent(if kind.is_some() { limit * 5 } else { limit });
+    if let Some(k) = &kind {
+        hits.retain(|h| &h.kind == k);
+        hits.truncate(limit);
+    }
+    Ok(json!({ "count": hits.len(), "vault_items": store.count(), "items": hits.iter().map(hit_json).collect::<Vec<_>>() }).to_string())
+}
+
+fn forget(ctx: &Ctx, args: &Value) -> Result<String, String> {
+    let id = id_arg(args)?;
+    let mut store = ctx.store.lock().unwrap();
+    let title = store.title_of(id).ok_or_else(|| format!("no item with id {id}"))?;
+    store.delete(id).map_err(|e| e.to_string())?;
+    drop(store);
+    // The panel re-reads the vault on its next refresh; tell the dot so an open list updates.
+    let report = ingest::Report { added: 0, updated: 0, duplicates: 0, failed: 0, errors: Vec::new() };
+    post(ctx.hwnd, crate::dot::WM_INGEST_DONE, Box::into_raw(Box::new(report)) as isize);
+    Ok(json!({ "forgotten": id, "title": title }).to_string())
+}
+
+fn ask(ctx: &Ctx, args: &Value) -> Result<String, String> {
+    let question = args.get("question").and_then(|v| v.as_str()).map(str::trim).filter(|q| !q.is_empty()).ok_or("question is required")?;
+    let t = std::time::Instant::now();
+    let (answer, sources) = ctx.ask.answer_blocking(question)?;
+    Ok(json!({ "question": question, "answer": answer, "sources": sources, "seconds": (t.elapsed().as_secs_f32() * 10.0).round() / 10.0 }).to_string())
 }
 
 fn post(hwnd: usize, msg: u32, lparam: isize) {
@@ -202,6 +353,7 @@ fn windows_path(p: &str) -> String {
 
 fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
     let title = args.get("title").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
+    let tags = tags_arg(args);
     if args.get("kind").and_then(|v| v.as_str()) == Some("note") {
         // An editable note: created like the panel does it, named if a title was given.
         let text = args.get("text").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty()).ok_or("a note needs text")?;
@@ -213,6 +365,9 @@ fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
             st.update_note(id, &auto, text).map_err(|e| e.to_string())?;
             if let Some(t) = title {
                 st.set_note_title(id, t).map_err(|e| e.to_string())?;
+            }
+            if let Some(t) = &tags {
+                st.set_tags(id, t).map_err(|e| e.to_string())?;
             }
         }
         ingest::embed_item(&ctx.store, &ctx.embedder, id, title.unwrap_or(&auto), text);
@@ -251,6 +406,9 @@ fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
             (id, true)
         }
     };
+    if let (Some(t), true) = (&tags, id != 0) {
+        let _ = ctx.store.lock().unwrap().set_tags(id, t);
+    }
     let report = ingest::Report { added: usize::from(!duplicate), updated: 0, duplicates: usize::from(duplicate), failed: 0, errors: Vec::new() };
     post(ctx.hwnd, crate::dot::WM_INGEST_DONE, Box::into_raw(Box::new(report)) as isize);
     Ok(json!({ "id": id, "title": e.title, "kind": e.kind, "words": e.content.split_whitespace().count(), "duplicate": duplicate }).to_string())
@@ -259,29 +417,68 @@ fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
 fn retrieve(ctx: &Ctx, args: &Value) -> Result<String, String> {
     let query = args.get("query").and_then(|v| v.as_str()).map(str::trim).filter(|q| !q.is_empty()).ok_or("query is required")?;
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(8).clamp(1, 25) as usize;
-    let keyword_only = args.get("mode").and_then(|v| v.as_str()) == Some("keyword");
-    let qvec = if keyword_only { None } else { ctx.embedder.embed(query).ok() };
+    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("hybrid");
+    let qvec = if mode == "keyword" { None } else { ctx.embedder.embed(query).ok() };
+    let tags: Vec<String> = tags_arg(args).map(|t| t.split(|c: char| c == ',' || c.is_whitespace()).map(|x| x.trim_start_matches('#').to_lowercase()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+    let kind = args.get("kind").and_then(|v| v.as_str()).map(str::to_string);
     let store = ctx.store.lock().unwrap();
-    let hits = store.search(query, qvec.as_deref(), limit);
+    let filtered = !tags.is_empty() || kind.is_some();
+    let want = if filtered { limit * 4 } else { limit };
+    let mut hits = if mode == "semantic" {
+        match qvec.as_deref() {
+            Some(v) => store.semantic(v, want),
+            None => return Err("could not embed the query".into()),
+        }
+    } else {
+        store.search(query, qvec.as_deref(), want)
+    };
+    if filtered {
+        hits.retain(|h| tags.iter().all(|t| h.tags.split(' ').any(|x| x == t)) && kind.as_ref().is_none_or(|k| &h.kind == k));
+        hits.truncate(limit);
+    }
     let items: Vec<Value> = hits
         .iter()
         .map(|h| {
             let passage = qvec.as_deref().and_then(|v| store.best_chunk(h.id, v)).unwrap_or_else(|| h.snippet.clone());
-            json!({ "id": h.id, "title": h.title, "kind": h.kind, "source": h.source, "matched": h.via, "snippet": h.snippet, "passage": passage })
+            let mut v = hit_json(h);
+            v["matched"] = json!(h.via);
+            v["passage"] = json!(plain(&passage));
+            v
         })
         .collect();
-    Ok(json!({ "query": query, "count": items.len(), "vault_items": store.count(), "hits": items }).to_string())
+    Ok(json!({ "query": query, "mode": mode, "count": items.len(), "vault_items": store.count(), "hits": items }).to_string())
 }
 
 fn notify(ctx: &Ctx, args: &Value) -> Result<String, String> {
     let text = args.get("text").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty()).ok_or("text is required")?;
     let title = args.get("title").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
+    if !crate::config::load().agent_notify {
+        return Ok(json!({ "shown": false, "reason": "agent bubbles are off in Blackhole's Settings" }).to_string());
+    }
     let shown = match title {
         Some(t) => format!("{t}\n{text}"),
         None => text.to_string(),
     };
-    post(ctx.hwnd, crate::dot::WM_NOTIFY, Box::into_raw(Box::new(shown)) as isize);
-    Ok(json!({ "shown": true }).to_string())
+    let action = match args.get("action") {
+        Some(a) => {
+            if let Some(q) = a.get("open_search").and_then(|v| v.as_str()).map(str::trim).filter(|q| !q.is_empty()) {
+                Some(crate::dot::NoticeAction::Search(q.to_string()))
+            } else if let Some(u) = a.get("open_url").and_then(|v| v.as_str()).map(str::trim) {
+                if !(u.starts_with("http://") || u.starts_with("https://")) {
+                    return Err("open_url must be an http(s) URL".into());
+                }
+                Some(crate::dot::NoticeAction::Url(u.to_string()))
+            } else {
+                return Err("action must be { open_search: query } or { open_url: url }".into());
+            }
+        }
+        None => None,
+    };
+    let timeout_ms = args.get("timeout_ms").and_then(|v| v.as_u64()).map(|t| t as u32);
+    let clickable = action.is_some();
+    let n = crate::dot::Notice { text: shown, quiet: false, action, timeout_ms };
+    post(ctx.hwnd, crate::dot::WM_NOTICE, Box::into_raw(Box::new(n)) as isize);
+    Ok(json!({ "shown": true, "clickable": clickable }).to_string())
 }
 
 // ---------------------------------------------------------------------------

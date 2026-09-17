@@ -91,10 +91,20 @@ IME composition and characters outside the BMP (emoji) work.
 
 ## Using it from agents (MCP)
 
-Blackhole is an **MCP server**, so Claude Code (or any MCP client) can use your vault as memory: `retrieve`
-to look things up, `put` to remember something, `notify` to pop a speech bubble from the dot when a job is
-done. The running dot serves it on `127.0.0.1` only; `blackhole.exe --mcp` is a stdio bridge that starts the
-dot if it isn't running. Because WSL can run Windows programs, the same command works from both sides:
+Blackhole is an **MCP server**, so Claude Code (or any MCP client) can use your vault as memory. Tools:
+
+| Tool | What it does |
+|---|---|
+| `retrieve` | search — hybrid, keyword or semantic; filter by tags or kind; each hit has a snippet and its best passage |
+| `get` | one item in full: text, tags, the stored file's path |
+| `put` | remember text or a file (with tags), or create an editable note |
+| `ask` | ask mode as a call: the local model answers from the vault, returns the answer and its sources |
+| `list_recent`, `forget` | the newest items; delete one |
+| `notify` | a speech bubble from the dot — optionally clickable, to open the vault search on a query or an http(s) URL |
+
+Items are also MCP resources (`blackhole://item/<id>`). The running dot serves all of it on `127.0.0.1`
+only; `blackhole.exe --mcp` is a stdio bridge that starts the dot if it isn't running. Because WSL can run
+Windows programs, the same command works from both sides:
 
 ```sh
 # Windows (PowerShell / cmd)
@@ -105,8 +115,8 @@ claude mcp add --scope user blackhole -- /mnt/c/Users/<you>/AppData/Local/Progra
 
 Any other client: command `blackhole.exe`, args `["--mcp"]`, stdio transport. Or talk HTTP directly: `POST
 http://127.0.0.1:47811/mcp` with `Authorization: Bearer <token>` from `%LOCALAPPDATA%\Blackhole\mcp.json`.
-`put` goes through the same pipeline as a drop (extract → chunk → embed) and the dot animates; `retrieve`
-returns each hit's title, source path, snippet and best-matching passage.
+`put` goes through the same pipeline as a drop (extract → chunk → embed) and the dot animates. A noisy
+agent can be muted: "Agent bubbles" in Settings turns `notify` off (the tool reports it).
 
 ## Installing
 

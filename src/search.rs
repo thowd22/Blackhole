@@ -951,6 +951,7 @@ impl SearchWin {
         rows.push(Setting { label: "Think before answering".into(), value: onoff(cfg.think), hint: "~3 s of reasoning; more correct answers".into(), kind: SettingKind::Command(crate::dot::MENU_THINK) });
         rows.push(Setting { label: "Center on new message".into(), value: onoff(cfg.center_on_message), hint: "the dot warps to the screen centre for notifications".into(), kind: SettingKind::Command(crate::dot::MENU_CENTER_MSG_PUB) });
         rows.push(Setting { label: "Default view".into(), value: if cfg.notes_default { "Notes".into() } else { "Files".into() }, hint: "which tab opens on click / summon".into(), kind: SettingKind::Command(if cfg.notes_default { crate::dot::MENU_VIEW_FILES } else { crate::dot::MENU_VIEW_NOTES }) });
+        rows.push(Setting { label: "Agent bubbles".into(), value: onoff(cfg.agent_notify), hint: "let MCP clients (Claude Code…) show speech bubbles".into(), kind: SettingKind::Command(crate::dot::MENU_AGENT_NOTIFY) });
         rows.push(Setting { label: "Start at sign-in".into(), value: onoff(crate::startup::enabled()), hint: "run Blackhole when you log in".into(), kind: SettingKind::Command(crate::dot::MENU_START_LOGIN_PUB) });
         let nv = if cfg.nvim_init.is_empty() { "built-in".to_string() } else { cfg.nvim_init.rsplit(['\\', '/']).next().unwrap_or("").to_string() };
         rows.push(Setting { label: "Neovim config".into(), value: nv, hint: "click to load your init.lua / init.vim".into(), kind: SettingKind::Command(crate::dot::MENU_NVIM_CONFIG) });
@@ -1497,6 +1498,19 @@ impl SearchWin {
             let len = GetWindowTextLengthW(s.edit) as usize;
             SendMessageW(s.edit, EM_SETSEL, Some(WPARAM(len)), Some(LPARAM(len as isize)));
         }
+    }
+
+    /// An agent's bubble was clicked: the Files tab with this query.
+    pub unsafe fn open_with_query(hwnd: HWND, query: &str) {
+        let Some(s) = state(hwnd) else { return };
+        s.tab = Tab::Files;
+        let w = crate::util::wide(query);
+        let _ = SetWindowTextW(s.edit, PCWSTR(w.as_ptr()));
+        s.refresh();
+        s.fit(true);
+        let _ = SetFocus(Some(s.edit));
+        let len = GetWindowTextLengthW(s.edit) as usize;
+        SendMessageW(s.edit, EM_SETSEL, Some(WPARAM(len)), Some(LPARAM(len as isize)));
     }
 
     /// Ctrl+Shift+N / menu: a fresh note on the Notes tab.

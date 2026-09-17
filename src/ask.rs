@@ -160,6 +160,97 @@ impl AskEngine {
         post(WM_ASK_DONE, status);
     }
 
+    /// Retrieval for a question: expansion, dense query, reranked context, the vault
+    /// catalog for document questions. `Err` carries the user-facing reason there is
+    /// nothing to answer from (absent gate, empty vault, embedding failure).
+    fn gather(&self, llm: &mut Llm, question: &str) -> Result<Vec<(String, String)>, String> {
+        // Dense query = question + vault-anchored synonyms (ask mode only).
+        let expansions: Vec<&str> = {
+            let store = self.store.lock().unwrap();
+            expand::expand(question, |t| store.contains_term(t))
+        };
+        if !expansions.is_empty() {
+            crate::util::log(&format!("expansion: {expansions:?}"));
+        }
+        let Ok(mut qvec) = self.embedder.embed(&expand::dense_query(question, &expansions)) else {
+            return Err("Could not embed the question.".into());
+        };
+        // Multi-query: the model rewrites the question into the words a file would
+        // contain; their embeddings are folded into the query vector (question weighted
+        // double) and their literal terms feed the boost and the absent gate.
+        let rewrites = if std::env::var("BLACKHOLE_REWRITE").map(|v| v == "1").unwrap_or(false) { llm.search_terms(question) } else { Vec::new() };
+        if !rewrites.is_empty() {
+            crate::util::log(&format!("rewrites: {rewrites:?}"));
+            let mut acc: Vec<f32> = qvec.iter().map(|v| v * 2.0).collect();
+            for r in &rewrites {
+                if let Ok(v) = self.embedder.embed(r) {
+                    for (a, b) in acc.iter_mut().zip(v) {
+                        *a += b;
+                    }
+                }
+            }
+            let norm = acc.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
+            qvec = acc.iter().map(|v| v / norm).collect();
+        }
+        let aux = rewrites.join(" ");
+        self.ensure_reranker();
+        let reranker = self.reranker.lock().unwrap();
+        let rerank_fn = |q: &str, passages: &[String]| -> Option<Vec<f32>> {
+            reranker.as_ref().and_then(|r| r.score(q, passages).ok())
+        };
+        let (absent, chunks) = {
+            let store = self.store.lock().unwrap();
+            let absent = store.absent(question, Some(&qvec)) && !store.any_term_present(&aux);
+            let hook: Option<&dyn Fn(&str, &[String]) -> Option<Vec<f32>>> = if reranker.is_some() { Some(&rerank_fn) } else { None };
+            (absent, if absent { Vec::new() } else { store.context_reranked(question, &aux, &qvec, CONTEXT_WORDS, hook) })
+        };
+        drop(reranker);
+        if absent {
+            // None of the question's words occur anywhere in the vault: say so instead of
+            // letting the model invent an answer from unrelated excerpts.
+            crate::util::log(&format!("absent gate: {question:?}"));
+            return Err("That isn't in your vault — none of those words appear in anything I've swallowed.".into());
+        }
+        if chunks.is_empty() {
+            return Err("Nothing inside yet — drop something on me first.".into());
+        }
+        let mut chunks = chunks;
+        if Llm::is_document_question(question) {
+            let cat = self.store.lock().unwrap().catalog(30);
+            if !cat.is_empty() {
+                chunks.push(("List of everything in the vault".to_string(), cat));
+            }
+        }
+        // Leave a trace of what the model saw, for debugging odd answers.
+        let mut log = format!("Q: {question}\n\n");
+        for (i, (t, x)) in chunks.iter().enumerate() {
+            log.push_str(&format!("--- [{}] {t} ({} words)\n{x}\n\n", i + 1, x.split_whitespace().count()));
+        }
+        let _ = std::fs::write(crate::config::data_dir().join("last_ask.txt"), &log);
+        Ok(chunks)
+    }
+
+    /// Ask mode as a plain call (the MCP `ask` tool): retrieval + generation on the
+    /// caller's thread. Returns the answer and the titles it drew on.
+    pub fn answer_blocking(&self, question: &str) -> Result<(String, Vec<String>), String> {
+        let path = self.model_path.as_ref().ok_or("No model found next to blackhole.exe; ask mode is off (search still works).")?;
+        let mut guard = self.llm.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(Llm::load(path).map_err(|e| format!("Could not load model: {e}"))?);
+        }
+        let llm = guard.as_mut().unwrap();
+        let chunks = self.gather(llm, question)?;
+        let sources: Vec<Source> = chunks.iter().map(|(t, x)| Source { title: t, text: x }).collect();
+        let answer = llm.answer(question, &sources, &AtomicBool::new(false), |_| {}).map_err(|e| e.to_string())?;
+        let mut docs: Vec<String> = Vec::new();
+        for (t, _) in &chunks {
+            if !docs.contains(t) {
+                docs.push(t.clone());
+            }
+        }
+        Ok((answer.trim().to_string(), docs))
+    }
+
     fn run(&self, question: String, hwnd: usize, id: u64, cancel: Arc<AtomicBool>) {
         let post = |msg: u32, text: String| unsafe {
             let boxed = Box::into_raw(Box::new(text));
@@ -190,74 +281,14 @@ impl AskEngine {
 
         post(WM_ASK_STATUS, "reading your files…".into());
         let started = Instant::now();
-        // Dense query = question + vault-anchored synonyms (ask mode only).
-        let expansions: Vec<&str> = {
-            let store = self.store.lock().unwrap();
-            expand::expand(&question, |t| store.contains_term(t))
-        };
-        if !expansions.is_empty() {
-            crate::util::log(&format!("expansion: {expansions:?}"));
-        }
-        let Ok(mut qvec) = self.embedder.embed(&expand::dense_query(&question, &expansions)) else {
-            post(WM_ASK_DONE, "Could not embed the question.".into());
-            return;
-        };
-        // Multi-query: the model rewrites the question into the words a file would
-        // contain; their embeddings are folded into the query vector (question weighted
-        // double) and their literal terms feed the boost and the absent gate.
-        let rewrites = if std::env::var("BLACKHOLE_REWRITE").map(|v| v == "1").unwrap_or(false) { llm.search_terms(&question) } else { Vec::new() };
-        if !rewrites.is_empty() {
-            crate::util::log(&format!("rewrites: {rewrites:?}"));
-            let mut acc: Vec<f32> = qvec.iter().map(|v| v * 2.0).collect();
-            for r in &rewrites {
-                if let Ok(v) = self.embedder.embed(r) {
-                    for (a, b) in acc.iter_mut().zip(v) {
-                        *a += b;
-                    }
-                }
+        let chunks = match self.gather(llm, &question) {
+            Ok(c) => c,
+            Err(msg) => {
+                post(WM_ASK_DONE, msg);
+                return;
             }
-            let norm = acc.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
-            qvec = acc.iter().map(|v| v / norm).collect();
-        }
-        let aux = rewrites.join(" ");
-        self.ensure_reranker();
-        let reranker = self.reranker.lock().unwrap();
-        let rerank_fn = |q: &str, passages: &[String]| -> Option<Vec<f32>> {
-            reranker.as_ref().and_then(|r| r.score(q, passages).ok())
         };
-        let (absent, chunks) = {
-            let store = self.store.lock().unwrap();
-            let absent = store.absent(&question, Some(&qvec)) && !store.any_term_present(&aux);
-            let hook: Option<&dyn Fn(&str, &[String]) -> Option<Vec<f32>>> = if reranker.is_some() { Some(&rerank_fn) } else { None };
-            (absent, if absent { Vec::new() } else { store.context_reranked(&question, &aux, &qvec, CONTEXT_WORDS, hook) })
-        };
-        drop(reranker);
-        if absent {
-            // None of the question's words occur anywhere in the vault: say so instead of
-            // letting the model invent an answer from unrelated excerpts.
-            crate::util::log(&format!("absent gate: {question:?}"));
-            post(WM_ASK_DONE, "That isn't in your vault — none of those words appear in anything I've swallowed.".into());
-            return;
-        }
-        if chunks.is_empty() {
-            post(WM_ASK_DONE, "Nothing inside yet — drop something on me first.".into());
-            return;
-        }
-        let mut chunks = chunks;
-        if Llm::is_document_question(&question) {
-            let cat = self.store.lock().unwrap().catalog(30);
-            if !cat.is_empty() {
-                chunks.push(("List of everything in the vault".to_string(), cat));
-            }
-        }
         let sources: Vec<Source> = chunks.iter().map(|(t, x)| Source { title: t, text: x }).collect();
-        // Leave a trace of what the model saw, for debugging odd answers.
-        let mut log = format!("Q: {question}\n\n");
-        for (i, (t, x)) in chunks.iter().enumerate() {
-            log.push_str(&format!("--- [{}] {t} ({} words)\n{x}\n\n", i + 1, x.split_whitespace().count()));
-        }
-        let _ = std::fs::write(crate::config::data_dir().join("last_ask.txt"), &log);
-
         let words: usize = sources.iter().map(|s| s.text.split_whitespace().count()).sum();
         post(WM_ASK_STATUS, format!("thinking over {} excerpts ({words} words) on {}…  Esc to stop", sources.len(), llm.backend));
         let result = llm.answer(&question, &sources, &cancel, |tok| post(WM_ASK_TOKEN, tok.to_string()));

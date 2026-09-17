@@ -73,6 +73,8 @@ pub const MENU_NVIM_BUILTIN: usize = 19;
 const MENU_SETTINGS: usize = 20;
 /// Settings tab: cycle to the next theme.
 pub const MENU_THEME_NEXT: usize = 21;
+/// Settings tab: toggle whether MCP clients may show bubbles.
+pub const MENU_AGENT_NOTIFY: usize = 22;
 pub const MENU_SCREENSHOT: usize = 14;
 pub const MENU_CENTER_MSG_PUB: usize = MENU_CENTER_MSG;
 pub const MENU_START_LOGIN_PUB: usize = MENU_START_LOGIN;
@@ -80,6 +82,24 @@ pub const MENU_START_LOGIN_PUB: usize = MENU_START_LOGIN;
 /// stores it, re-registers, and tells the panel to refresh (WM_SETTINGS_CHANGED).
 pub const WM_SET_HOTKEY: u32 = 0x8018;
 pub const WM_SETTINGS_CHANGED: u32 = 0x8019;
+/// lparam: Box<Notice> — a bubble with an optional click action (MCP `notify`).
+pub const WM_NOTICE: u32 = 0x801A;
+
+/// What a clicked bubble does.
+pub enum NoticeAction {
+    /// Open the panel on the Files tab with this query.
+    Search(String),
+    /// Open this http(s) URL in the default browser.
+    Url(String),
+}
+
+pub struct Notice {
+    pub text: String,
+    /// No warp to the screen centre, shorter stay.
+    pub quiet: bool,
+    pub action: Option<NoticeAction>,
+    pub timeout_ms: Option<u32>,
+}
 
 /// First-run tutorial. Each step waits for the action it describes.
 pub const TUTORIAL: &[&str] = &[
@@ -138,7 +158,9 @@ pub struct Dot {
     mem_dc: HDC,
     /// Queued notification texts; one bubble at a time.
     /// Queued notification text and whether it is "quiet" (no centring, short).
-    messages: VecDeque<(String, bool)>,
+    messages: VecDeque<Notice>,
+    /// The action of the bubble on screen, run when its body is clicked.
+    pending_action: Option<NoticeAction>,
     /// True while the visible bubble is a tutorial step.
     tutorial_showing: bool,
     taskbar_created: u32,
@@ -199,6 +221,7 @@ impl Dot {
                 dib_bits: std::ptr::null_mut(),
                 mem_dc: HDC::default(),
                 messages: VecDeque::new(),
+                pending_action: None,
                 tutorial_showing: false,
                 taskbar_created: tray::taskbar_created_message(),
                 cfg,
@@ -581,13 +604,29 @@ impl Dot {
 
     /// Queue a notification; shown when nothing else is up.
     unsafe fn notify(&mut self, text: String) {
-        self.messages.push_back((text, false));
-        self.show_next_message();
+        self.notice(Notice { text, quiet: false, action: None, timeout_ms: None });
     }
 
     unsafe fn notify_quiet(&mut self, text: String) {
-        self.messages.push_back((text, true));
+        self.notice(Notice { text, quiet: true, action: None, timeout_ms: None });
+    }
+
+    unsafe fn notice(&mut self, n: Notice) {
+        self.messages.push_back(n);
         self.show_next_message();
+    }
+
+    unsafe fn run_action(&mut self, action: NoticeAction) {
+        match action {
+            NoticeAction::Search(q) => {
+                self.open_search();
+                SearchWin::open_with_query(self.search, &q);
+            }
+            NoticeAction::Url(u) => {
+                let w = wide(&u);
+                ShellExecuteW(None, w!("open"), PCWSTR(w.as_ptr()), None, None, SW_SHOWNORMAL);
+            }
+        }
     }
 
     unsafe fn show_next_message(&mut self) {
@@ -599,7 +638,8 @@ impl Dot {
             // A notification pre-empts a (sticky) tutorial step; the step returns afterwards.
             Bubble::hide(self.bubble);
         }
-        let Some((text, quiet)) = self.messages.pop_front() else { return };
+        let Some(Notice { text, quiet, action, timeout_ms }) = self.messages.pop_front() else { return };
+        self.pending_action = action;
         if self.cfg.hidden {
             self.set_hidden(false);
         }
@@ -610,7 +650,7 @@ impl Dot {
         }
         self.tutorial_showing = false;
         let unit = self.unit();
-        let timeout = if quiet { 2500 } else { (6000 + 40 * text.len() as u32).min(20000) }; // longer texts stay longer
+        let timeout = timeout_ms.map(|t| t.clamp(1000, 60000)).unwrap_or(if quiet { 2500 } else { (6000 + 40 * text.len() as u32).min(20000) }); // longer texts stay longer
         Bubble::show(self.bubble, &text, self.rect(), unit, Some(timeout));
         self.set_mood(Mood::Satisfied, Some(400));
     }
@@ -742,7 +782,7 @@ impl Dot {
     unsafe fn command(&mut self, id: usize) {
         self.command_inner(id);
         // The Settings tab mirrors these; let it redraw with the new values.
-        if matches!(id, MENU_THINK | MENU_CENTER_MSG | MENU_VIEW_FILES | MENU_VIEW_NOTES | MENU_START_LOGIN | MENU_NVIM_CONFIG | MENU_NVIM_BUILTIN | MENU_THEME_NEXT) && !self.search.is_invalid() {
+        if matches!(id, MENU_THINK | MENU_CENTER_MSG | MENU_VIEW_FILES | MENU_VIEW_NOTES | MENU_START_LOGIN | MENU_NVIM_CONFIG | MENU_NVIM_BUILTIN | MENU_THEME_NEXT | MENU_AGENT_NOTIFY) && !self.search.is_invalid() {
             let _ = PostMessageW(Some(self.search), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
         }
     }
@@ -782,6 +822,10 @@ impl Dot {
                 }
             }
             MENU_NEW_NOTE => self.new_note(),
+            MENU_AGENT_NOTIFY => {
+                self.cfg.agent_notify = !self.cfg.agent_notify;
+                config::save(&self.cfg);
+            }
             MENU_THEME_NEXT => {
                 self.cfg.theme = crate::theme::next_name().to_string();
                 crate::theme::set_by_name(&self.cfg.theme);
@@ -995,7 +1039,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_BUBBLE_CLICKED | WM_BUBBLE_EXPIRED => {
             if let Some(d) = state(hwnd) {
-                d.bubble_closed(msg == WM_BUBBLE_CLICKED && wparam.0 == 1);
+                let action = d.pending_action.take();
+                let closed_x = wparam.0 == 1;
+                d.bubble_closed(msg == WM_BUBBLE_CLICKED && closed_x);
+                if msg == WM_BUBBLE_CLICKED && !closed_x {
+                    if let Some(a) = action {
+                        d.run_action(a);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_NOTICE => {
+            let n = *Box::from_raw(lparam.0 as *mut Notice);
+            if let Some(d) = state(hwnd) {
+                d.notice(n);
             }
             LRESULT(0)
         }

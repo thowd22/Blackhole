@@ -320,6 +320,31 @@ impl Store {
         Ok(())
     }
 
+    /// An item's tags, space-separated without the '#'.
+    pub fn tags_of(&self, id: i64) -> String {
+        let raw: String = self.conn.query_row("SELECT tags FROM items WHERE id = ?1", params![id], |r| r.get(0)).unwrap_or_default();
+        raw.split(',').filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ")
+    }
+
+    /// Semantic-only search (MCP `retrieve` with mode "semantic").
+    pub fn semantic(&self, qvec: &[f32], limit: usize) -> Vec<Hit> {
+        let mut hits: Vec<Hit> = self.search_semantic(qvec, limit).into_iter().map(|(mut h, _)| { h.via = "sem"; h }).collect();
+        self.attach_tags(&mut hits);
+        hits
+    }
+
+    /// One item's row (title, kind, source, first 120 chars) with its tags.
+    pub fn item(&self, id: i64) -> Option<Hit> {
+        let mut h = self
+            .conn
+            .query_row("SELECT id, title, kind, source, substr(content, 1, 120) FROM items WHERE id = ?1", params![id], |r| {
+                Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "), via: "", tags: String::new() })
+            })
+            .ok()?;
+        h.tags = self.tags_of(id);
+        Some(h)
+    }
+
     pub fn set_cursor(&self, id: i64, row: i64, col: i64) {
         let _ = self.conn.execute("UPDATE items SET cursor = ?1 WHERE id = ?2", params![format!("{row},{col}"), id]);
     }

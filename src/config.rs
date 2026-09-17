@@ -33,6 +33,9 @@ pub struct Config {
     /// Panel/editor theme name (see `theme::THEMES`); empty = Blackhole.
     #[serde(default)]
     pub theme: String,
+    /// Agents may show speech bubbles through the MCP `notify` tool.
+    #[serde(default = "yes")]
+    pub agent_notify: bool,
     /// Search panel size the user dragged, in 96-DPI px (0 = default); see `search.rs`.
     #[serde(default)]
     pub panel_w: i32,
@@ -53,7 +56,7 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0, nvim_init: String::new(), hotkeys: Vec::new(), theme: String::new() }
+        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0, nvim_init: String::new(), hotkeys: Vec::new(), theme: String::new(), agent_notify: true }
     }
 }
 

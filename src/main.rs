@@ -105,11 +105,11 @@ fn main() {
         let ask = Arc::new(ask::AskEngine::new(model, store.clone(), embedder.clone()));
 
         let (tx, rx) = mpsc::channel();
-        let hwnd = dot::Dot::create(tx, store.clone(), embedder.clone(), ask);
+        let hwnd = dot::Dot::create(tx, store.clone(), embedder.clone(), ask.clone());
         if hwnd.is_invalid() {
             return;
         }
-        match mcp::start(store.clone(), embedder.clone(), hwnd.0 as usize) {
+        match mcp::start(store.clone(), embedder.clone(), ask, hwnd.0 as usize) {
             Some(port) => util::log(&format!("mcp: listening on 127.0.0.1:{port}")),
             None => util::log("mcp: could not bind a local port"),
         }
