@@ -5,7 +5,7 @@
 ## Decisions
 
 - **First platform: Windows** (10/11). Linux/macOS later.
-- **Self-contained distribution.** No runtime model downloads. The user gets one thing and it works offline from first launch.
+- **Self-contained distribution.** The installer still ships the answer model, so the user gets one thing and it works offline from first launch. Since 2026-09-17 a *runtime* download is available as a fallback rather than the norm: an install with no model (the portable zip, or one where the model folder was removed) offers **Download the default model** in Settings — see § Model discovery and download.
 - **Two binaries, split by CPU architecture, not GPU vendor:**
   - `blackhole-x64` — Intel/AMD PCs, all GPUs via DirectML.
   - `blackhole-arm64` — Snapdragon X Copilot+ PCs, NPU via QNN.
@@ -36,7 +36,8 @@ Release assets: GitHub caps each asset at 2 GiB and the installer is ~3 GB with 
 release job splits it into 1900 MB parts (`copy /b a.part0 + a.part1 a.exe` to re-join) next to a portable
 exe zip and `SHA256SUMS.txt`. A web installer that downloads the model on install (Inno's
 `DownloadTemporaryFile`) would remove the split; it needs a host for the prepared model (a Hugging Face repo
-or the release parts themselves) and is the natural next step for packaging.
+or the release parts themselves) and is the natural next step for packaging — the in-app downloader added on
+2026-09-17 already needs the same host, so the two share a decision.
 
 - **Inno Setup 6** script `installer/blackhole.iss`, built from WSL by `build-installer.sh` (stages exe + DLLs +
   model under `dist/stage`, runs `ISCC.exe`). Output `dist/Blackhole-<version>-x64-setup.exe`, ≈2.9 GB; the int4
@@ -46,6 +47,52 @@ or the release parts themselves) and is the natural next step for packaging.
   running instance on install, kills it on uninstall; asks before deleting the vault on uninstall.
 - The exe carries the pixel-art icon and version info (`build.rs` → mingw `windres`).
 - Still to do: code-signing (SmartScreen), delta updates (exe only; model versioned separately), an MSIX/Store variant.
+
+## Model discovery and download (2026-09-17)
+
+`src/models.rs` owns which answer model is used and where it comes from.
+
+- **Discovery.** Scanned in order: the exe's folder (where the installer puts `qwen3-4b\`), the vault, and
+  `<vault>\models\` — the folder itself plus one level of subfolders. Each candidate reports a name, its
+  graph path and its size on disk. A folder containing a `.part` file is skipped as half-downloaded.
+  `config.model_name` picks the active one; with nothing set, the largest wins (the old rule), so existing
+  installs behave exactly as before. `llm_ort::find_model` asks `models::active()` first and keeps its own
+  scan as a fallback.
+- **Selection.** The Settings row "Ask model" shows `<name> (<size>)` and cycles through what was found,
+  saving `config.model_name` and dropping the loaded session (immediately when idle, otherwise before the
+  next answer).
+- **Download.** With no model anywhere, the row becomes "Download the default model". It fetches the four
+  pinned Qwen3-4B files that `ci/prepare-model.sh` already verifies (`model_q4f16.onnx` + two external data
+  files + `tokenizer.json`, **2.84 GB**) over WinHTTP on a background thread into `<vault>\models\qwen3-4b`:
+  `.part` files, `Range:` resume across restarts (and a complete `.part` is verified rather than re-requested
+  — a server answering `416` is retried from zero), sha256 checked before each rename, progress written into
+  the row, a second click cancels and keeps what came down. When it finishes, `find_model` re-runs so ask mode
+  works without a restart.
+- **Caveat.** The downloaded model is the raw Hugging Face export, not the graph-surgery build the installer
+  ships: `tools/last_logits.py`, `gemm_head.py`, `logit_index.py` and `repack.py` have not been run on it, so
+  the prompt pass returns full-sequence logits and there is no `Gemm` LM head or logit-index input. It loads
+  and answers correctly, just heavier and slower on the prompt pass. The fix is to publish the *prepared*
+  model as release assets — `models::PREPARED_BASE` records the intended convention (one file per name under a
+  `model-v1` tag with `SHA256SUMS.txt` beside them); only the asset table changes when that host exists.
+- **Note on `BLACKHOLE_DATA_DIR`**: it now sets the *base* directory (where `config.json` lives). A
+  `vault_dir` recorded in that config is honoured from there, which is what makes the Settings "Vault folder"
+  move work. A fresh directory behaves exactly as before.
+
+### Reranker k (2026-09-17)
+
+`rerank::CANDIDATES` was a constant 10. It is now `rerank::candidates()`, derived from a measured per-pair
+cost: `askeval --rerank-bench` scores real-shaped pairs and reports **8.7 ms per (query, passage) pair** at
+128 tokens, batch 1, 6 intra-op threads on a 24-core Zen 4 (the reranker is CPU-only by construction).
+
+```
+threads = clamp(cores - 2, 2, 6)
+k       = clamp(400 ms / (8.7 ms × 6 / threads), 6, 10)
+```
+
+The ceiling stays the accuracy-measured 10 — k=5 lost two answers in the eval — so the budget can only trade k
+*down* on slow hardware, never up into unmeasured territory. On the development machine k=10 costs 87 ms; a
+two-thread laptop pays 261 ms, still inside the 400 ms ask-mode retrieval budget. `BLACKHOLE_RERANK_K`
+overrides it. Full numbers in [RAG.md](RAG.md) §2g.
 
 ## Acceleration
 

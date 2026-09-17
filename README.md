@@ -31,36 +31,67 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
 | <img src="docs/art/listening.gif" width="64"> | **listening** | green while the search panel is open |
 | | **thinking** | the ring breathes and a single speck orbits the halo while the model works on a question |
 
-- The dot floats above every window at whatever size you like. Drag it anywhere; **Ctrl+Shift+Space**
-  summons it to your mouse and opens search; press again and it goes home.
-- Drop files or selected text on it, or hit **Ctrl+Shift+V** to swallow whatever is on the clipboard. The ring
+- The dot floats above every window at whatever size you like. Drag it anywhere — it snaps flush to the
+  edges of whichever screen it lands on (off in Settings); **Ctrl+Shift+Space** summons it to your mouse and
+  opens search; press again and it goes home.
+- It knows when to get out of the way. Set an **idle opacity** (100 / 85 / 70 / 50 %) and it fades while
+  you're not using it, back to solid the moment your pointer arrives. Turn on **shy mode** and it shrinks to a
+  few pixels after a few seconds of being ignored, then swells back — same dot, just re-sampled smaller. Its
+  colours are yours too: **Ember**, **Ice**, **Emerald** or **Violet**, ring, halo, bubbles, badge and tray
+  icon all together.
+- **Pause swallowing** from the menu (or Settings) when you're about to handle something you'd rather it
+  didn't see: the ring drains to grey, the specks stop, and drops, pastes, screenshots and agent `put` calls
+  are all refused with one bubble — "Paused — I'm not swallowing anything. Click here to resume." Click it
+  and you're back.
+- Drop files or selected text on it, or a **link dragged out of a browser**, or hit **Ctrl+Shift+V** to
+  swallow whatever is on the clipboard. The ring
   speeds up and specks spiral in while it digests; it pulses when it's done, flickers red if it couldn't read
   something. Every mood change eases over 150 ms rather than snapping.
 - **Ctrl+Shift+S** by default (rebind it in Settings if another program owns it; or "Take screenshot" in the menu) dims the screen; drag a rectangle and the region is saved, OCR'd so its words are searchable and askable,
   as a PNG under `captures\` and swallowed like a dropped image. Esc cancels.
 - Left-click: a dark panel appears beside the dot. Results update on every keystroke in about 5 ms —
   keyword matches and semantic matches fused, with a tag showing which kind of match you're looking at.
-  **↵** opens the file, **Ctrl+↵** reveals it in Explorer, **Ctrl+C** copies a pasted note, **Del** forgets it
-  (press it twice — the first press asks). Matched words are highlighted in the result snippets. **Tab**
+  Every row carries a pixel type icon — a lined page, a PDF, a photo frame, angle brackets for code, a globe
+  for a web page — and a snippet that knows what it's looking at: a hit inside a fenced code block shows the
+  whole block on the editor's ground, a markdown heading draws in the accent with its `#` gone, a list item gets a
+  pixel bullet. **↵** opens the file, **Ctrl+↵** reveals it in Explorer, **Ctrl+C** copies a pasted note,
+  **Ctrl+R** re-reads it from disk, **Del** forgets it (press it twice — the first press asks); right-click a
+  row for the same menu. Matched words are highlighted in the result snippets. **Tab**
   previews the selected hit in place: the full text with your search terms highlighted and code or markdown
   coloured by type (the preview is Neovim, read-only); `:Name new title` there renames any item and `:Tag`
   tags it. The camera button in the panel takes a screenshot.
   The panel sizes itself to what it shows; drag the pixel grip in its bottom-right corner to set your own size,
   which is remembered. Closing it keeps the query and answer for next time; **Esc** twice clears them. The
   scrollbars are drawn in the same pixel style as everything else.
+- Narrow the list by typing, not by clicking: `kind:code`, `kind:images`, `kind:office`, `kind:web`,
+  `since:week`, `since:7d`, `since:2026-09-01`, `source:invoices` — on their own they just browse, and they
+  combine with words and `#tags`. The status line tells you what you're looking at: "3 of 9 items · browsing ·
+  kind:code".
 - Type `? how much did shipping cost` and press ↵: a second box streams the answer, the results below show
   what it drew on, and the status line tells you which documents it read and how long it took. If none of
   your words appear anywhere in the vault it says so instead of inventing something.
 - **Settings** live in the panel: the gear button in the tab strip (or right-click → Settings…) opens a
   pixel-styled list — the four global hotkeys (click a row, press the keys; it tells you on the spot if
-  another program owns that combination), the **theme**, thinking, center-on-message, default view, start at
-  sign-in, and your Neovim config.
+  another program owns that combination), the **theme** and the **dot's colours**, idle opacity, shy mode,
+  snap to edges, pause swallowing, thinking, center-on-message, agent bubbles, default view, start at
+  sign-in, your Neovim config, and:
+  - **Vault folder** — pick a new home and Blackhole moves the vault there and restarts into it. `config.json`
+    stays put; if the move can't finish, nothing is changed.
+  - **Keep copies of files** — *always* (the default), *under 25 MB*, or *never*. On *never* nothing is
+    copied, which is lighter but means an item stops opening once you move its original.
+  - **Ask model** — every model found beside the exe or in the vault, with its size; click to switch. If
+    there is none, the row reads **Download the default model** instead and fetches Qwen3-4B (2.8 GB) in the
+    background, resuming where it left off if you close the app, verifying the checksums, and lighting up ask
+    mode without a restart.
+  - **Undigested items** — anything Blackhole couldn't read, with the reason and the path; **R** retries,
+    **Del** dismisses.
 - **Themes**: Blackhole (the dark-violet default), Dracula, Gruvbox, Nord, Catppuccin, One Dark, Tokyo Night
-  and Solarized Dark. A theme recolours the panel and the editor (Neovim's palette follows it); the dot
-  itself keeps its orange ring and purple smear — that's who it is.
+  and Solarized Dark. A theme recolours the panel and the editor (Neovim's palette follows it); the dot has
+  its own four palettes, so you can leave it Ember-orange over any theme you like — or not.
 - A pixel speech bubble walks you through this the first time you run it. The same bubbles carry
-  notifications later; a right-click menu has sizes, tray options, start-at-sign-in and a "center on new
-  message" toggle. There's a tray icon so the dot can hide.
+  notifications later — a long one caps itself at twelve lines and scrolls (wheel or the pixel bar), and if
+  more arrive while one is up, a tiny orange digit sits on the dot's shoulder counting them; a right-click
+  menu has sizes, tray options, start-at-sign-in, Self-check and a "center on new message" toggle. There's a tray icon so the dot can hide.
 
 ## Notes
 
@@ -97,7 +128,7 @@ Blackhole is an **MCP server**, so Claude Code (or any MCP client) can use your 
 |---|---|
 | `retrieve` | search — hybrid, keyword or semantic; filter by tags or kind; each hit has a snippet and its best passage |
 | `get` | one item in full: text, tags, the stored file's path |
-| `put` | remember text or a file (with tags), or create an editable note |
+| `put` | remember text, a file or a **URL** (with tags), or create an editable note |
 | `ask` | ask mode as a call: the local model answers from the vault, returns the answer and its sources |
 | `list_recent`, `forget` | the newest items; delete one |
 | `notify` | a speech bubble from the dot — optionally clickable, to open the vault search on a query or an http(s) URL |
@@ -115,13 +146,24 @@ claude mcp add --scope user blackhole -- /mnt/c/Users/<you>/AppData/Local/Progra
 
 Any other client: command `blackhole.exe`, args `["--mcp"]`, stdio transport. Or talk HTTP directly: `POST
 http://127.0.0.1:47811/mcp` with `Authorization: Bearer <token>` from `%LOCALAPPDATA%\Blackhole\mcp.json`.
-`put` goes through the same pipeline as a drop (extract → chunk → embed) and the dot animates. A noisy
-agent can be muted: "Agent bubbles" in Settings turns `notify` off (the tool reports it).
+`put` goes through the same pipeline as a drop (extract → chunk → embed) and the dot animates — `put { url:
+"https://…" }` fetches the page and stores its readable text, and `put` of an unreadable file lands in the
+**Undigested items** list with its reason instead of failing silently. A noisy agent can be muted: "Agent
+bubbles" in Settings turns `notify` off (the tool reports it), and while Blackhole is paused `put` refuses and
+says so.
+
+**Self-check** in the right-click menu answers "is it actually working?" without a terminal: it runs the real
+retrieval and answer pipeline over a set of questions — `questions.json` beside your vault if you've written
+one, otherwise a built-in set over a throwaway vault it builds and deletes — and reports "Self-check: 5/5" in
+a bubble, with the per-question detail in `selfcheck.txt`. With no model installed it still checks retrieval
+and says so.
 
 ## Installing
 
 Download `Blackhole-<version>-x64-setup.exe` (≈2.9 GB: app + ONNX Runtime/DirectML + Qwen3-4B) and run
-it. Per-user install by default (no admin), optional start-at-sign-in and desktop shortcut. Your vault in
+it — or take the portable zip and let Settings → **Download the default model** fetch the model afterwards
+(resumable, checksummed). Per-user install by default (no admin), optional start-at-sign-in and desktop
+shortcut. Your vault in
 `%LOCALAPPDATA%\Blackhole` survives updates; uninstall asks before deleting it. Requires Windows 10 1903+ /
 Windows 11 x64; any GPU with DirectML (the CPU is used otherwise, more slowly). While answering, the app uses
 about 5.5 GB of RAM and ~6 GB of VRAM (weights are held by both GPU sessions); with no GPU it falls back to the
@@ -152,6 +194,18 @@ run; nothing is linked at build time, so the app cross-compiles from Linux with 
    and the preview's first line shows where it lives. Drop the same picture again and it is still read (OCR
    only gets better): if the text differs the item is updated, otherwise it's just "already swallowed".
    Ctrl+Shift+V with a picture on the clipboard swallows it too.
+   **Office documents** (`.docx`, `.xlsx`, `.pptx`, and the macro variants) are read by Blackhole's own
+   zip + XML reader (`src/office.rs`, no new dependencies): a Word document keeps its paragraphs and turns
+   tables into ` | ` rows, a workbook comes out sheet by sheet under `## Sheet name` headings with shared
+   strings resolved, a deck comes out slide by slide in the right order with the speaker notes attached.
+   Malformed and hostile files are refused politely — there's a 16 MiB inflate budget, so a zip bomb costs a
+   couple of seconds and ten megabytes rather than the machine.
+   **Web pages** (`src/web.rs`): drag a link out of a browser, paste a URL, drop a `.url` shortcut or a saved
+   `.html`, and the page is fetched over WinHTTP (https only ever redirects to https, 10 s timeouts, 5 MB cap)
+   and reduced to readable text — scripts, nav, headers, footers and sidebars dropped, the article picked by
+   text-to-tag ratio, headings and tables preserved. The final URL is the item's identity, so swallowing a
+   page again updates it in place; a local `.html` is parsed without touching the network. Nothing is ever
+   fetched that you didn't drop, paste or `put`, and every fetch is written to `log.txt`.
 2. **Chunking.** Each document is split into ~100-word chunks with a 20-word overlap, paragraph-aware, and
    line breaks survive inside a chunk — a résumé's job headers and a form's rows only mean something as lines
    (flattening them cost the model three answers in the eval).
@@ -171,7 +225,19 @@ Live search fuses two rankers on every keystroke:
   typo in one word doesn't empty the list, and a document matching more of your terms scores higher.
 - **Semantic** (cosine over all chunk and title vectors, brute force — trivially fast at this scale).
 
-They're fused by *score*, not rank: a strong semantic match contributes its normalised cosine, a keyword hit
+Anything you type that looks like a filter is pulled out before the search runs — `kind:` / `type:` / `is:`,
+`since:` / `after:`, `source:` / `from:` / `in:`, and `#tag` — so `kind:code panel` searches only your source
+files, `since:week` browses the last seven days, and `kind:pdf` on its own just lists your PDFs in recent
+order instead of hunting for the word "pdf". Kinds understand plain English (`images`, `screenshots`,
+`spreadsheets`, `decks`, `pages`, `office`, `docs`), dates take `7d` / `2w` / `today` / `week` / `month` or an
+ISO date, and a value it doesn't recognise stays in the query rather than vanishing. Results carry a pixel
+icon for their kind, and the top rows get a real snippet rather than a line fragment: a hit inside a fenced
+code block shows the whole block on the editor's ground, code files show a window around the hit, and
+markdown shows its heading in the accent with the `#` and `**` stripped — `snake_case` survives, because the
+emphasis rule only fires where emphasis is what's meant.
+
+The two rankers are fused by *score*, not rank: a strong semantic match contributes its normalised cosine, a
+keyword hit
 contributes weight × (fraction of your terms it contains)², and distinctive terms (rare in *your* vault —
 names, numbers, jargon, never English function words) add a small boost. This shape was chosen by
 measurement: reciprocal-rank fusion looked great on the first question set and collapsed on a blind one.
@@ -261,6 +327,10 @@ binary (`askeval`) that runs the actual pipeline and checks answers against rege
 | Correct answers, direct (no thinking) | | 66–70 % (Qwen3-4B 29/44, Llama 3.2 3B 31/44) |
 | Latency | 5 ms | ~5 s to first text with thinking (~2 s without), ~50 tok/s |
 
+It scales: on a synthetic 400-item, 170,000-word vault (3,264 chunks, embedded in 38 s) a keystroke reaches a
+ranked list in 35 ms at the median and 40 ms at the 95th percentile, 30/30 questions right first hit. Brute-force
+cosine only starts to matter around 50,000 chunks, so there is still no ANN index and no need for one.
+
 The full story — what was tried, what won, what lost and why (bigger embedders lost; LLM chunk enrichment
 lost; RRF lost out of sample; the reranker and title units won) — is in [RAG.md](RAG.md). Model selection,
 the DirectML findings and the memory work are in [PACKAGING.md](PACKAGING.md).
@@ -318,7 +388,10 @@ portable exe zip, the installer in <2 GiB parts, checksums.
 | `src/search.rs` | Search panel: live results, ask box, keyboard handling, content-fit sizing, pixel scrollbars |
 | `src/screenshot.rs` | Drag-region screenshot overlay (Ctrl+Shift+S) |
 | `src/tray.rs`, `src/startup.rs` | Tray icon; start-at-sign-in |
-| `src/drop.rs` | OLE drop target and clipboard reading |
+| `src/drop.rs` | OLE drop target and clipboard reading (files, text, bitmaps, dragged links) |
+| `src/office.rs` | docx / xlsx / pptx: a read-only zip reader and an XML scanner, no dependencies |
+| `src/web.rs` | URL fetching over WinHTTP and HTML → readable text |
+| `src/models.rs` | Finding, choosing and downloading answer models |
 | `src/ingest.rs`, `src/chunk.rs` | Extraction, chunking, embedding on the worker thread |
 | `src/store.rs` | SQLite + FTS5 vault, hybrid search, absent gate, context assembly |
 | `src/embed.rs`, `src/rerank.rs`, `src/expand.rs` | Embedder, cross-encoder reranker, vault-anchored synonyms |
@@ -331,8 +404,9 @@ portable exe zip, the installer in <2 GiB parts, checksums.
 
 ## Roadmap
 
-Copilot+ NPU providers → web installer and code signing. Details and the
-reasoning behind each in [FEATURES.md](FEATURES.md).
+Copilot+ NPU providers (Qualcomm QNN, AMD Ryzen AI, Intel OpenVINO) → code signing → a web installer that
+fetches the model at install time → Linux and macOS. Details and the reasoning behind each in
+[FEATURES.md](FEATURES.md).
 
 ## Credits
 
