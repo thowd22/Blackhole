@@ -4,7 +4,7 @@
 #define AppName "Blackhole"
 #define AppVersion GetEnv("BLACKHOLE_VERSION")
 #if AppVersion == ""
-  #define AppVersion "0.3.1"
+  #define AppVersion "1.0.0"
 #endif
 #define AppPublisher "thowd22"
 #define AppURL "https://github.com/thowd22/Blackhole"
