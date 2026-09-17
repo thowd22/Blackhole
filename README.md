@@ -36,7 +36,7 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
 - Drop files or selected text on it, or hit **Ctrl+Shift+V** to swallow whatever is on the clipboard. The ring
   speeds up and specks spiral in while it digests; it pulses when it's done, flickers red if it couldn't read
   something. Every mood change eases over 150 ms rather than snapping.
-- **Ctrl+Shift+S** (Ctrl+Alt+S if another program already owns that key — the menu shows which; or "Take screenshot" in the menu) dims the screen; drag a rectangle and the region is saved, OCR'd so its words are searchable and askable,
+- **Ctrl+Shift+S** by default (rebind it in Settings if another program owns it; or "Take screenshot" in the menu) dims the screen; drag a rectangle and the region is saved, OCR'd so its words are searchable and askable,
   as a PNG under `captures\` and swallowed like a dropped image. Esc cancels.
 - Left-click: a dark panel appears beside the dot. Results update on every keystroke in about 5 ms —
   keyword matches and semantic matches fused, with a tag showing which kind of match you're looking at.
@@ -51,6 +51,10 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
 - Type `? how much did shipping cost` and press ↵: a second box streams the answer, the results below show
   what it drew on, and the status line tells you which documents it read and how long it took. If none of
   your words appear anywhere in the vault it says so instead of inventing something.
+- **Settings** live in the panel: the gear button in the tab strip (or right-click → Settings…) opens a
+  pixel-styled list — the four global hotkeys (click a row, press the keys; it tells you on the spot if
+  another program owns that combination), thinking, center-on-message, default view, start at sign-in, and
+  your Neovim config.
 - A pixel speech bubble walks you through this the first time you run it. The same bubbles carry
   notifications later; a right-click menu has sizes, tray options, start-at-sign-in and a "center on new
   message" toggle. There's a tray icon so the dot can hide.

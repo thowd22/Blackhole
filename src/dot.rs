@@ -50,7 +50,7 @@ const HOTKEY_PASTE: i32 = 2;
 const HOTKEY_SHOT: i32 = 3;
 const HOTKEY_NOTE: i32 = 4;
 /// Ctrl+Shift+S was taken; the screenshot key is Ctrl+Alt+S (menu label follows).
-static SHOT_KEY_ALT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 
 const MENU_SEARCH: usize = 1;
 const MENU_PASTE: usize = 2;
@@ -64,13 +64,20 @@ const MENU_QUIT: usize = 9;
 const MENU_START_LOGIN: usize = 10;
 const MENU_TUTORIAL: usize = 11;
 const MENU_SIZE_XL: usize = 12;
-const MENU_THINK: usize = 13;
-const MENU_VIEW_FILES: usize = 15;
-const MENU_VIEW_NOTES: usize = 16;
+pub const MENU_THINK: usize = 13;
+pub const MENU_VIEW_FILES: usize = 15;
+pub const MENU_VIEW_NOTES: usize = 16;
 const MENU_NEW_NOTE: usize = 17;
-const MENU_NVIM_CONFIG: usize = 18;
-const MENU_NVIM_BUILTIN: usize = 19;
+pub const MENU_NVIM_CONFIG: usize = 18;
+pub const MENU_NVIM_BUILTIN: usize = 19;
+const MENU_SETTINGS: usize = 20;
 pub const MENU_SCREENSHOT: usize = 14;
+pub const MENU_CENTER_MSG_PUB: usize = MENU_CENTER_MSG;
+pub const MENU_START_LOGIN_PUB: usize = MENU_START_LOGIN;
+/// From the Settings tab: wparam = action index, lparam = boxed String combo. The dot
+/// stores it, re-registers, and tells the panel to refresh (WM_SETTINGS_CHANGED).
+pub const WM_SET_HOTKEY: u32 = 0x8018;
+pub const WM_SETTINGS_CHANGED: u32 = 0x8019;
 
 /// First-run tutorial. Each step waits for the action it describes.
 pub const TUTORIAL: &[&str] = &[
@@ -445,6 +452,23 @@ impl Dot {
         self.tutorial_event(Event::Summoned);
     }
 
+    /// (Re)register the four global hotkeys from the config. A key another program owns
+    /// fails silently in Win32; that is logged and shown in the Settings tab.
+    unsafe fn register_hotkeys(&mut self) {
+        for (i, id) in [HOTKEY_SUMMON, HOTKEY_PASTE, HOTKEY_SHOT, HOTKEY_NOTE].into_iter().enumerate() {
+            let _ = UnregisterHotKey(Some(self.hwnd), id);
+            let text = self.cfg.hotkey(i);
+            let ok = match crate::hotkeys::parse(&text) {
+                Some(c) => RegisterHotKey(Some(self.hwnd), id, c.mods, c.vk).is_ok(),
+                None => false,
+            };
+            crate::hotkeys::set_taken(i, !ok);
+            if !ok {
+                crate::util::log(&format!("hotkey {text} ({}) could not be registered: taken by another program or invalid", crate::hotkeys::ACTIONS[i].0));
+            }
+        }
+    }
+
     /// Standard file dialog for an init.lua / init.vim; starts in %LOCALAPPDATA%\nvim.
     unsafe fn pick_nvim_config(&self) -> Option<String> {
         use windows::Win32::UI::Controls::Dialogs::*;
@@ -671,11 +695,15 @@ impl Dot {
         let chk = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(header.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_STRING, MENU_SEARCH, w!("Search\tCtrl+Shift+Space"));
-        let _ = AppendMenuW(menu, MF_STRING, MENU_PASTE, w!("Swallow clipboard\tCtrl+Shift+V"));
-        let _ = AppendMenuW(menu, MF_STRING, MENU_NEW_NOTE, w!("New note\tCtrl+Shift+N"));
-        let shot_label = crate::util::wide(if SHOT_KEY_ALT.load(std::sync::atomic::Ordering::Relaxed) { "Take screenshot\tCtrl+Alt+S" } else { "Take screenshot\tCtrl+Shift+S" });
-        let _ = AppendMenuW(menu, MF_STRING, MENU_SCREENSHOT, PCWSTR(shot_label.as_ptr()));
+        let labels: Vec<Vec<u16>> = [("Search", 0), ("Swallow clipboard", 1), ("Take screenshot", 2), ("New note", 3)]
+            .iter()
+            .map(|(l, i)| crate::util::wide(&format!("{l}\t{}", self.cfg.hotkey(*i))))
+            .collect();
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SEARCH, PCWSTR(labels[0].as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_PASTE, PCWSTR(labels[1].as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_NEW_NOTE, PCWSTR(labels[3].as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SCREENSHOT, PCWSTR(labels[2].as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, w!("Settings…"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_VAULT, w!("Open vault folder"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_TUTORIAL, w!("Show tutorial"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
@@ -709,6 +737,14 @@ impl Dot {
     }
 
     unsafe fn command(&mut self, id: usize) {
+        self.command_inner(id);
+        // The Settings tab mirrors these; let it redraw with the new values.
+        if matches!(id, MENU_THINK | MENU_CENTER_MSG | MENU_VIEW_FILES | MENU_VIEW_NOTES | MENU_START_LOGIN | MENU_NVIM_CONFIG | MENU_NVIM_BUILTIN) && !self.search.is_invalid() {
+            let _ = PostMessageW(Some(self.search), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    unsafe fn command_inner(&mut self, id: usize) {
         match id {
             MENU_SEARCH => self.open_search(),
             MENU_PASTE => self.paste_clipboard(),
@@ -743,6 +779,12 @@ impl Dot {
                 }
             }
             MENU_NEW_NOTE => self.new_note(),
+            MENU_SETTINGS => {
+                if !self.search_open() {
+                    self.open_search();
+                }
+                SearchWin::open_settings(self.search);
+            }
             MENU_NVIM_CONFIG => {
                 if let Some(path) = self.pick_nvim_config() {
                     self.cfg.nvim_init = path;
@@ -789,17 +831,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let target = DropTarget::new(hwnd, d.tx.clone());
             let _ = RegisterDragDrop(hwnd, &target);
             d.drop_target = Some(target);
-            // A hotkey another program already owns fails silently otherwise; say so in the
-            // log (and, for the screenshot key, offer the fallback the menu shows).
-            for (id, vk, name) in [(HOTKEY_SUMMON, VK_SPACE, "Ctrl+Shift+Space"), (HOTKEY_PASTE, VK_V, "Ctrl+Shift+V"), (HOTKEY_SHOT, VK_S, "Ctrl+Shift+S"), (HOTKEY_NOTE, VK_N, "Ctrl+Shift+N")] {
-                if RegisterHotKey(Some(hwnd), id, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, vk.0 as u32).is_err() {
-                    crate::util::log(&format!("hotkey {name} is taken by another program"));
-                    if id == HOTKEY_SHOT && RegisterHotKey(Some(hwnd), HOTKEY_SHOT, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, vk.0 as u32).is_ok() {
-                        crate::util::log("screenshot hotkey registered as Ctrl+Alt+S instead");
-                        SHOT_KEY_ALT.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-            }
+            d.register_hotkeys();
             SetTimer(Some(hwnd), TIMER_ANIM, IDLE_MS, None);
             let n = d.store.lock().unwrap().count();
             tray::add(hwnd, &format!("Blackhole — {n} items inside"));
@@ -886,6 +918,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_COMMAND => {
             if let Some(d) = state(hwnd) {
                 d.command(wparam.0 & 0xFFFF);
+            }
+            LRESULT(0)
+        }
+        WM_SET_HOTKEY => {
+            let combo = *Box::from_raw(lparam.0 as *mut String);
+            if let Some(d) = state(hwnd) {
+                let i = wparam.0.min(3);
+                while d.cfg.hotkeys.len() < 4 {
+                    let n = d.cfg.hotkeys.len();
+                    d.cfg.hotkeys.push(crate::hotkeys::ACTIONS[n].1.to_string());
+                }
+                d.cfg.hotkeys[i] = combo;
+                config::save(&d.cfg);
+                d.register_hotkeys();
+                if !d.search.is_invalid() {
+                    let _ = PostMessageW(Some(d.search), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
+                }
             }
             LRESULT(0)
         }

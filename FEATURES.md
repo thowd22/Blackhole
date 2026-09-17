@@ -70,7 +70,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 - Paste clipboard directly into Blackhole without dragging (ingest the current clipboard contents).
 - Open search from anywhere without moving the dot.
 - **Ctrl+Shift+N — summon to mouse and open a new note** (2026-09-16): the dot warps to the cursor, the panel opens on the Notes tab with an empty note ready to type into (see §5.8). — done 2026-09-16
-- **Screenshot shortcut** (2026-09-16): see §3.6; a global shortcut (default Ctrl+Shift+S, falling back to Ctrl+Alt+S when another program owns it — logged, and the menu label follows) and a panel button start a drag-region capture. — done 2026-09-16
+- **Screenshot shortcut** (2026-09-16): see §3.6; a global shortcut (default Ctrl+Shift+S, rebindable in Settings since the same day) and a panel button start a drag-region capture. — done 2026-09-16
 
 ### 2.5 System tray icon — P1
 - A tray icon (pixel black hole) so the app has a home when the dot is hidden, for start-at-login setup, and so Windows has somewhere to put it.
@@ -244,7 +244,8 @@ Small pixel-art speech bubbles anchored to the dot. One rendering component, two
 - Queue if several arrive; unread count shown as a tiny badge on the dot.
 - Honours "Center on new message" (§2.6).
 
-## 7. Settings — P1
+## 7. Settings — P1 — Settings tab shipped 2026-09-16
+- As built: a Settings tab in the panel (gear button / right-click → Settings…) with the four global hotkeys (click a row, press Ctrl/Alt/Win + key; registered immediately, "taken by another program" shown when Win32 refuses), think-before-answering, center on message, default view, start at sign-in, Neovim config. Hotkeys are stored as text in `config.json` (`hotkeys`), parsed by `src/hotkeys.rs`.
 - Dot size, opacity, shy mode.
 - Sprite/theme selection (a few colour variants of the black hole).
 - Global shortcuts (summon, paste, show/hide).

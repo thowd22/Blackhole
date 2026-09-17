@@ -95,6 +95,24 @@ enum Ctl {
 enum Tab {
     Files,
     Notes,
+    Settings,
+}
+
+/// One row of the Settings tab.
+#[derive(Clone)]
+struct Setting {
+    label: String,
+    value: String,
+    hint: String,
+    kind: SettingKind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SettingKind {
+    /// Click, then press the keys; index into `hotkeys::ACTIONS`.
+    Hotkey(usize),
+    /// Toggle / choice / action handled by the dot's menu command.
+    Command(usize),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -182,6 +200,10 @@ pub struct SearchWin {
     nvim_init: String,
     /// A Neovim message / command line currently shown in place of the status.
     nvim_status: Option<String>,
+    settings: Vec<Setting>,
+    /// Settings tab: waiting for the user to press the keys for this action.
+    capturing: Option<usize>,
+    gear_rc: RECT,
 }
 
 unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut SearchWin> {
@@ -257,6 +279,9 @@ impl SearchWin {
                 confirm_forget: None,
                 nvim_init: nvim_init.to_string(),
                 nvim_status: None,
+                settings: Vec::new(),
+                capturing: None,
+                gear_rc: RECT::default(),
             });
             let ptr = Box::into_raw(boxed);
             let hwnd = CreateWindowExW(
@@ -388,7 +413,10 @@ impl SearchWin {
             w = w.max(need).min(self.px(MAX_AUTO_W));
         }
         let cap = self.px(if self.user_h > 0 { self.user_h } else { DEFAULT_CAP_H });
-        let h = if self.tab == Tab::Notes || self.preview {
+        let h = if self.tab == Tab::Settings {
+            let rows = (self.settings.len() as i32).max(MIN_ROWS);
+            (self.fixed_h() + rows * self.row_height()).min(cap).max(self.min_h())
+        } else if self.tab == Tab::Notes || self.preview {
             // The editor wants room: the Notes tab always uses the full (dragged or default) height.
             cap.max(self.min_h())
         } else {
@@ -413,6 +441,8 @@ impl SearchWin {
         self.tab_rc[1] = RECT { left: pad + tw + u, top: pad, right: pad + 2 * tw + u, bottom: pad + th };
         self.new_rc = RECT { left: w - pad - th, top: pad, right: w - pad, bottom: pad + th };
         self.cam_rc = RECT { left: w - pad - 2 * th - u, top: pad, right: w - pad - th - u, bottom: pad + th };
+        self.gear_rc = RECT { left: w - pad - 3 * th - 2 * u, top: pad, right: w - pad - 2 * th - 2 * u, bottom: pad + th };
+        let _ = ShowWindow(self.edit, if self.tab == Tab::Settings { SW_HIDE } else { SW_SHOWNA });
         let edit_y = pad + self.tab_h();
         let _ = SetWindowPos(self.edit, None, pad, edit_y, w - 2 * pad, edit_h, SWP_NOZORDER | SWP_NOACTIVATE);
         let mut y = edit_y + edit_h + pad;
@@ -716,7 +746,7 @@ impl SearchWin {
         let old = SelectObject(hdc, self.font_small.into());
         for (i, label) in ["Files", "Notes"].iter().enumerate() {
             let r = self.tab_rc[i];
-            let active = (i == 1) == (self.tab == Tab::Notes);
+            let active = match self.tab { Tab::Files => i == 0, Tab::Notes => i == 1, Tab::Settings => false };
             FillRect(hdc, &r, if active { self.brush_edit } else { self.brush_bg });
             if active {
                 // Framed on three sides; the open bottom joins it to the content below.
@@ -731,6 +761,16 @@ impl SearchWin {
             let mut text = wide(label);
             let mut tr = r;
             DrawTextW(hdc, &mut text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        // Gear button: a framed square with a pixel cog (ring + four teeth), lit on the Settings tab.
+        let r = self.gear_rc;
+        FillRect(hdc, &r, if self.tab == Tab::Settings { self.brush_edit } else { self.brush_bg });
+        self.frame_rect(hdc, r);
+        let (cx, cy) = ((r.left + r.right) / 2 / u * u, (r.top + r.bottom) / 2 / u * u);
+        FillRect(hdc, &RECT { left: cx - 2 * u, top: cy - 2 * u, right: cx + 3 * u, bottom: cy + 3 * u }, self.brush_accent);
+        FillRect(hdc, &RECT { left: cx - u, top: cy - u, right: cx + 2 * u, bottom: cy + 2 * u }, if self.tab == Tab::Settings { self.brush_edit } else { self.brush_bg });
+        for (dx, dy) in [(0, -3), (0, 3), (-3, 0), (3, 0)] {
+            FillRect(hdc, &RECT { left: cx + dx * u, top: cy + dy * u, right: cx + (dx + 1) * u, bottom: cy + (dy + 1) * u }, self.brush_accent);
         }
         // Camera button: a framed square with a pixel camera (body, lens, viewfinder bump).
         let r = self.cam_rc;
@@ -782,6 +822,9 @@ impl SearchWin {
         }
         if PtInRect(&self.new_rc, pt).as_bool() {
             return self.new_note();
+        }
+        if PtInRect(&self.gear_rc, pt).as_bool() {
+            return self.set_tab(if self.tab == Tab::Settings { Tab::Files } else { Tab::Settings });
         }
         if PtInRect(&self.cam_rc, pt).as_bool() {
             // The overlay covers the screen; the panel gets out of the way first.
@@ -852,12 +895,87 @@ impl SearchWin {
         self.restored = false;
         let _ = SetWindowTextW(self.edit, w!(""));
         let _ = KillTimer(Some(self.hwnd), TIMER_DEBOUNCE);
+        self.capturing = None;
         if tab == Tab::Notes {
             self.ensure_nvim();
         }
         self.refresh();
         let _ = InvalidateRect(Some(self.hwnd), None, true);
-        let _ = SetFocus(Some(if tab == Tab::Notes { self.editor_hwnd() } else { self.edit }));
+        let _ = SetFocus(Some(match tab { Tab::Notes => self.editor_hwnd(), Tab::Settings => self.hwnd, Tab::Files => self.edit }));
+    }
+
+    /// Right-click → Settings…: the Settings tab.
+    pub unsafe fn open_settings(hwnd: HWND) {
+        if let Some(s) = state(hwnd) {
+            s.set_tab(Tab::Settings);
+        }
+    }
+
+    /// Rows of the Settings tab from the live config (re-read: the dot owns it).
+    fn build_settings(&mut self) {
+        let cfg = crate::config::load();
+        let mut rows = Vec::new();
+        for (i, (label, _)) in crate::hotkeys::ACTIONS.iter().enumerate() {
+            let value = if self.capturing == Some(i) { "press the keys…".to_string() } else { cfg.hotkey(i) };
+            let hint = if self.capturing == Some(i) {
+                "Ctrl/Alt/Win + a key (Esc cancels)".to_string()
+            } else if crate::hotkeys::taken(i) {
+                "taken by another program — click to choose another".to_string()
+            } else {
+                "click to change".to_string()
+            };
+            rows.push(Setting { label: label.to_string(), value, hint, kind: SettingKind::Hotkey(i) });
+        }
+        let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
+        rows.push(Setting { label: "Think before answering".into(), value: onoff(cfg.think), hint: "~3 s of reasoning; more correct answers".into(), kind: SettingKind::Command(crate::dot::MENU_THINK) });
+        rows.push(Setting { label: "Center on new message".into(), value: onoff(cfg.center_on_message), hint: "the dot warps to the screen centre for notifications".into(), kind: SettingKind::Command(crate::dot::MENU_CENTER_MSG_PUB) });
+        rows.push(Setting { label: "Default view".into(), value: if cfg.notes_default { "Notes".into() } else { "Files".into() }, hint: "which tab opens on click / summon".into(), kind: SettingKind::Command(if cfg.notes_default { crate::dot::MENU_VIEW_FILES } else { crate::dot::MENU_VIEW_NOTES }) });
+        rows.push(Setting { label: "Start at sign-in".into(), value: onoff(crate::startup::enabled()), hint: "run Blackhole when you log in".into(), kind: SettingKind::Command(crate::dot::MENU_START_LOGIN_PUB) });
+        let nv = if cfg.nvim_init.is_empty() { "built-in".to_string() } else { cfg.nvim_init.rsplit(['\\', '/']).next().unwrap_or("").to_string() };
+        rows.push(Setting { label: "Neovim config".into(), value: nv, hint: "click to load your init.lua / init.vim".into(), kind: SettingKind::Command(crate::dot::MENU_NVIM_CONFIG) });
+        if !cfg.nvim_init.is_empty() {
+            rows.push(Setting { label: "Use built-in Neovim config".into(), value: String::new(), hint: "forget the loaded config".into(), kind: SettingKind::Command(crate::dot::MENU_NVIM_BUILTIN) });
+        }
+        self.settings = rows;
+    }
+
+    /// Enter / click on a settings row.
+    unsafe fn activate_setting(&mut self) {
+        let i = SendMessageW(self.list, LB_GETCURSEL, None, None).0;
+        let Some(row) = usize::try_from(i).ok().and_then(|i| self.settings.get(i).cloned()) else { return };
+        match row.kind {
+            SettingKind::Hotkey(idx) => {
+                self.capturing = Some(idx);
+                let _ = SetFocus(Some(self.hwnd));
+                self.refresh();
+                let _ = SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(i as usize)), None);
+            }
+            SettingKind::Command(id) => {
+                let _ = PostMessageW(Some(self.dot), WM_COMMAND, WPARAM(id), LPARAM(0));
+            }
+        }
+    }
+
+    /// A key while rebinding: Esc cancels, anything with a modifier becomes the new hotkey.
+    unsafe fn capture_key(&mut self, vk: u32) {
+        let Some(idx) = self.capturing else { return };
+        if std::env::var_os("BLACKHOLE_NVIM_DEBUG").is_some() {
+            crate::util::log(&format!("settings: key {vk} while capturing {idx}: {:?}", crate::hotkeys::from_key(vk).map(crate::hotkeys::format)));
+        }
+        if vk == VK_ESCAPE.0 as u32 {
+            self.capturing = None;
+            self.refresh();
+            return;
+        }
+        if let Some(c) = crate::hotkeys::from_key(vk) {
+            let text = crate::hotkeys::format(c);
+            let boxed = Box::into_raw(Box::new(text));
+            if PostMessageW(Some(self.dot), crate::dot::WM_SET_HOTKEY, WPARAM(idx), LPARAM(boxed as isize)).is_err() {
+                drop(Box::from_raw(boxed));
+            }
+            self.capturing = None;
+            self.set_status("registering…");
+        }
     }
 
     /// Switch to Notes with a fresh empty note in the editor. The note is created in the
@@ -1349,7 +1467,9 @@ impl SearchWin {
         }
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW);
         let _ = SetForegroundWindow(hwnd);
-        if s.tab == Tab::Notes {
+        if s.tab == Tab::Settings {
+            let _ = SetFocus(Some(hwnd));
+        } else if s.tab == Tab::Notes {
             let _ = SetFocus(Some(s.editor_hwnd()));
         } else {
             let _ = SetFocus(Some(s.edit));
@@ -1410,6 +1530,19 @@ impl SearchWin {
 
     unsafe fn refresh(&mut self) {
         let raw = self.query_text();
+        if self.tab == Tab::Settings {
+            let sel = SendMessageW(self.list, LB_GETCURSEL, None, None).0;
+            self.build_settings();
+            SendMessageW(self.list, LB_RESETCONTENT, None, None);
+            for i in 0..self.settings.len() {
+                SendMessageW(self.list, LB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(i as isize)));
+            }
+            SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(sel.max(0) as usize)), None);
+            self.answer_shown = false;
+            self.set_status("Settings   ↵ or click changes a row · Esc back to Files");
+            self.fit(true);
+            return;
+        }
         if self.tab == Tab::Notes {
             // The search box filters notes by title/preview; "? question" asks about the open
             // note on Enter instead. The editor keeps its note.
@@ -1553,6 +1686,9 @@ impl SearchWin {
         if dis.itemID == u32::MAX {
             return;
         }
+        if self.tab == Tab::Settings {
+            return self.draw_setting(dis);
+        }
         let Some(hit) = self.hits.get(dis.itemID as usize) else { return };
         let selected = (dis.itemState.0 & ODS_SELECTED.0) != 0;
         let hdc = dis.hDC;
@@ -1618,6 +1754,39 @@ impl SearchWin {
                 lit = !lit;
             }
         }
+        SelectObject(hdc, old);
+    }
+}
+
+impl SearchWin {
+    /// A Settings row: label left, value right in the accent, hint below in the small font.
+    unsafe fn draw_setting(&self, dis: &DRAWITEMSTRUCT) {
+        let Some(row) = self.settings.get(dis.itemID as usize) else { return };
+        let selected = (dis.itemState.0 & ODS_SELECTED.0) != 0;
+        let hdc = dis.hDC;
+        FillRect(hdc, &dis.rcItem, if selected { self.brush_sel } else { self.brush_bg });
+        SetBkMode(hdc, TRANSPARENT);
+        let pad = self.px(6);
+        let mut r = dis.rcItem;
+        r.left += pad;
+        r.right -= pad;
+        r.top += self.px(4);
+        let old = SelectObject(hdc, self.font.into());
+        SetTextColor(hdc, FG);
+        let mut label = wide(&row.label);
+        let mut lr = r;
+        lr.right -= self.px(160);
+        DrawTextW(hdc, &mut label, &mut lr, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        SetTextColor(hdc, if row.value == "off" { FG_DIM } else { FG_KIND });
+        let mut value = wide(&row.value);
+        let mut vr = r;
+        DrawTextW(hdc, &mut value, &mut vr, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(hdc, self.font_small.into());
+        SetTextColor(hdc, FG_DIM);
+        let mut hint = wide(&row.hint);
+        let mut hr = r;
+        hr.top += self.px(18);
+        DrawTextW(hdc, &mut hint, &mut hr, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         SelectObject(hdc, old);
     }
 }
@@ -1706,6 +1875,15 @@ unsafe extern "system" fn scroll_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, 
         return SendMessageW(parent, msg, Some(wparam), Some(lparam));
     }
     let r = DefSubclassProc(hwnd, msg, wparam, lparam);
+    if id == SC_LIST && msg == WM_LBUTTONUP {
+        // Settings: a click activates the row even when it was already selected.
+        if let Some(s) = state(parent) {
+            if s.tab == Tab::Settings && s.capturing.is_none() {
+                s.activate_setting();
+                let _ = SetFocus(Some(parent));
+            }
+        }
+    }
     let moved = matches!(
         msg,
         WM_KEYDOWN | WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_VSCROLL | WM_SETTEXT | WM_SIZE
@@ -1835,6 +2013,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        crate::dot::WM_SETTINGS_CHANGED => {
+            if let Some(s) = state(hwnd) {
+                if s.tab == Tab::Settings {
+                    s.refresh();
+                    let _ = SetFocus(Some(s.hwnd));
+                }
+            }
+            LRESULT(0)
+        }
         WM_NVIM_STATUS => {
             let text = *Box::from_raw(lparam.0 as *mut String);
             if let Some(s) = state(hwnd) {
@@ -1868,11 +2055,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             SearchWin::hide(hwnd);
             LRESULT(0)
         }
+        WM_KEYDOWN | WM_SYSKEYDOWN if state(hwnd).map(|s| s.capturing.is_some()).unwrap_or(false) => {
+            if let Some(s) = state(hwnd) {
+                s.capture_key(wparam.0 as u32);
+            }
+            LRESULT(0)
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN if state(hwnd).map(|s| s.tab == Tab::Settings).unwrap_or(false) => {
+            if let Some(s) = state(hwnd) {
+                match VIRTUAL_KEY(wparam.0 as u16) {
+                    VK_ESCAPE => s.set_tab(Tab::Files),
+                    VK_RETURN | VK_SPACE => s.activate_setting(),
+                    VK_DOWN => { let n = s.settings.len() as isize; let i = (SendMessageW(s.list, LB_GETCURSEL, None, None).0 + 1).min(n - 1); SendMessageW(s.list, LB_SETCURSEL, Some(WPARAM(i.max(0) as usize)), None); }
+                    VK_UP => { let i = (SendMessageW(s.list, LB_GETCURSEL, None, None).0 - 1).max(0); SendMessageW(s.list, LB_SETCURSEL, Some(WPARAM(i as usize)), None); }
+                    VK_TAB if GetKeyState(VK_CONTROL.0 as i32) < 0 => s.set_tab(Tab::Files),
+                    _ => {}
+                }
+            }
+            LRESULT(0)
+        }
         WM_KEYDOWN => {
-            // Forwarded by the Neovim host for the panel's own shortcuts.
+            // Forwarded by the Neovim host for the panel's own shortcuts (or typed with the
+            // panel itself focused).
             if let Some(s) = state(hwnd) {
                 let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                 match VIRTUAL_KEY(wparam.0 as u16) {
+                    VK_ESCAPE => { s.flush_note(); SearchWin::hide(hwnd); }
                     VK_TAB if ctrl => s.set_tab(if s.tab == Tab::Notes { Tab::Files } else { Tab::Notes }),
                     VK_N if ctrl => { s.begin_new_note(); s.fit(true); }
                     VK_DELETE if ctrl => s.forget_selected(),
@@ -1898,9 +2106,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 } else if id == ID_EDITOR && code == EN_CHANGE && !s.loading {
                     s.note_changed();
                 } else if id == ID_LIST && code == LBN_DBLCLK {
-                    s.open_selected(false);
+                    if s.tab == Tab::Settings { s.activate_setting() } else { s.open_selected(false) }
                 } else if id == ID_LIST && code == LBN_SELCHANGE {
-                    if s.tab == Tab::Notes {
+                    if s.tab == Tab::Settings {
+                        let _ = SetFocus(Some(s.hwnd));
+                    } else if s.tab == Tab::Notes {
                         // Clicking a note opens it; the editor keeps the focus for typing.
                         if let Some(id) = s.selected().map(|h| h.id) {
                             s.open_note(id);
@@ -2005,7 +2215,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_SETFOCUS => {
             if let Some(s) = state(hwnd) {
-                let _ = SetFocus(Some(if s.tab == Tab::Notes { s.editor_hwnd() } else { s.edit }));
+                if s.tab != Tab::Settings {
+                    let _ = SetFocus(Some(if s.tab == Tab::Notes { s.editor_hwnd() } else { s.edit }));
+                }
             }
             LRESULT(0)
         }

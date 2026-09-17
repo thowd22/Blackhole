@@ -27,6 +27,9 @@ pub struct Config {
     /// The user's own Neovim init file, sourced after Blackhole's (empty = built-in only).
     #[serde(default)]
     pub nvim_init: String,
+    /// Global hotkeys in `hotkeys::ACTIONS` order ("Ctrl+Shift+Space", …); empty = default.
+    #[serde(default)]
+    pub hotkeys: Vec<String>,
     /// Search panel size the user dragged, in 96-DPI px (0 = default); see `search.rs`.
     #[serde(default)]
     pub panel_w: i32,
@@ -38,9 +41,16 @@ fn yes() -> bool {
     true
 }
 
+impl Config {
+    /// The binding for action `i`: the configured text or the built-in default.
+    pub fn hotkey(&self, i: usize) -> String {
+        self.hotkeys.get(i).filter(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| crate::hotkeys::ACTIONS[i].1.to_string())
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
-        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0, nvim_init: String::new() }
+        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0, nvim_init: String::new(), hotkeys: Vec::new() }
     }
 }
 
