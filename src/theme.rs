@@ -60,3 +60,63 @@ pub fn cr(rgb: u32) -> COLORREF {
 pub fn hex(rgb: u32) -> String {
     format!("#{rgb:06X}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cr_swaps_red_and_blue_for_gdi() {
+        // 0xRRGGBB → COLORREF 0x00BBGGRR.
+        assert_eq!(cr(0xFFA040).0, 0x0040A0FF);
+        assert_eq!(cr(0x000000).0, 0x00000000);
+        assert_eq!(cr(0xFFFFFF).0, 0x00FFFFFF);
+        assert_eq!(cr(0xFF0000).0, 0x000000FF);
+        assert_eq!(cr(0x0000FF).0, 0x00FF0000);
+    }
+
+    #[test]
+    fn cr_never_sets_the_high_byte() {
+        for t in THEMES.iter() {
+            for c in [t.bg, t.bg_edit, t.bg_sel, t.accent, t.fg, t.fg_dim, t.green, t.red, t.lilac, t.cursor_line] {
+                assert_eq!(cr(c).0 & 0xFF00_0000, 0, "{c:06X} leaked into the flags byte");
+            }
+        }
+    }
+
+    #[test]
+    fn index_of_is_case_and_space_insensitive() {
+        assert_eq!(index_of("Blackhole"), Some(0));
+        assert_eq!(index_of("  gruvbox  "), Some(2));
+        assert_eq!(index_of("TOKYO NIGHT"), Some(6));
+        assert_eq!(index_of("nope"), None);
+        assert_eq!(index_of(""), None);
+    }
+
+    #[test]
+    fn every_theme_name_round_trips_through_index_of() {
+        for (i, t) in THEMES.iter().enumerate() {
+            assert_eq!(index_of(t.name), Some(i), "{}", t.name);
+        }
+    }
+
+    #[test]
+    fn hex_is_six_upper_case_digits() {
+        assert_eq!(hex(0x180A14), "#180A14");
+        assert_eq!(hex(0x0), "#000000");
+    }
+
+    /// The only test that touches the global selection (they run in parallel).
+    #[test]
+    fn selection_cycles_and_unknown_names_fall_back() {
+        set_by_name("Nord");
+        assert_eq!(current().name, "Nord");
+        assert_eq!(next_name(), THEMES[4].name);
+        set_by_name("not a theme");
+        assert_eq!(current().name, THEMES[0].name);
+        set_by_name(THEMES[THEMES.len() - 1].name);
+        assert_eq!(next_name(), THEMES[0].name, "the last theme wraps to the first");
+        set_by_name("");
+        assert_eq!(current().name, THEMES[0].name);
+    }
+}

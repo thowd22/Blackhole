@@ -195,9 +195,16 @@ impl AskEngine {
     /// catalog for document questions. `Err` carries the user-facing reason there is
     /// nothing to answer from (absent gate, empty vault, embedding failure).
     fn gather(&self, llm: &mut Llm, question: &str) -> Result<Vec<(String, String)>, String> {
+        self.gather_from(&self.store, Some(llm), question)
+    }
+
+    /// The same retrieval over any vault, with the model optional: the self-check
+    /// runs it over a scratch vault, and without an LLM (no query rewrites, and the
+    /// excerpts are the answer) it still says what the pipeline would have seen.
+    fn gather_from(&self, store_arc: &Mutex<Store>, llm: Option<&mut Llm>, question: &str) -> Result<Vec<(String, String)>, String> {
         // Dense query = question + vault-anchored synonyms (ask mode only).
         let expansions: Vec<&str> = {
-            let store = self.store.lock().unwrap();
+            let store = store_arc.lock().unwrap();
             expand::expand(question, |t| store.contains_term(t))
         };
         if !expansions.is_empty() {
@@ -209,7 +216,10 @@ impl AskEngine {
         // Multi-query: the model rewrites the question into the words a file would
         // contain; their embeddings are folded into the query vector (question weighted
         // double) and their literal terms feed the boost and the absent gate.
-        let rewrites = if std::env::var("BLACKHOLE_REWRITE").map(|v| v == "1").unwrap_or(false) { llm.search_terms(question) } else { Vec::new() };
+        let rewrites = match llm {
+            Some(l) if std::env::var("BLACKHOLE_REWRITE").map(|v| v == "1").unwrap_or(false) => l.search_terms(question),
+            _ => Vec::new(),
+        };
         if !rewrites.is_empty() {
             crate::util::log(&format!("rewrites: {rewrites:?}"));
             let mut acc: Vec<f32> = qvec.iter().map(|v| v * 2.0).collect();
@@ -230,7 +240,7 @@ impl AskEngine {
             reranker.as_ref().and_then(|r| r.score(q, passages).ok())
         };
         let (absent, chunks) = {
-            let store = self.store.lock().unwrap();
+            let store = store_arc.lock().unwrap();
             let absent = store.absent(question, Some(&qvec)) && !store.any_term_present(&aux);
             let hook: Option<&dyn Fn(&str, &[String]) -> Option<Vec<f32>>> = if reranker.is_some() { Some(&rerank_fn) } else { None };
             (absent, if absent { Vec::new() } else { store.context_reranked(question, &aux, &qvec, CONTEXT_WORDS, hook) })
@@ -247,7 +257,7 @@ impl AskEngine {
         }
         let mut chunks = chunks;
         if Llm::is_document_question(question) {
-            let cat = self.store.lock().unwrap().catalog(30);
+            let cat = store_arc.lock().unwrap().catalog(30);
             if !cat.is_empty() {
                 chunks.push(("List of everything in the vault".to_string(), cat));
             }
@@ -343,4 +353,174 @@ impl AskEngine {
         };
         post(WM_ASK_DONE, status);
     }
+
+    /// Right-click → Self-check: run a set of questions through the real pipeline and
+    /// report how many answers contained what they should.
+    ///
+    /// `<data>\questions.json` (`[{"q": …, "expect": ["substring", …]}, …]`) is checked
+    /// against the user's own vault; without that file a built-in five-question set runs
+    /// against a scratch vault built for the occasion, so the answer is known and nothing
+    /// depends on what the user happens to have swallowed. A question passes when any of
+    /// its expected substrings occurs in the answer (they are alternative phrasings).
+    /// With no model installed the check still runs, scoring the retrieved excerpts
+    /// instead of an answer — that half of the pipeline is what it mostly tests anyway.
+    pub fn self_check(&self) -> SelfCheck {
+        let started = Instant::now();
+        let (questions, scratch, source) = match load_questions() {
+            Some(qs) => {
+                let n = qs.len();
+                (qs, None, format!("{n} questions from questions.json"))
+            }
+            None => match self.scratch_vault() {
+                Ok(store) => (sanity_questions(), Some(store), "built-in sanity set over a scratch vault".to_string()),
+                Err(e) => {
+                    return SelfCheck { total: 0, passed: 0, mode: "failed", source: format!("could not build a scratch vault: {e}"), report: None, secs: 0.0 }
+                }
+            },
+        };
+        let store: &Mutex<Store> = scratch.as_ref().unwrap_or(&self.store);
+        // One model load for the whole run (if there is one at all).
+        let mut guard = self.llm.lock().unwrap();
+        self.drop_if_stale(&mut guard);
+        if guard.is_none() {
+            if let Some(path) = self.path() {
+                match Llm::load(&path) {
+                    Ok(l) => *guard = Some(l),
+                    Err(e) => crate::util::log(&format!("self-check: no model ({e})")),
+                }
+            }
+        }
+        let mode = if guard.is_some() { "answers" } else { "retrieval only — no model" };
+        let mut passed = 0;
+        let mut report = format!("Blackhole self-check — {source}, {mode}\n\n");
+        for (question, expect) in &questions {
+            let text = match guard.as_mut() {
+                Some(llm) => match self.gather_from(store, Some(llm), question) {
+                    Ok(chunks) => {
+                        let sources: Vec<Source> = chunks.iter().map(|(t, x)| Source { title: t, text: x }).collect();
+                        llm.answer(question, &sources, &AtomicBool::new(false), |_| {}).unwrap_or_else(|e| format!("error: {e}"))
+                    }
+                    Err(msg) => msg,
+                },
+                None => match self.gather_from(store, None, question) {
+                    Ok(chunks) => chunks.iter().map(|(t, x)| format!("{t}: {x}")).collect::<Vec<_>>().join("\n"),
+                    Err(msg) => msg,
+                },
+            };
+            let hay = text.to_lowercase();
+            let ok = expect.iter().any(|e| hay.contains(&e.to_lowercase()));
+            if ok {
+                passed += 1;
+            }
+            let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(240).collect();
+            report.push_str(&format!("{} {question}\n   expected any of {expect:?}\n   got: {flat}\n\n", if ok { "PASS" } else { "FAIL" }));
+        }
+        drop(guard);
+        let secs = started.elapsed().as_secs_f32();
+        report.push_str(&format!("{passed}/{} in {secs:.1}s\n", questions.len()));
+        if let Some(scratch) = scratch {
+            drop(scratch); // close the scratch vault before deleting it
+            let _ = std::fs::remove_dir_all(crate::config::data_dir().join("selfcheck"));
+        }
+        let path = crate::config::data_dir().join("selfcheck.txt");
+        let written = std::fs::write(&path, &report).is_ok();
+        crate::util::log(&format!("self-check: {passed}/{} ({mode}) in {secs:.1}s", questions.len()));
+        SelfCheck { total: questions.len(), passed, mode, source, report: written.then_some(path), secs }
+    }
+
+    /// A small synthetic vault with known answers, embedded like anything else.
+    fn scratch_vault(&self) -> Result<Mutex<Store>, String> {
+        let dir = crate::config::data_dir().join("selfcheck");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let store = Mutex::new(Store::open(&dir.join("vault.db")).map_err(|e| e.to_string())?);
+        for (i, (title, body)) in SANITY_ITEMS.iter().enumerate() {
+            let id = store
+                .lock()
+                .unwrap()
+                .add(title, "text", None, body, &format!("selfcheck-{i}"), crate::util::now_secs())
+                .map_err(|e| e.to_string())?
+                .ok_or("duplicate in the scratch vault")?;
+            crate::ingest::embed_item(&store, &self.embedder, id, title, body);
+        }
+        Ok(store)
+    }
+}
+
+/// What a self-check run found; the dot turns this into a bubble.
+pub struct SelfCheck {
+    pub total: usize,
+    pub passed: usize,
+    /// "answers", "retrieval only — no model", or "failed".
+    pub mode: &'static str,
+    pub source: String,
+    pub report: Option<PathBuf>,
+    pub secs: f32,
+}
+
+impl SelfCheck {
+    /// One bubble's worth of result.
+    pub fn summary(&self) -> String {
+        if self.total == 0 {
+            return format!("Self-check couldn't run: {}", self.source);
+        }
+        let mut s = format!("Self-check: {}/{} — {} ({}, {:.1}s)", self.passed, self.total, self.source, self.mode, self.secs);
+        if self.report.is_some() {
+            s.push_str("\nDetails in selfcheck.txt, beside the vault.");
+        }
+        s
+    }
+}
+
+/// Five facts with unique names, so a wrong retrieval cannot accidentally pass.
+const SANITY_ITEMS: [(&str, &str); 5] = [
+    (
+        "Zephyr invoice",
+        "Invoice ZL-4471 from Zephyr Logistics. Customs entry for the vessel Tranquil Ace, voyage 0124A, arriving from the port of Kobe, Japan.\nTotal paid: 1240.00 USD by wire on 3 March.",
+    ),
+    (
+        "Quillfeather resume",
+        "Ada Quillfeather.\nPrincipal MLOps Engineer at Maxar Technologies, 2021 to present.\nStorage Solutions Architect at Raytheon, 2020 to 2021.\nSenior DevOps Engineer at Amazon Web Services, 2019 to 2020.",
+    ),
+    (
+        "Bellhaven handbook",
+        "Bellhaven Works staff handbook. Vacation policy: twenty-four days a year, carried over only with written approval.\nThe office manager approves expense claims under 500 USD.",
+    ),
+    (
+        "Marrowgate repo notes",
+        "The Marrowgate service is cloned over ssh from git@github.com:bellhaven/marrowgate.git and needs Rust 1.79 to build. Its config lives in /etc/marrowgate/config.toml.",
+    ),
+    (
+        "Thistledown recipe",
+        "Thistledown pie: four apples, 200 g butter, two spoons of cinnamon. Bake at 180 C for forty minutes. Serves six people.",
+    ),
+];
+
+/// The built-in questions, each with the words a right answer contains.
+fn sanity_questions() -> Vec<(String, Vec<String>)> {
+    [
+        ("How much was the Zephyr invoice for?", vec!["1240", "1,240"]),
+        ("Which vessel did the customs entry cover?", vec!["Tranquil Ace", "Tranquil"]),
+        ("Where did Ada Quillfeather work before Maxar?", vec!["Raytheon"]),
+        ("How many vacation days does the Bellhaven handbook give?", vec!["twenty-four", "24"]),
+        ("What temperature do I bake the Thistledown pie at?", vec!["180"]),
+    ]
+    .into_iter()
+    .map(|(q, e): (&str, Vec<&str>)| (q.to_string(), e.into_iter().map(str::to_string).collect()))
+    .collect()
+}
+
+/// `<data>\questions.json`: [{"q": "…", "expect": ["…"]}, …]. Absent or unreadable → None.
+fn load_questions() -> Option<Vec<(String, Vec<String>)>> {
+    #[derive(serde::Deserialize)]
+    struct Item {
+        q: String,
+        #[serde(default)]
+        expect: Vec<String>,
+    }
+    let path = crate::config::data_dir().join("questions.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let items: Vec<Item> = serde_json::from_str(&text).ok()?;
+    let out: Vec<(String, Vec<String>)> = items.into_iter().filter(|i| !i.q.trim().is_empty() && !i.expect.is_empty()).map(|i| (i.q, i.expect)).collect();
+    (!out.is_empty()).then_some(out)
 }

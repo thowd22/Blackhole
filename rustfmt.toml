@@ -1,0 +1,7 @@
+# This codebase puts one thought on one line — a Win32 call with its arguments, a
+# match arm, a struct literal of colours — and reads worse when rustfmt explodes
+# those into columns. 200 columns and "Max" heuristics keep that style: only 38 of
+# ~11 000 lines are longer than 200 characters, so `cargo fmt` stays a no-op review
+# aid rather than a rewrite of the tree.
+max_width = 200
+use_small_heuristics = "Max"

@@ -6,6 +6,15 @@
 //! Usage: askeval <model.onnx> <vault-snapshot.db> <questions.json> [more.json…]
 //! Prints one line per question and a summary (answer accuracy, retrieval
 //! Hit@1, first-token latency, tokens/s, peak working set, model size on disk).
+//!
+//! Two model-free modes, for tuning retrieval without the LLM:
+//!   askeval --rerank-bench [pairs]        cross-encoder cost per (query, passage)
+//!                                         pair on this CPU, and the k it affords.
+//!   askeval --absent <vault.db> <q>…      what the absent gate decides for each
+//!                                         question, and why (terms, presence, cosine).
+//!   askeval --scale <dir> <items.json> <questions.json>
+//!                                         build a synthetic vault (eval/gen_vault.py)
+//!                                         and measure live-search latency and Hit@1.
 
 #[path = "../config.rs"] mod config;
 #[path = "../util.rs"] mod util;
@@ -26,7 +35,7 @@
 #[path = "../hotkeys.rs"] mod hotkeys;
 #[path = "../theme.rs"] mod theme;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -55,8 +64,169 @@ fn working_set_mb() -> f64 {
     }
 }
 
+/// Per-pair cost of the cross-encoder on this machine, and the k a latency budget
+/// buys. Pairs are the real shape: a question against a ~100-word passage, which
+/// the tokenizer truncates to rerank::MAX_TOKENS anyway.
+fn rerank_bench(pairs: usize) -> anyhow::Result<()> {
+    runtime::init()?;
+    let t = Instant::now();
+    let reranker = rerank::Reranker::load()?;
+    let load_ms = t.elapsed().as_secs_f32() * 1000.0;
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let query = "which document says what I paid for the customs entry and to whom";
+    let filler: String = (0..90).map(|i| format!("word{} ", i % 37)).collect();
+    let passages: Vec<String> = (0..pairs)
+        .map(|i| format!("Entry {i}: IMPORTING CARRIER: TRANQUIL ACE 0124A. FROM PORT OF: KOBE, JAPAN. total paid 1240.00 to Zephyr Logistics. {filler}"))
+        .collect();
+    // Warm-up: the first run pays for arena allocation and shape compilation.
+    reranker.score(query, &passages[..pairs.min(3)])?;
+    let mut runs: Vec<f32> = Vec::new();
+    for _ in 0..5 {
+        let t = Instant::now();
+        reranker.score(query, &passages)?;
+        runs.push(t.elapsed().as_secs_f32() * 1000.0 / pairs as f32);
+    }
+    runs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = runs[runs.len() / 2];
+    let threads = cores.saturating_sub(2).clamp(2, 6);
+    println!("reranker loaded in {load_ms:.0} ms | {cores} cores, {threads} intra-op threads | {pairs} pairs/run");
+    println!("per pair: median {median:.1} ms (runs: {})", runs.iter().map(|r| format!("{r:.1}")).collect::<Vec<_>>().join(", "));
+    for budget in [200.0f32, 300.0, 400.0, 600.0] {
+        println!("  budget {budget:.0} ms -> k = {}", (budget / median).floor().max(1.0) as usize);
+    }
+    println!("k in this build: {} (rerank::candidates())", rerank::candidates());
+    Ok(())
+}
+
+/// What the absent gate decides for each question, and the evidence behind it.
+fn absent_report(db: &Path, questions: &[String]) -> anyhow::Result<()> {
+    runtime::init()?;
+    let embedder = embed::Embedder::load()?;
+    let store = store::Store::open(db)?;
+    println!("{:<44} {:>7} {:>9} {:>7}", "question", "terms", "best cos", "absent");
+    let (mut absent_n, mut n) = (0, 0);
+    for q in questions {
+        let qvec = embedder.embed(q)?;
+        let cos = store.best_cosine(&qvec);
+        let absent = store.absent(q, Some(&qvec));
+        n += 1;
+        if absent {
+            absent_n += 1;
+        }
+        let words = q.split_whitespace().count();
+        println!("{:<44} {words:>7} {cos:>9.3} {:>7}", q.chars().take(44).collect::<String>(), if absent { "YES" } else { "no" });
+    }
+    println!("{absent_n}/{n} refused");
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct ScaleItem {
+    title: String,
+    kind: String,
+    text: String,
+}
+#[derive(serde::Deserialize)]
+struct ScaleQ {
+    q: String,
+    expect_title: String,
+}
+
+/// Scale test: fill an isolated vault with the generator's items, then run the
+/// questions through the panel's own live-search path (embed the query, hybrid
+/// search) and report p50/p95 latency and Hit@1. No LLM is involved.
+fn scale(dir: &Path, items_json: &Path, questions_json: &Path) -> anyhow::Result<()> {
+    let items: Vec<ScaleItem> = serde_json::from_str(&std::fs::read_to_string(items_json)?)?;
+    let questions: Vec<ScaleQ> = serde_json::from_str(&std::fs::read_to_string(questions_json)?)?;
+    std::fs::create_dir_all(dir)?;
+    let db = dir.join("vault.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
+    }
+    runtime::init()?;
+    let embedder = Arc::new(embed::Embedder::load()?);
+    let store = Arc::new(Mutex::new(store::Store::open(&db)?));
+
+    let t = Instant::now();
+    let mut words = 0usize;
+    for (i, it) in items.iter().enumerate() {
+        words += it.text.split_whitespace().count();
+        let id = store
+            .lock()
+            .unwrap()
+            .add(&it.title, &it.kind, None, &it.text, &format!("scale-{i}"), util::now_secs() - (items.len() - i) as i64)?
+            .ok_or_else(|| anyhow::anyhow!("duplicate item {i}"))?;
+        ingest::embed_item(&store, &embedder, id, &it.title, &it.text);
+        if (i + 1) % 50 == 0 {
+            println!("  ingested {}/{} … {:.0}s", i + 1, items.len(), t.elapsed().as_secs_f32());
+        }
+    }
+    let ingest_s = t.elapsed().as_secs_f32();
+    let (n_items, n_chunks) = {
+        let s = store.lock().unwrap();
+        (s.count(), s.chunk_count())
+    };
+    println!("vault: {n_items} items, {n_chunks} chunks, {words} words — ingested + embedded in {ingest_s:.0}s ({} on {})", db.display(), embedder.backend);
+
+    // Live search: exactly what the panel does per keystroke (search.rs), 40 hits.
+    let mut embed_ms: Vec<f32> = Vec::new();
+    let mut search_ms: Vec<f32> = Vec::new();
+    let mut total_ms: Vec<f32> = Vec::new();
+    let mut hit1 = 0;
+    let mut hit3 = 0;
+    for q in &questions {
+        let t0 = Instant::now();
+        let qvec = embedder.embed(&q.q)?;
+        let t1 = Instant::now();
+        let hits = store.lock().unwrap().search(&q.q, Some(&qvec), 40);
+        let t2 = Instant::now();
+        embed_ms.push((t1 - t0).as_secs_f32() * 1000.0);
+        search_ms.push((t2 - t1).as_secs_f32() * 1000.0);
+        total_ms.push((t2 - t0).as_secs_f32() * 1000.0);
+        let top = hits.first().map(|h| h.title.clone()).unwrap_or_default();
+        if top == q.expect_title {
+            hit1 += 1;
+        }
+        if hits.iter().take(3).any(|h| h.title == q.expect_title) {
+            hit3 += 1;
+        } else {
+            println!("  miss: {:?} -> {:?} (wanted {:?})", q.q, top, q.expect_title);
+        }
+    }
+    let pct = |v: &mut Vec<f32>, p: f32| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[((v.len() as f32 - 1.0) * p).round() as usize]
+    };
+    println!(
+        "SCALE items={n_items} chunks={n_chunks} queries={} | embed p50 {:.1} ms p95 {:.1} ms | search p50 {:.1} ms p95 {:.1} ms | total p50 {:.1} ms p95 {:.1} ms | Hit@1 {hit1}/{} Hit@3 {hit3}/{}",
+        questions.len(),
+        pct(&mut embed_ms, 0.5),
+        pct(&mut embed_ms, 0.95),
+        pct(&mut search_ms, 0.5),
+        pct(&mut search_ms, 0.95),
+        pct(&mut total_ms, 0.5),
+        pct(&mut total_ms, 0.95),
+        questions.len(),
+        questions.len()
+    );
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|a| a == "--rerank-bench").unwrap_or(false) {
+        return rerank_bench(args.get(2).and_then(|n| n.parse().ok()).unwrap_or(10));
+    }
+    if args.get(1).map(|a| a == "--absent").unwrap_or(false) {
+        let db = args.get(2).map(PathBuf::from).ok_or_else(|| anyhow::anyhow!("usage: askeval --absent <vault.db> <question>…"))?;
+        return absent_report(&db, &args[3..]);
+    }
+    if args.get(1).map(|a| a == "--scale").unwrap_or(false) {
+        if args.len() < 5 {
+            anyhow::bail!("usage: askeval --scale <vault-dir> <items.json> <questions.json>");
+        }
+        return scale(Path::new(&args[2]), Path::new(&args[3]), Path::new(&args[4]));
+    }
     if args.len() < 4 {
         eprintln!("usage: askeval <model.onnx> <vault.db> <questions.json>...");
         std::process::exit(2);

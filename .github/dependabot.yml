@@ -1,0 +1,32 @@
+# Weekly dependency PRs. Cargo updates are grouped into one PR so a bump does not
+# cost five CI runs; the actions in the workflows are tracked separately.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: ["ci"]
+    commit-message:
+      prefix: "ci"
