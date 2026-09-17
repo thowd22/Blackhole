@@ -6,6 +6,7 @@
 //! after the text pass.
 
 use crate::util::wide;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE as WSIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
@@ -22,9 +23,12 @@ const TIMER_FADE: usize = 2;
 const FADE_STEPS: i32 = 4;
 const FADE_STEP_MS: u32 = 40;
 const MAX_TEXT_UNITS: i32 = 130; // wrap width in sprite units (× pixel scale)
+/// A bubble never grows past this many lines; longer texts (an agent dumping a
+/// report through MCP `notify`) get the panel's pixel scrollbar instead.
+const MAX_LINES: i32 = 12;
+/// Wheel notch = this many lines, like the panel.
+const WHEEL_LINES: i32 = 3;
 
-const BG: u32 = 0x00_18_0C_1E; // dark violet
-const BORDER: u32 = 0x00_FF_A0_40; // orange (0x00RRGGBB)
 const TEXT: COLORREF = COLORREF(0x00F0E8FF); // 0x00BBGGRR
 
 pub struct Bubble {
@@ -48,6 +52,56 @@ pub struct Bubble {
     /// Fade progress 0..=FADE_STEPS (FADE_STEPS = fully shown) and its direction.
     fade: i32,
     fading_out: bool,
+    /// Overflow: total wrapped lines, how many are shown, the first one shown, and
+    /// the height of one line. `lines > visible` is what puts the scrollbar up.
+    lines: i32,
+    visible_lines: i32,
+    scroll: i32,
+    line_h: i32,
+    /// The scrollbar, in window coordinates (empty when the text fits).
+    bar: RECT,
+    /// The dismiss timeout, restarted whenever the text is scrolled.
+    timeout: Option<u32>,
+}
+
+/// While a scrollable bubble is up, the wheel has to reach it even though the
+/// bubble never takes focus (it is a WS_EX_NOACTIVATE tool window). A low-level
+/// mouse hook, alive only for as long as such a bubble is on screen, hands wheel
+/// notches over the bubble to it and swallows them so nothing behind scrolls.
+static HOOK: AtomicIsize = AtomicIsize::new(0);
+static HOOK_WND: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn wheel_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 && wparam.0 as u32 == WM_MOUSEWHEEL {
+        let hwnd = HWND(HOOK_WND.load(Ordering::Relaxed) as *mut _);
+        if !hwnd.is_invalid() && IsWindowVisible(hwnd).as_bool() {
+            let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+            let mut r = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut r);
+            if PtInRect(&r, ms.pt).as_bool() {
+                let delta = (ms.mouseData >> 16) as i16 as i32;
+                let _ = PostMessageW(Some(hwnd), WM_MOUSEWHEEL, WPARAM((delta as u32 as usize) << 16), LPARAM(0));
+                return LRESULT(1);
+            }
+        }
+    }
+    CallNextHookEx(None, code, wparam, lparam)
+}
+
+/// Install the wheel hook while `on`, remove it otherwise. Idempotent.
+unsafe fn set_wheel_hook(hwnd: HWND, on: bool) {
+    let cur = HOOK.load(Ordering::Relaxed);
+    if on {
+        HOOK_WND.store(hwnd.0 as isize, Ordering::Relaxed);
+        if cur == 0 {
+            if let Ok(h) = SetWindowsHookExW(WH_MOUSE_LL, Some(wheel_hook), None, 0) {
+                HOOK.store(h.0 as isize, Ordering::Relaxed);
+            }
+        }
+    } else if cur != 0 {
+        let _ = UnhookWindowsHookEx(HHOOK(cur as *mut _));
+        HOOK.store(0, Ordering::Relaxed);
+    }
 }
 
 unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut Bubble> {
@@ -81,6 +135,12 @@ impl Bubble {
                 above: true,
                 fade: 0,
                 fading_out: false,
+                lines: 1,
+                visible_lines: 1,
+                scroll: 0,
+                line_h: 1,
+                bar: RECT::default(),
+                timeout: None,
             });
             let ptr = Box::into_raw(b);
             CreateWindowExW(
@@ -111,12 +171,39 @@ impl Bubble {
             b.fade = 0;
         }
         b.fading_out = false;
+        b.scroll = 0;
+        b.timeout = timeout_ms;
         b.render_and_place();
+        let scrollable = b.lines > b.visible_lines;
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetTimer(Some(hwnd), TIMER_FADE, FADE_STEP_MS, None);
         let _ = KillTimer(Some(hwnd), TIMER_DISMISS);
         if let Some(ms) = timeout_ms {
             SetTimer(Some(hwnd), TIMER_DISMISS, ms, None);
+        }
+        set_wheel_hook(hwnd, scrollable);
+    }
+
+    /// The dot's colours changed: redraw with the new border if one is on screen.
+    pub unsafe fn recolour(hwnd: HWND) {
+        if let Some(b) = state(hwnd) {
+            if IsWindowVisible(hwnd).as_bool() {
+                b.render_and_place();
+            }
+        }
+    }
+
+    /// Scroll a long text by `lines`, keeping it on screen a while longer.
+    unsafe fn scroll_by(&mut self, lines: i32) {
+        let max = (self.lines - self.visible_lines).max(0);
+        let next = (self.scroll + lines).clamp(0, max);
+        if next == self.scroll {
+            return;
+        }
+        self.scroll = next;
+        self.render_and_place();
+        if let Some(ms) = self.timeout {
+            SetTimer(Some(self.hwnd), TIMER_DISMISS, ms, None);
         }
     }
 
@@ -143,6 +230,7 @@ impl Bubble {
             self.fading_out = false;
             let _ = KillTimer(Some(self.hwnd), TIMER_FADE);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
+            set_wheel_hook(self.hwnd, false);
             return;
         }
         if self.fade >= FADE_STEPS {
@@ -191,23 +279,36 @@ impl Bubble {
         let u = self.unit;
         self.ensure_font();
 
-        // Measure the wrapped text.
+        // Measure the wrapped text, and one line of it, so an overflowing text can be
+        // capped at MAX_LINES and scrolled instead of growing off the screen.
         let screen = GetDC(None);
         let old_font = SelectObject(screen, self.font.into());
         let mut text = wide(&self.text);
         let mut measure = RECT { left: 0, top: 0, right: MAX_TEXT_UNITS * u, bottom: 0 };
         DrawTextW(screen, &mut text, &mut measure, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        let mut one = wide("Ag");
+        let mut line = RECT { left: 0, top: 0, right: MAX_TEXT_UNITS * u, bottom: 0 };
+        DrawTextW(screen, &mut one, &mut line, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(screen, old_font);
         let _ = ReleaseDC(None, screen);
         let text_w = measure.right - measure.left;
-        let text_h = measure.bottom - measure.top;
+        let full_h = measure.bottom - measure.top;
+        self.line_h = (line.bottom - line.top).max(1);
+        self.lines = ((full_h + self.line_h / 2) / self.line_h).max(1);
+        self.visible_lines = self.lines.min(MAX_LINES);
+        self.scroll = self.scroll.clamp(0, (self.lines - self.visible_lines).max(0));
+        let text_h = self.visible_lines * self.line_h;
+        let scrollable = self.lines > self.visible_lines;
 
         let pad = 4 * u;
         let border = u;
         let tail_units = 4;
         let tail_h = tail_units * u;
         let close_units = 5; // the × glyph is 5×5 units
-        let body_w = text_w + 2 * pad + 2 * border + (close_units + 2) * u;
+        // The scrollbar gets its own column on the far right, the same 3-unit bar the
+        // panel draws; the × moves left of it.
+        let bar_col = if scrollable { 4 * u } else { 0 };
+        let body_w = text_w + 2 * pad + 2 * border + (close_units + 2) * u + bar_col;
         let body_h = text_h + 2 * pad + 2 * border;
 
         // Bubble above the dot if there is room, else below (tail flips).
@@ -225,7 +326,10 @@ impl Bubble {
         // Tail x within the bubble, aimed at the dot centre.
         let tail_cx = (dot_cx - x).clamp(tail_units * u + border + u, body_w - tail_units * u - border - u);
 
-        // Paint.
+        // Paint. The dot's palette owns these: the border is its accent, the body a
+        // very dark version of its coolest ring colour.
+        let border_col = crate::sprite::accent();
+        let bg = crate::sprite::shade();
         let w = body_w;
         let h = total_h;
         let mut buf = vec![0u32; (w * h) as usize];
@@ -265,13 +369,42 @@ impl Bubble {
         for py in 0..h {
             for px in 0..w {
                 if in_body(px, py) {
-                    let c = if on_border(px, py) { BORDER } else { BG };
+                    let c = if on_border(px, py) { border_col } else { bg };
                     buf[(py * w + px) as usize] = 0xFF00_0000 | c;
                 }
             }
         }
+        // Pixel scrollbar in the right-hand column: same shape as the panel's
+        // (one-unit accent frame, accent thumb with a dark grip notch).
+        self.bar = RECT::default();
+        if scrollable {
+            let text_top = body_top + border + pad;
+            let bar = RECT { left: w - border - u - 3 * u, top: text_top, right: w - border - u, bottom: text_top + text_h };
+            let fill = |buf: &mut Vec<u32>, r: RECT, c: u32| {
+                for py in r.top.max(0)..r.bottom.min(h) {
+                    for px in r.left.max(0)..r.right.min(w) {
+                        buf[(py * w + px) as usize] = 0xFF00_0000 | c;
+                    }
+                }
+            };
+            fill(&mut buf, bar, bg);
+            fill(&mut buf, RECT { left: bar.left, top: bar.top, right: bar.right, bottom: bar.top + u }, border_col);
+            fill(&mut buf, RECT { left: bar.left, top: bar.bottom - u, right: bar.right, bottom: bar.bottom }, border_col);
+            fill(&mut buf, RECT { left: bar.left, top: bar.top, right: bar.left + u, bottom: bar.bottom }, border_col);
+            fill(&mut buf, RECT { left: bar.right - u, top: bar.top, right: bar.right, bottom: bar.bottom }, border_col);
+            let inner = bar.bottom - bar.top - 2 * u;
+            let th = (inner * self.visible_lines / self.lines).max(3 * u).min(inner);
+            let ty = bar.top + u + (inner - th) * self.scroll / (self.lines - self.visible_lines);
+            let thumb = RECT { left: bar.left + u, top: ty, right: bar.right - u, bottom: ty + th };
+            fill(&mut buf, thumb, border_col);
+            if th >= 5 * u {
+                let mid = (thumb.top + thumb.bottom) / 2 / u * u;
+                fill(&mut buf, RECT { left: thumb.left, top: mid, right: thumb.right, bottom: mid + u }, bg);
+            }
+            self.bar = bar;
+        }
         // × in the top-right corner, border-coloured: two 1-unit diagonals.
-        let cx0 = w - border - 2 * u - close_units * u;
+        let cx0 = w - border - 2 * u - close_units * u - bar_col;
         let cy0 = body_top + border + 2 * u;
         for i in 0..close_units {
             for (dx, dy) in [(i, i), (close_units - 1 - i, i)] {
@@ -279,7 +412,7 @@ impl Bubble {
                     for xx in 0..u {
                         let px = cx0 + dx * u + xx;
                         let py = cy0 + dy * u + yy;
-                        buf[(py * w + px) as usize] = 0xFF00_0000 | BORDER;
+                        buf[(py * w + px) as usize] = 0xFF00_0000 | border_col;
                     }
                 }
             }
@@ -314,13 +447,18 @@ impl Bubble {
         let old = SelectObject(self.dc, self.font.into());
         SetBkMode(self.dc, TRANSPARENT);
         SetTextColor(self.dc, TEXT);
+        let top = body_top + border + pad;
+        // Scrolling moves the whole text up by whole lines; the clip box keeps the
+        // lines above and below it out of the bubble.
         let mut tr = RECT {
             left: border + pad,
-            top: body_top + border + pad,
+            top: top - self.scroll * self.line_h,
             right: border + pad + text_w,
-            bottom: body_top + border + pad + text_h,
+            bottom: top + (self.lines - self.scroll) * self.line_h,
         };
+        IntersectClipRect(self.dc, border + pad, top, border + pad + text_w, top + text_h);
         DrawTextW(self.dc, &mut text, &mut tr, DT_WORDBREAK | DT_NOPREFIX);
+        SelectClipRgn(self.dc, None);
         SelectObject(self.dc, old);
         let _ = GdiFlush();
 
@@ -353,11 +491,26 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if let Some(b) = state(hwnd).filter(|b| !b.fading_out) {
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                // A click on the scrollbar pages the text rather than dismissing.
+                let bar = b.bar;
+                if bar.right > bar.left && x >= bar.left - 2 && x < bar.right + 2 && y >= bar.top && y < bar.bottom {
+                    let page = b.visible_lines.max(1);
+                    let mid = b.bar.top + (b.bar.bottom - b.bar.top) / 2;
+                    b.scroll_by(if y < mid { -page } else { page });
+                    return LRESULT(0);
+                }
                 let c = b.close;
                 let on_close = x >= c.left && x < c.right && y >= c.top && y < c.bottom;
                 let dot = b.dot;
                 Bubble::hide(hwnd);
                 let _ = PostMessageW(Some(dot), WM_BUBBLE_CLICKED, WPARAM(on_close as usize), LPARAM(0));
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            if let Some(b) = state(hwnd).filter(|b| !b.fading_out) {
+                let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+                b.scroll_by(-(delta / 120) * WHEEL_LINES);
             }
             LRESULT(0)
         }

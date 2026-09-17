@@ -76,6 +76,16 @@ pub const MENU_THEME_NEXT: usize = 21;
 /// Settings tab: toggle whether MCP clients may show bubbles.
 pub const MENU_AGENT_NOTIFY: usize = 22;
 pub const MENU_SCREENSHOT: usize = 14;
+/// Settings tab: cycle the idle opacity (100 / 85 / 70 / 50 %).
+pub const MENU_IDLE_OPACITY: usize = 23;
+/// Settings tab + context menu: shrink to a few pixels when left alone.
+pub const MENU_SHY: usize = 24;
+/// Settings tab + context menu: snap flush to screen edges while dragging.
+pub const MENU_SNAP: usize = 25;
+/// Settings tab + context menu: stop swallowing until resumed.
+pub const MENU_PAUSE: usize = 26;
+/// Settings tab: cycle the dot's own colours (see `sprite::PALETTES`).
+pub const MENU_DOT_PALETTE: usize = 27;
 pub const MENU_CENTER_MSG_PUB: usize = MENU_CENTER_MSG;
 pub const MENU_START_LOGIN_PUB: usize = MENU_START_LOGIN;
 /// From the Settings tab: wparam = action index, lparam = boxed String combo. The dot
@@ -84,6 +94,14 @@ pub const WM_SET_HOTKEY: u32 = 0x8018;
 pub const WM_SETTINGS_CHANGED: u32 = 0x8019;
 /// lparam: Box<Notice> — a bubble with an optional click action (MCP `notify`).
 pub const WM_NOTICE: u32 = 0x801A;
+/// Something tried to feed the dot while swallowing is paused (drop, screenshot).
+/// The dot answers with one "paused — click to resume" bubble.
+pub const WM_PAUSED: u32 = 0x8050;
+
+/// How long the dot must be left alone before shy mode shrinks it.
+const SHY_AFTER_MS: u64 = 3500;
+/// Snap distance to a work-area edge while dragging.
+const SNAP_PX: i32 = 16;
 
 /// What a clicked bubble does.
 pub enum NoticeAction {
@@ -91,6 +109,47 @@ pub enum NoticeAction {
     Search(String),
     /// Open this http(s) URL in the default browser.
     Url(String),
+    /// Start swallowing again (the bubble shown when something is refused while paused).
+    Resume,
+}
+
+/// A value easing from one number to another over `TRANSITION_MS`, read whenever a
+/// frame needs it. Same pace and curve as the mood transitions, so opacity, size
+/// and colour all move together.
+#[derive(Clone, Copy)]
+struct Ease {
+    from: f32,
+    to: f32,
+    since: Instant,
+}
+
+impl Ease {
+    fn new(v: f32) -> Self {
+        Ease { from: v, to: v, since: Instant::now() - Duration::from_millis(TRANSITION_MS as u64) }
+    }
+
+    /// Aim at a new value, starting from wherever the ease is right now.
+    fn set(&mut self, to: f32) {
+        if (to - self.to).abs() < 0.001 {
+            return;
+        }
+        self.from = self.value();
+        self.to = to;
+        self.since = Instant::now();
+    }
+
+    fn value(&self) -> f32 {
+        let t = self.since.elapsed().as_millis() as f32 / TRANSITION_MS as f32;
+        if t >= 1.0 {
+            return self.to;
+        }
+        let e = t * t * (3.0 - 2.0 * t);
+        self.from + (self.to - self.from) * e
+    }
+
+    fn done(&self) -> bool {
+        self.since.elapsed() >= Duration::from_millis(TRANSITION_MS as u64)
+    }
 }
 
 pub struct Notice {
@@ -153,6 +212,13 @@ pub struct Dot {
     specks: Vec<u32>,
     /// What was last pushed to the screen, so identical frames cost nothing.
     shown: (Vec<u32>, Vec<u32>),
+    /// The window alpha last pushed; the pixels can be identical while it changes.
+    shown_alpha: u8,
+    /// Window alpha (0..255) and sprite size, both eased.
+    opacity: Ease,
+    shrink: Ease,
+    /// When the dot was last hovered, used or had something to say.
+    idle_since: Instant,
     dib: HBITMAP,
     dib_bits: *mut u32,
     mem_dc: HDC,
@@ -191,6 +257,8 @@ impl Dot {
             let cfg = config::load();
             crate::llm_ort::set_thinking(cfg.think);
             crate::theme::set_by_name(&cfg.theme);
+            sprite::set_palette_by_name(&cfg.dot_palette);
+            config::set_paused(cfg.paused);
             let dot = Box::new(Dot {
                 hwnd: HWND::default(),
                 search: HWND::default(),
@@ -217,6 +285,10 @@ impl Dot {
                 pixels: vec![0; SIZE * SIZE],
                 specks: vec![0; SPECK_SIZE * SPECK_SIZE],
                 shown: (Vec::new(), Vec::new()),
+                shown_alpha: 255,
+                opacity: Ease::new(255.0),
+                shrink: Ease::new(1.0),
+                idle_since: Instant::now(),
                 dib: HBITMAP::default(),
                 dib_bits: std::ptr::null_mut(),
                 mem_dc: HDC::default(),
@@ -293,11 +365,15 @@ impl Dot {
         let anim = self.anim();
         sprite::render(&mut self.pixels, &anim);
         let specks = sprite::render_specks(&mut self.specks, &anim);
-        if self.shown.0 == self.pixels && self.shown.1 == self.specks {
+        // Idle opacity multiplies the sprite's own per-pixel alpha, so the dot fades
+        // as one picture; hovering eases it back to solid (see `tick`).
+        let alpha = self.opacity.value().round().clamp(0.0, 255.0) as u8;
+        if self.shown.0 == self.pixels && self.shown.1 == self.specks && self.shown_alpha == alpha {
             return; // nothing moved since the last frame
         }
         self.shown.0.clone_from(&self.pixels);
         self.shown.1.clone_from(&self.specks);
+        self.shown_alpha = alpha;
 
         // Nearest-neighbour upscale straight into the DIB; the speck overlay
         // is sampled at twice the sprite resolution and composited on top.
@@ -323,7 +399,7 @@ impl Dot {
         let pos = POINT { x: r.left, y: r.top };
         let size = WSIZE { cx: side, cy: side };
         let src = POINT { x: 0, y: 0 };
-        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 };
         let _ = UpdateLayeredWindow(self.hwnd, None, Some(&pos), Some(&size), Some(self.mem_dc), Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
     }
 
@@ -371,7 +447,58 @@ impl Dot {
             mood: self.mood,
             prev: self.prev_mood,
             blend: self.blend(),
+            shrink: self.shrink.value(),
+            paused: self.cfg.paused,
+            badge: self.messages.len().min(255) as u8,
         }
+    }
+
+    /// True while the dot should be solid and full size: the pointer is on it, it is
+    /// working, or it has something on screen (or waiting) to show.
+    unsafe fn engaged(&self) -> bool {
+        if self.dragging || self.pending > 0 || self.search_open() || !self.messages.is_empty() {
+            return true;
+        }
+        if !self.bubble.is_invalid() && IsWindowVisible(self.bubble).as_bool() {
+            return true;
+        }
+        if self.mood != Mood::Idle || self.blend() < 1.0 {
+            return true;
+        }
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let r = self.rect();
+        // The whole window counts as hover, not just the lit pixels: a shy dot is a
+        // few pixels across and has to grow back before it can be aimed at.
+        (r.left..r.right).contains(&pt.x) && (r.top..r.bottom).contains(&pt.y)
+    }
+
+    /// Shy size: small, but never under ~8 screen pixels across so it stays clickable.
+    unsafe fn shy_scale(&self) -> f32 {
+        let unit = self.unit().max(1) as f32;
+        (8.0 / (2.0 * 9.6 * unit)).clamp(0.28, 1.0)
+    }
+
+    /// Aim the opacity and size eases at where this frame wants them.
+    unsafe fn update_presence(&mut self) {
+        let engaged = self.engaged();
+        if engaged {
+            self.idle_since = Instant::now();
+        }
+        let idle_alpha = 255.0 * self.cfg.idle_opacity.clamp(20, 100) as f32 / 100.0;
+        let want_alpha = if engaged { 255.0 } else { idle_alpha };
+        let shy = self.cfg.shy && !engaged && self.idle_since.elapsed() >= Duration::from_millis(SHY_AFTER_MS);
+        let scale = self.shy_scale();
+        let want_shrink = if shy { scale } else { 1.0 };
+        // BLACKHOLE_DOT_DEBUG: the alpha and size are eased into UpdateLayeredWindow and
+        // cannot be read back from Win32, so the two targets are logged when they change.
+        if (want_alpha - self.opacity.to).abs() > 0.5 || (want_shrink - self.shrink.to).abs() > 0.001 {
+            if std::env::var_os("BLACKHOLE_DOT_DEBUG").is_some() {
+                crate::util::log(&format!("dot: alpha {} -> {want_alpha}, size {} -> {want_shrink} (engaged {engaged})", self.opacity.to, self.shrink.to));
+            }
+        }
+        self.opacity.set(want_alpha);
+        self.shrink.set(want_shrink);
     }
 
     unsafe fn tick(&mut self) {
@@ -389,9 +516,10 @@ impl Dot {
                 self.change_mood(base);
             }
         }
+        self.update_presence();
         self.redraw();
         // Tick fast only while specks or a transition are moving; idle stays cheap.
-        let busy = sprite::has_specks(self.mood) || self.blend() < 1.0;
+        let busy = sprite::has_specks(self.mood) || self.blend() < 1.0 || !self.opacity.done() || !self.shrink.done();
         let want = if busy { ACTIVE_MS } else { IDLE_MS };
         if want != self.tick_ms {
             self.tick_ms = want;
@@ -416,6 +544,68 @@ impl Dot {
         if !self.bubble.is_invalid() {
             Bubble::follow(self.bubble, self.rect());
         }
+    }
+
+    /// Dragging: within SNAP_PX of a work-area edge the dot goes flush to it. The axes
+    /// snap independently, so a corner catches both. Multi-monitor safe — the work area
+    /// is the one under the dot's own centre.
+    unsafe fn snapped(&self, x: i32, y: i32) -> (i32, i32) {
+        if !self.cfg.snap {
+            return (x, y);
+        }
+        let side = self.px_size();
+        let pt = POINT { x: x + side / 2, y: y + side / 2 };
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+            return (x, y);
+        }
+        let w = mi.rcWork;
+        // The sprite leaves a transparent margin around the glow; take it off so
+        // "flush" means the dot looks like it is touching the edge.
+        let m = side * 3 / 32;
+        let (mut nx, mut ny) = (x, y);
+        if (x + m - w.left).abs() <= SNAP_PX {
+            nx = w.left - m;
+        } else if (x + side - m - w.right).abs() <= SNAP_PX {
+            nx = w.right - side + m;
+        }
+        if (y + m - w.top).abs() <= SNAP_PX {
+            ny = w.top - m;
+        } else if (y + side - m - w.bottom).abs() <= SNAP_PX {
+            ny = w.bottom - side + m;
+        }
+        (nx, ny)
+    }
+
+    // ---- pausing ----
+
+    unsafe fn set_paused(&mut self, paused: bool) {
+        self.cfg.paused = paused;
+        config::set_paused(paused);
+        config::save(&self.cfg);
+        let n = self.store.lock().unwrap().count();
+        tray::set_tip(self.hwnd, &if paused { format!("Blackhole — paused · {n} items inside") } else { format!("Blackhole — {n} items inside") });
+        self.redraw();
+    }
+
+    /// True when the caller must not swallow; also says so once, in a bubble.
+    unsafe fn refuse_if_paused(&mut self) -> bool {
+        if !self.cfg.paused {
+            return false;
+        }
+        self.paused_bubble();
+        true
+    }
+
+    /// One "paused" bubble at a time; clicking it resumes.
+    unsafe fn paused_bubble(&mut self) {
+        self.set_mood(Mood::Upset, Some(500));
+        let queued = self.messages.iter().any(|m| matches!(m.action, Some(NoticeAction::Resume)));
+        let showing = matches!(self.pending_action, Some(NoticeAction::Resume)) && Bubble::is_visible(self.bubble);
+        if queued || showing {
+            return;
+        }
+        self.notice(Notice { text: "Paused — I'm not swallowing anything.\nClick here to resume.".into(), quiet: true, action: Some(NoticeAction::Resume), timeout_ms: Some(4000) });
     }
 
     unsafe fn set_hidden(&mut self, hidden: bool) {
@@ -551,6 +741,9 @@ impl Dot {
     }
 
     unsafe fn paste_clipboard(&mut self) {
+        if self.refuse_if_paused() {
+            return;
+        }
         match drop::read_clipboard(self.hwnd) {
             Some(input) => {
                 let _ = self.tx.send(input);
@@ -562,6 +755,9 @@ impl Dot {
 
     /// Drag-region capture; the overlay posts WM_DROP_SWALLOW and WM_NOTIFY back when done.
     unsafe fn screenshot(&mut self) {
+        if self.refuse_if_paused() {
+            return;
+        }
         let unit = self.unit();
         crate::screenshot::start(self.hwnd, self.tx.clone(), unit);
     }
@@ -625,6 +821,13 @@ impl Dot {
             NoticeAction::Url(u) => {
                 let w = wide(&u);
                 ShellExecuteW(None, w!("open"), PCWSTR(w.as_ptr()), None, None, SW_SHOWNORMAL);
+            }
+            NoticeAction::Resume => {
+                self.set_paused(false);
+                self.notify_quiet("Open again — drop something in.".into());
+                if !self.search.is_invalid() {
+                    let _ = PostMessageW(Some(self.search), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
+                }
             }
         }
     }
@@ -757,6 +960,9 @@ impl Dot {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING | chk(!self.cfg.hidden), MENU_SHOW_DOT, w!("Show dot"));
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.center_on_message), MENU_CENTER_MSG, w!("Center on new message"));
+        let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.paused), MENU_PAUSE, w!("Pause swallowing"));
+        let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.shy), MENU_SHY, w!("Shy mode"));
+        let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.snap), MENU_SNAP, w!("Snap to edges"));
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.think), MENU_THINK, w!("Think before answering"));
         let view = CreatePopupMenu().unwrap_or_default();
         let _ = AppendMenuW(view, MF_STRING | chk(!self.cfg.notes_default), MENU_VIEW_FILES, w!("Files"));
@@ -782,7 +988,7 @@ impl Dot {
     unsafe fn command(&mut self, id: usize) {
         self.command_inner(id);
         // The Settings tab mirrors these; let it redraw with the new values.
-        if matches!(id, MENU_THINK | MENU_CENTER_MSG | MENU_VIEW_FILES | MENU_VIEW_NOTES | MENU_START_LOGIN | MENU_NVIM_CONFIG | MENU_NVIM_BUILTIN | MENU_THEME_NEXT | MENU_AGENT_NOTIFY) && !self.search.is_invalid() {
+        if matches!(id, MENU_THINK | MENU_CENTER_MSG | MENU_VIEW_FILES | MENU_VIEW_NOTES | MENU_START_LOGIN | MENU_NVIM_CONFIG | MENU_NVIM_BUILTIN | MENU_THEME_NEXT | MENU_AGENT_NOTIFY | MENU_IDLE_OPACITY | MENU_SHY | MENU_SNAP | MENU_PAUSE | MENU_DOT_PALETTE) && !self.search.is_invalid() {
             let _ = PostMessageW(Some(self.search), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
         }
     }
@@ -822,6 +1028,40 @@ impl Dot {
                 }
             }
             MENU_NEW_NOTE => self.new_note(),
+            MENU_IDLE_OPACITY => {
+                self.cfg.idle_opacity = match self.cfg.idle_opacity {
+                    100 => 85,
+                    85 => 70,
+                    70 => 50,
+                    _ => 100,
+                };
+                config::save(&self.cfg);
+            }
+            MENU_SHY => {
+                self.cfg.shy = !self.cfg.shy;
+                self.idle_since = Instant::now();
+                config::save(&self.cfg);
+            }
+            MENU_SNAP => {
+                self.cfg.snap = !self.cfg.snap;
+                config::save(&self.cfg);
+            }
+            MENU_PAUSE => {
+                let paused = !self.cfg.paused;
+                self.set_paused(paused);
+            }
+            MENU_DOT_PALETTE => {
+                self.cfg.dot_palette = sprite::next_palette_name().to_string();
+                sprite::set_palette_by_name(&self.cfg.dot_palette);
+                config::save(&self.cfg);
+                // Every pixel changed colour; the frame cache has to be dropped.
+                self.shown = (Vec::new(), Vec::new());
+                self.redraw();
+                tray::set_icon(self.hwnd);
+                if !self.bubble.is_invalid() {
+                    Bubble::recolour(self.bubble);
+                }
+            }
             MENU_AGENT_NOTIFY => {
                 self.cfg.agent_notify = !self.cfg.agent_notify;
                 config::save(&self.cfg);
@@ -928,7 +1168,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let (dx, dy) = (pt.x - d.drag_origin.x, pt.y - d.drag_origin.y);
                     if d.drag_moved || dx.abs() > 3 || dy.abs() > 3 {
                         d.drag_moved = true;
-                        d.move_to(d.win_origin.x + dx, d.win_origin.y + dy);
+                        let (x, y) = d.snapped(d.win_origin.x + dx, d.win_origin.y + dy);
+                        d.move_to(x, y);
                     }
                 }
             }
@@ -1047,6 +1288,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         d.run_action(a);
                     }
                 }
+            }
+            LRESULT(0)
+        }
+        WM_PAUSED => {
+            if let Some(d) = state(hwnd) {
+                d.paused_bubble();
             }
             LRESULT(0)
         }

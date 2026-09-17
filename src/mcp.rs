@@ -352,6 +352,9 @@ fn windows_path(p: &str) -> String {
 }
 
 fn put(ctx: &Ctx, args: &Value) -> Result<String, String> {
+    if crate::config::load().paused {
+        return Err("Blackhole is paused and is not swallowing anything. Resume it from the dot's right-click menu (\"Pause swallowing\") or the Settings tab, then try again.".into());
+    }
     let title = args.get("title").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
     let tags = tags_arg(args);
     if args.get("kind").and_then(|v| v.as_str()) == Some("note") {

@@ -56,6 +56,14 @@ pub unsafe fn add(hwnd: HWND, tip: &str) {
     let _ = Shell_NotifyIconW(NIM_SETVERSION, &d);
 }
 
+/// The dot's colours changed: swap the tray icon for one in the new palette.
+pub unsafe fn set_icon(hwnd: HWND) {
+    let mut d = data(hwnd, "");
+    d.uFlags = NIF_ICON;
+    d.hIcon = make_icon();
+    let _ = Shell_NotifyIconW(NIM_MODIFY, &d);
+}
+
 pub unsafe fn set_tip(hwnd: HWND, tip: &str) {
     let mut d = data(hwnd, tip);
     d.uFlags = NIF_TIP | NIF_SHOWTIP;
