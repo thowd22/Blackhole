@@ -9,6 +9,8 @@
 //! Motion is driven by wall-clock milliseconds, not frame counts, so the dot
 //! looks the same whether the tick runs at the idle or the active rate.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 pub const SIZE: usize = 32;
 /// Side of the speck overlay: four sub-pixels per sprite pixel, so a speck can move
 /// at continuous positions with per-cell coverage (it slides rather than hops).
@@ -43,12 +45,19 @@ pub struct Anim {
     pub mood: Mood,
     pub prev: Mood,
     pub blend: f32,
+    /// Shy mode: 1 = full size, smaller values draw a miniature of the same dot
+    /// (core + ring only) around the same centre. The caller eases it.
+    pub shrink: f32,
+    /// Swallowing is paused: the ring goes grey and the halo/specks stop.
+    pub paused: bool,
+    /// Unread notifications waiting behind the visible bubble (0 = no badge).
+    pub badge: u8,
 }
 
 impl Anim {
     /// A motionless frame of one mood (tray icon).
     pub fn still(mood: Mood) -> Self {
-        Anim { t_ms: 0, phase: 0.0, mood, prev: mood, blend: 1.0 }
+        Anim { t_ms: 0, phase: 0.0, mood, prev: mood, blend: 1.0, shrink: 1.0, paused: false, badge: 0 }
     }
 
     fn in_transition(&self) -> bool {
@@ -64,16 +73,100 @@ impl Rgb {
         let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
         Rgb(m(self.0, o.0), m(self.1, o.1), m(self.2, o.2))
     }
+
+    /// Towards a dark grey of the same brightness — the paused look.
+    fn drained(self, t: f32) -> Rgb {
+        let l = (0.30 * self.0 as f32 + 0.59 * self.1 as f32 + 0.11 * self.2 as f32) * 0.62;
+        self.lerp(Rgb(l as u8, l as u8, l as u8), t)
+    }
 }
 
 const CORE: Rgb = Rgb(0, 0, 0);
-const RING: [Rgb; 5] = [
-    Rgb(38, 12, 64),    // deepest violet
-    Rgb(96, 28, 128),   // violet
-    Rgb(200, 72, 60),   // ember
-    Rgb(255, 160, 64),  // orange
-    Rgb(255, 236, 200), // hot white
+
+/// A colour variant of the dot itself. This is the app's face and is chosen with the
+/// "Dot colours" setting; the panel/editor theme (`crate::theme`) stays separate.
+pub struct Palette {
+    pub name: &'static str,
+    /// Accretion ring, coolest first; `[4]` is the hot inner edge the specks use too.
+    ring: [Rgb; 5],
+    /// Halo specks and the digesting stream.
+    glow: Rgb,
+    /// Ring while the panel is open — a different hue so "listening" still reads.
+    listening: [Rgb; 5],
+    glow_listening: Rgb,
+    /// 0xRRGGBB for anything that follows the dot: badge, bubble border, tray icon.
+    pub accent: u32,
+}
+
+pub const PALETTES: [Palette; 4] = [
+    Palette {
+        name: "Ember",
+        ring: [Rgb(38, 12, 64), Rgb(96, 28, 128), Rgb(200, 72, 60), Rgb(255, 160, 64), Rgb(255, 236, 200)],
+        glow: Rgb(120, 60, 180),
+        listening: [Rgb(8, 48, 36), Rgb(20, 104, 64), Rgb(60, 180, 96), Rgb(140, 240, 150), Rgb(230, 255, 230)],
+        glow_listening: Rgb(60, 160, 110),
+        accent: 0xFFA040,
+    },
+    Palette {
+        name: "Ice",
+        ring: [Rgb(8, 20, 52), Rgb(24, 64, 128), Rgb(52, 140, 198), Rgb(130, 214, 242), Rgb(232, 250, 255)],
+        glow: Rgb(60, 120, 200),
+        listening: [Rgb(56, 28, 4), Rgb(120, 64, 10), Rgb(200, 120, 24), Rgb(250, 190, 80), Rgb(255, 240, 210)],
+        glow_listening: Rgb(180, 120, 40),
+        accent: 0x7AD2F0,
+    },
+    Palette {
+        name: "Emerald",
+        ring: [Rgb(6, 40, 26), Rgb(16, 92, 52), Rgb(40, 164, 88), Rgb(126, 232, 140), Rgb(232, 255, 232)],
+        glow: Rgb(48, 150, 100),
+        listening: [Rgb(8, 30, 56), Rgb(20, 72, 124), Rgb(48, 140, 200), Rgb(130, 205, 240), Rgb(230, 248, 255)],
+        glow_listening: Rgb(60, 140, 200),
+        accent: 0x50D078,
+    },
+    Palette {
+        name: "Violet",
+        ring: [Rgb(26, 8, 56), Rgb(72, 26, 132), Rgb(134, 62, 206), Rgb(196, 142, 246), Rgb(244, 234, 255)],
+        glow: Rgb(130, 80, 210),
+        listening: [Rgb(8, 48, 36), Rgb(20, 104, 64), Rgb(60, 180, 96), Rgb(140, 240, 150), Rgb(230, 255, 230)],
+        glow_listening: Rgb(60, 160, 110),
+        accent: 0xB478F0,
+    },
 ];
+
+static PALETTE: AtomicUsize = AtomicUsize::new(0);
+
+pub fn palette() -> &'static Palette {
+    &PALETTES[PALETTE.load(Ordering::Relaxed).min(PALETTES.len() - 1)]
+}
+
+/// Select by name; unknown or empty names fall back to the first (Ember).
+pub fn set_palette_by_name(name: &str) {
+    let i = PALETTES.iter().position(|p| p.name.eq_ignore_ascii_case(name.trim())).unwrap_or(0);
+    PALETTE.store(i, Ordering::Relaxed);
+}
+
+pub fn palette_name() -> &'static str {
+    palette().name
+}
+
+/// The palette after the current one (the Settings row cycles).
+pub fn next_palette_name() -> &'static str {
+    PALETTES[(PALETTE.load(Ordering::Relaxed) + 1) % PALETTES.len()].name
+}
+
+/// 0xRRGGBB accent of the current dot palette (bubble border, unread badge).
+pub fn accent() -> u32 {
+    palette().accent
+}
+
+/// A very dark ground derived from the palette — the speech bubble body.
+pub fn shade() -> u32 {
+    let c = palette().ring[0];
+    let d = |v: u8| (v as u32) * 45 / 100;
+    d(c.0) << 16 | d(c.1) << 8 | d(c.2)
+}
+
+/// Upset is red whatever the palette: an error should never read as normal.
 const RING_UPSET: [Rgb; 5] = [
     Rgb(60, 6, 6),
     Rgb(120, 12, 12),
@@ -81,15 +174,6 @@ const RING_UPSET: [Rgb; 5] = [
     Rgb(255, 80, 60),
     Rgb(255, 210, 200),
 ];
-const RING_LISTENING: [Rgb; 5] = [
-    Rgb(8, 48, 36),     // deep teal
-    Rgb(20, 104, 64),   // green
-    Rgb(60, 180, 96),   // bright green
-    Rgb(140, 240, 150), // mint
-    Rgb(230, 255, 230), // hot white-green
-];
-const GLOW: Rgb = Rgb(120, 60, 180);
-const GLOW_LISTENING: Rgb = Rgb(60, 160, 110);
 
 /// Thinking breathes in and out over this period.
 const BREATH_MS: u32 = 2600;
@@ -142,17 +226,18 @@ pub fn has_specks(mood: Mood) -> bool {
 /// `halo` is 1 while the sparse halo specks are drawn (they make way for the
 /// particle stream while digesting).
 fn look(mood: Mood, t_ms: u32) -> (f32, f32, f32, [Rgb; 5], Rgb) {
+    let p = palette();
     match mood {
-        Mood::Idle => (0.0, 0.0, 1.0, RING, GLOW),
-        Mood::Hungry => (1.0, 0.6, 1.0, RING, GLOW),
-        Mood::Digesting => (0.0, 0.3, 0.0, RING, GLOW),
-        Mood::Satisfied => (0.5, 1.0, 1.0, RING, GLOW),
-        Mood::Upset => (0.0, 0.4, 1.0, RING_UPSET, GLOW),
-        Mood::Listening => (0.0, 0.5, 1.0, RING_LISTENING, GLOW_LISTENING),
+        Mood::Idle => (0.0, 0.0, 1.0, p.ring, p.glow),
+        Mood::Hungry => (1.0, 0.6, 1.0, p.ring, p.glow),
+        Mood::Digesting => (0.0, 0.3, 0.0, p.ring, p.glow),
+        Mood::Satisfied => (0.5, 1.0, 1.0, p.ring, p.glow),
+        Mood::Upset => (0.0, 0.4, 1.0, RING_UPSET, p.glow),
+        Mood::Listening => (0.0, 0.5, 1.0, p.listening, p.glow_listening),
         Mood::Thinking => {
             // Slow breathing: the ring swells and brightens together.
             let b = 0.5 - 0.5 * ((t_ms % BREATH_MS) as f32 / BREATH_MS as f32 * std::f32::consts::TAU).cos();
-            (0.9 * b, 0.15 + 0.4 * b, 1.0, RING, GLOW)
+            (0.9 * b, 0.15 + 0.4 * b, 1.0, p.ring, p.glow)
         }
     }
 }
@@ -176,17 +261,33 @@ pub fn render(buf: &mut [u32], anim: &Anim) {
     } else {
         look(anim.mood, anim.t_ms)
     };
+    // Paused: the ring drains to grey and the halo stops twinkling, so a glance
+    // at the dot says "not swallowing" without reading a menu.
+    let (bright, halo, palette, glow) = if anim.paused {
+        let mut p = palette;
+        for col in p.iter_mut() {
+            *col = col.drained(0.85);
+        }
+        (0.0, halo * 0.3, p, glow.drained(0.85))
+    } else {
+        (bright, halo, palette, glow)
+    };
     let phase = anim.phase;
     let c = (SIZE as f32 - 1.0) / 2.0;
     let core_r = 6.4;
     let ring_in = core_r;
     let ring_out = 9.6 + grow;
     let glow_out = 12.5 + grow;
+    // Shy mode: the same dot drawn smaller around the same centre. Sampling the
+    // shape at 1/shrink keeps it exactly the sprite, just a few pixels across;
+    // the sparse halo makes no sense that small, so it is dropped.
+    let shrink = anim.shrink.clamp(0.05, 1.0);
+    let halo = if shrink < 0.999 { 0.0 } else { halo };
 
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let dx = x as f32 - c;
-            let dy = y as f32 - c;
+            let dx = (x as f32 - c) / shrink;
+            let dy = (y as f32 - c) / shrink;
             // Squash vertically a touch so the ring reads as a tilted disc.
             let r = (dx * dx + (dy * 1.25) * (dy * 1.25)).sqrt();
             let ang = dy.atan2(dx);
@@ -213,6 +314,64 @@ pub fn render(buf: &mut [u32], anim: &Anim) {
                     let a = if twinkle { 200 } else { (110.0 * falloff) as u8 + 40 };
                     let col = if twinkle { palette[4] } else { glow };
                     put(buf, x, y, col, (a as f32 * halo) as u8);
+                }
+            }
+        }
+    }
+    badge(buf, anim.badge);
+}
+
+/// 3×5 pixel digits for the unread badge, one row per byte (bit 2 = leftmost).
+const GLYPHS: [[u8; 5]; 11] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111], // 0
+    [0b010, 0b110, 0b010, 0b010, 0b111], // 1
+    [0b111, 0b001, 0b111, 0b100, 0b111], // 2
+    [0b111, 0b001, 0b111, 0b001, 0b111], // 3
+    [0b101, 0b101, 0b111, 0b001, 0b001], // 4
+    [0b111, 0b100, 0b111, 0b001, 0b111], // 5
+    [0b111, 0b100, 0b111, 0b101, 0b111], // 6
+    [0b111, 0b001, 0b010, 0b010, 0b010], // 7
+    [0b111, 0b101, 0b111, 0b101, 0b111], // 8
+    [0b111, 0b101, 0b111, 0b001, 0b111], // 9
+    [0b000, 0b010, 0b111, 0b010, 0b000], // +
+];
+
+/// 0xRRGGBB → Rgb.
+fn rgb_of(v: u32) -> Rgb {
+    Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+/// Unread notifications waiting behind the bubble: a tiny accent-coloured count in
+/// the sprite's top-right corner, on a one-pixel dark outline so it reads over the
+/// halo. Drawn straight into the 32×32 buffer, so the compositing path is untouched.
+fn badge(buf: &mut [u32], n: u8) {
+    if n == 0 {
+        return;
+    }
+    let glyphs: Vec<usize> = if n <= 9 { vec![n as usize] } else { vec![9, 10] };
+    let w = glyphs.len() * 3 + (glyphs.len() - 1);
+    let x0 = SIZE - 1 - w;
+    let y0 = 1;
+    let accent = rgb_of(accent());
+    // Outline first: every neighbour of a lit pixel goes near-black.
+    for pass in 0..2 {
+        for (gi, g) in glyphs.iter().enumerate() {
+            for (ry, row) in GLYPHS[*g].iter().enumerate() {
+                for rx in 0..3usize {
+                    if row >> (2 - rx) & 1 == 0 {
+                        continue;
+                    }
+                    let (px, py) = (x0 + gi * 4 + rx, y0 + ry);
+                    if pass == 0 {
+                        for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                            let (ox, oy) = (px as i32 + dx, py as i32 + dy);
+                            if (0..SIZE as i32).contains(&ox) && (0..SIZE as i32).contains(&oy) {
+                                put(buf, ox as usize, oy as usize, Rgb(4, 2, 8), 235);
+                            }
+                        }
+                    } else {
+                        put(buf, px, py, accent, 255);
+                    }
                 }
             }
         }
@@ -272,7 +431,7 @@ fn specks_of(over: &mut [u32], mood: Mood, anim: &Anim, weight: f32) {
                 let e = t * t * (3.0 - 2.0 * t); // ease in and out
                 let a = anim.phase * 2.0 + k as f32 * 3.1;
                 let rr = ring_out + 2.5 - e * (ring_out + 2.5 - core_r + 1.0);
-                speck(over, c + rr * a.cos(), c + rr * a.sin() * 0.8, RING[4], 255, weight);
+                speck(over, c + rr * a.cos(), c + rr * a.sin() * 0.8, palette().ring[4], 255, weight);
             }
         }
         // While digesting, the halo specks stream into the core: each particle
@@ -293,7 +452,7 @@ fn specks_of(over: &mut [u32], mood: Mood, anim: &Anim, weight: f32) {
                 let e = t * t;
                 let rr = r0 - e * (r0 - core_r + 0.5);
                 let a = a0 + e * 1.6;
-                let col = if t < 0.35 { GLOW } else { RING[4] };
+                let col = if t < 0.35 { palette().glow } else { palette().ring[4] };
                 // Fade up over the first stretch so a spawn never pops.
                 let alpha = if t < 0.15 { 80 + (t / 0.15 * 175.0) as u8 } else { 255 };
                 speck(over, c + rr * a.cos(), c + rr * a.sin() * 0.8, col, alpha, weight);
@@ -303,7 +462,8 @@ fn specks_of(over: &mut [u32], mood: Mood, anim: &Anim, weight: f32) {
         Mood::Thinking => {
             let f = (t_ms % ORBIT_MS) as f32 / ORBIT_MS as f32;
             let rr = ring_out + 1.8;
-            for (i, (col, a)) in [(RING[4], 255u8), (RING[3], 150), (GLOW, 90)].into_iter().enumerate() {
+            let p = palette();
+            for (i, (col, a)) in [(p.ring[4], 255u8), (p.ring[3], 150), (p.glow, 90)].into_iter().enumerate() {
                 let ang = (f - i as f32 * 0.035) * std::f32::consts::TAU;
                 speck(over, c + rr * ang.cos(), c + rr * ang.sin() * 0.8, col, a, weight);
             }
@@ -318,6 +478,11 @@ fn specks_of(over: &mut [u32], mood: Mood, anim: &Anim, weight: f32) {
 pub fn render_specks(over: &mut [u32], anim: &Anim) -> bool {
     debug_assert!(over.len() >= SPECK_SIZE * SPECK_SIZE);
     over.iter_mut().for_each(|p| *p = 0);
+    // Nothing is being swallowed while paused, and the specks orbit at the full
+    // radius, which makes no sense around a shy miniature.
+    if anim.paused || anim.shrink < 0.999 {
+        return false;
+    }
     let mut drawn = false;
     if anim.in_transition() && has_specks(anim.prev) {
         specks_of(over, anim.prev, anim, 1.0 - anim.blend);

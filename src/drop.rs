@@ -182,6 +182,13 @@ impl IDropTarget_Impl for DropTarget_Impl {
     ) -> windows::core::Result<()> {
         let ok = pdataobj.as_ref().map(acceptable).unwrap_or(false);
         unsafe {
+            // Paused: nothing is accepted, and the dot says so the moment something
+            // is dragged over it rather than after the drop.
+            if crate::config::paused() {
+                *effect = DROPEFFECT_NONE;
+                let _ = PostMessageW(Some(self.hwnd), crate::dot::WM_PAUSED, WPARAM(0), LPARAM(0));
+                return Ok(());
+            }
             *effect = if ok { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
             if ok {
                 let _ = PostMessageW(Some(self.hwnd), WM_DROP_ENTER, WPARAM(0), LPARAM(0));
@@ -191,7 +198,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
     }
 
     fn DragOver(&self, _keys: MODIFIERKEYS_FLAGS, _pt: &POINTL, effect: *mut DROPEFFECT) -> windows::core::Result<()> {
-        unsafe { *effect = DROPEFFECT_COPY };
+        unsafe { *effect = if crate::config::paused() { DROPEFFECT_NONE } else { DROPEFFECT_COPY } };
         Ok(())
     }
 
@@ -209,6 +216,13 @@ impl IDropTarget_Impl for DropTarget_Impl {
         _pt: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        unsafe {
+            if crate::config::paused() {
+                *effect = DROPEFFECT_NONE;
+                let _ = PostMessageW(Some(self.hwnd), crate::dot::WM_PAUSED, WPARAM(0), LPARAM(0));
+                return Ok(());
+            }
+        }
         let input = pdataobj.as_ref().and_then(read_data_object);
         unsafe {
             match input {

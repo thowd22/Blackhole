@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
@@ -41,10 +42,30 @@ pub struct Config {
     pub panel_w: i32,
     #[serde(default)]
     pub panel_h: i32,
+    /// How opaque the dot is when nothing is happening, in percent (100 = solid).
+    /// It eases back to 100 on hover, a bubble or the panel.
+    #[serde(default = "hundred")]
+    pub idle_opacity: i32,
+    /// Shrink to a few pixels after a few seconds of being left alone.
+    #[serde(default)]
+    pub shy: bool,
+    /// Snap flush to the work-area edges and corners while dragging.
+    #[serde(default = "yes")]
+    pub snap: bool,
+    /// Swallowing is paused: drops, paste, screenshots and MCP `put` are refused.
+    #[serde(default)]
+    pub paused: bool,
+    /// Dot sprite colours (see `sprite::PALETTES`); empty = Ember.
+    #[serde(default)]
+    pub dot_palette: String,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn hundred() -> i32 {
+    100
 }
 
 impl Config {
@@ -56,8 +77,20 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0, nvim_init: String::new(), hotkeys: Vec::new(), theme: String::new(), agent_notify: true }
+        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0, nvim_init: String::new(), hotkeys: Vec::new(), theme: String::new(), agent_notify: true, idle_opacity: 100, shy: false, snap: true, paused: false, dot_palette: String::new() }
     }
+}
+
+/// Mirror of `Config::paused` for the paths that are asked many times a second
+/// (drag-over, drop, screenshot); the dot keeps it in step with the file.
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_paused(v: bool) {
+    PAUSED.store(v, Ordering::Relaxed);
+}
+
+pub fn paused() -> bool {
+    PAUSED.load(Ordering::Relaxed)
 }
 
 /// `%LOCALAPPDATA%\Blackhole`, created on demand.
