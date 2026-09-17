@@ -16,6 +16,7 @@
 #[path = "../store.rs"] mod store;
 #[path = "../expand.rs"] mod expand;
 #[path = "../rerank.rs"] mod rerank;
+#[path = "../models.rs"] mod models;
 #[path = "../llm_ort.rs"] mod llm_ort;
 #[path = "../ingest.rs"] mod ingest;
 #[path = "../pdf_layout.rs"] mod pdf_layout;

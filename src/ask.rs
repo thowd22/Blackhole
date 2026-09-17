@@ -23,7 +23,10 @@ pub const WM_ASK_DONE: u32 = 0x8013;
 const CONTEXT_WORDS: usize = 1400;
 
 pub struct AskEngine {
-    model_path: Option<PathBuf>,
+    /// The graph ask mode loads; the Settings tab can point it at another model.
+    model_path: Mutex<Option<PathBuf>>,
+    /// The loaded model is no longer the configured one: drop it before the next answer.
+    stale: AtomicBool,
     llm: Mutex<Option<Llm>>,
     /// Cross-encoder for the ask path; loaded with the LLM, dropped with it.
     reranker: Mutex<Option<Reranker>>,
@@ -40,7 +43,33 @@ pub struct Job {
 
 impl AskEngine {
     pub fn new(model_path: Option<PathBuf>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder>) -> AskEngine {
-        AskEngine { model_path, llm: Mutex::new(None), reranker: Mutex::new(None), warming: AtomicBool::new(false), store, embedder }
+        AskEngine { model_path: Mutex::new(model_path), stale: AtomicBool::new(false), llm: Mutex::new(None), reranker: Mutex::new(None), warming: AtomicBool::new(false), store, embedder }
+    }
+
+    /// Switch models (Settings → "Ask model"). The loaded one is dropped now if it is
+    /// idle, otherwise just before the next answer, and the new one loads on demand.
+    pub fn set_model(&self, path: Option<PathBuf>) {
+        let mut guard = self.model_path.lock().unwrap();
+        if *guard == path {
+            return;
+        }
+        *guard = path;
+        drop(guard);
+        self.stale.store(true, Ordering::Release);
+        if self.unload() {
+            self.stale.store(false, Ordering::Release);
+        }
+    }
+
+    fn path(&self) -> Option<PathBuf> {
+        self.model_path.lock().unwrap().clone()
+    }
+
+    /// Called with the model lock held: throw away a model the user switched away from.
+    fn drop_if_stale(&self, guard: &mut Option<Llm>) {
+        if self.stale.swap(false, Ordering::AcqRel) {
+            guard.take();
+        }
     }
 
     /// Drop the loaded model to free its memory. Returns false if a generation
@@ -79,7 +108,7 @@ impl AskEngine {
     /// Start loading the model in the background (called when the search panel
     /// opens) so the first question doesn't pay the load time.
     pub fn preload(self: &Arc<Self>) {
-        let Some(path) = self.model_path.clone() else { return };
+        let Some(path) = self.path() else { return };
         if self.warming.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -87,6 +116,7 @@ impl AskEngine {
         std::thread::spawn(move || {
             engine.ensure_reranker();
             let mut guard = engine.llm.lock().unwrap();
+            engine.drop_if_stale(&mut guard);
             if guard.is_none() {
                 let t = Instant::now();
                 match Llm::load(&path) {
@@ -127,7 +157,7 @@ impl AskEngine {
             let boxed = Box::into_raw(Box::new(text));
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(id as usize), LPARAM(boxed as isize));
         };
-        let Some(path) = &self.model_path else {
+        let Some(path) = self.path() else {
             post(WM_ASK_DONE, "No model found next to blackhole.exe.".into());
             return;
         };
@@ -135,9 +165,10 @@ impl AskEngine {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
+        self.drop_if_stale(&mut guard);
         if guard.is_none() {
             post(WM_ASK_STATUS, "loading model…".into());
-            match Llm::load(path) {
+            match Llm::load(&path) {
                 Ok(l) => *guard = Some(l),
                 Err(e) => {
                     post(WM_ASK_DONE, format!("Could not load model: {e}"));
@@ -233,10 +264,11 @@ impl AskEngine {
     /// Ask mode as a plain call (the MCP `ask` tool): retrieval + generation on the
     /// caller's thread. Returns the answer and the titles it drew on.
     pub fn answer_blocking(&self, question: &str) -> Result<(String, Vec<String>), String> {
-        let path = self.model_path.as_ref().ok_or("No model found next to blackhole.exe; ask mode is off (search still works).")?;
+        let path = self.path().ok_or("No model found next to blackhole.exe; ask mode is off (search still works).")?;
         let mut guard = self.llm.lock().unwrap();
+        self.drop_if_stale(&mut guard);
         if guard.is_none() {
-            *guard = Some(Llm::load(path).map_err(|e| format!("Could not load model: {e}"))?);
+            *guard = Some(Llm::load(&path).map_err(|e| format!("Could not load model: {e}"))?);
         }
         let llm = guard.as_mut().unwrap();
         let chunks = self.gather(llm, question)?;
@@ -257,8 +289,8 @@ impl AskEngine {
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(id as usize), LPARAM(boxed as isize));
         };
 
-        let Some(path) = &self.model_path else {
-            post(WM_ASK_DONE, "No model found. Put a Qwen2.5-Instruct ONNX file (e.g. qwen2.5-1.5b-instruct-q4.onnx) next to blackhole.exe.".into());
+        let Some(path) = self.path() else {
+            post(WM_ASK_DONE, "No model found. Settings \u{2192} \"Download the default model\" fetches one, or put an instruct ONNX folder next to blackhole.exe.".into());
             return;
         };
 
@@ -267,9 +299,10 @@ impl AskEngine {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
+        self.drop_if_stale(&mut guard);
         if guard.is_none() {
             post(WM_ASK_STATUS, "loading model…".into());
-            match Llm::load(path) {
+            match Llm::load(&path) {
                 Ok(l) => *guard = Some(l),
                 Err(e) => {
                     post(WM_ASK_DONE, format!("Could not load model: {e}"));

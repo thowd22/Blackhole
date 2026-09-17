@@ -66,10 +66,17 @@ fn sha_hex(bytes: &[u8]) -> String {
 
 /// Keep our own copy of an image/PDF under `<data dir>\files\<hash>.<ext>` unless the
 /// file already lives in the data dir (screenshots, pasted images). Returns the copy's path.
+///
+/// The "Keep copies of files" setting decides: `copy` (always, the default),
+/// `copy-small` (up to `config::COPY_SMALL_MAX`) or `reference`, where nothing is
+/// copied and the item can only be opened while the original file is still there.
 fn stored_copy(path: &Path, bytes: &[u8], hash: &str, ext: &str) -> Option<String> {
     let data = crate::config::data_dir();
     if path.starts_with(&data) {
         return Some(path.display().to_string());
+    }
+    if !crate::config::store_policy().copies(bytes.len() as u64) {
+        return None;
     }
     let dir = data.join("files");
     std::fs::create_dir_all(&dir).ok()?;

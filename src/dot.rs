@@ -76,6 +76,14 @@ pub const MENU_THEME_NEXT: usize = 21;
 /// Settings tab: toggle whether MCP clients may show bubbles.
 pub const MENU_AGENT_NOTIFY: usize = 22;
 pub const MENU_SCREENSHOT: usize = 14;
+/// Settings tab: pick a new vault folder, move the vault there and restart.
+pub const MENU_VAULT_FOLDER: usize = 40;
+/// Settings tab: cycle copy / copy-small / reference for dropped files.
+pub const MENU_STORE_POLICY: usize = 41;
+/// Settings tab: switch to the next ask model found on disk.
+pub const MENU_MODEL_NEXT: usize = 42;
+/// Settings tab: start (or cancel) the default model download.
+pub const MENU_MODEL_DOWNLOAD: usize = 43;
 pub const MENU_CENTER_MSG_PUB: usize = MENU_CENTER_MSG;
 pub const MENU_START_LOGIN_PUB: usize = MENU_START_LOGIN;
 /// From the Settings tab: wparam = action index, lparam = boxed String combo. The dot
@@ -520,6 +528,76 @@ impl Dot {
         (!path.is_empty()).then_some(path)
     }
 
+    /// Folder picker for the vault (the shell's browse dialog, new-style with an edit box).
+    unsafe fn pick_folder(&self, title: &str) -> Option<String> {
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows::Win32::UI::Shell::{SHBrowseForFolderW, SHGetPathFromIDListW, BROWSEINFOW, BIF_EDITBOX, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS};
+        let t = wide(title);
+        let bi = BROWSEINFOW {
+            hwndOwner: self.hwnd,
+            lpszTitle: PCWSTR(t.as_ptr()),
+            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX,
+            ..Default::default()
+        };
+        let pidl = SHBrowseForFolderW(&bi);
+        if pidl.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 260];
+        let ok = SHGetPathFromIDListW(pidl, &mut buf).as_bool();
+        CoTaskMemFree(Some(pidl as *const _));
+        if !ok {
+            return None;
+        }
+        let path = crate::util::from_wide(&buf);
+        (!path.is_empty()).then_some(path)
+    }
+
+    /// Settings → "Vault folder": pick a folder, confirm, then hand the move to a fresh
+    /// copy of ourselves (`--move-vault`) and quit, because vault.db is open right here.
+    unsafe fn move_vault(&mut self) {
+        let from = config::data_dir();
+        let Some(picked) = self.pick_folder("Where should the vault live?") else { return };
+        let mut to = std::path::PathBuf::from(&picked);
+        // Picking a plain folder like D:\Data would strew vault.db over it: keep our
+        // own folder inside unless the user picked one that is already a vault.
+        if to != from && !to.join("vault.db").exists() && to.file_name().map(|n| n != "Blackhole").unwrap_or(true) {
+            to = to.join("Blackhole");
+        }
+        if to == from {
+            return;
+        }
+        let question = wide(&format!(
+            "Move the vault from\n{}\n\nto\n{}\n\nBlackhole restarts to finish the move.",
+            from.display(),
+            to.display()
+        ));
+        if MessageBoxW(Some(self.hwnd), PCWSTR(question.as_ptr()), w!("Blackhole"), MB_OKCANCEL | MB_ICONQUESTION) != IDOK {
+            return;
+        }
+        self.cfg.vault_dir = if to == config::base_dir() { String::new() } else { to.display().to_string() };
+        config::save(&self.cfg);
+        let Ok(exe) = std::env::current_exe() else { return };
+        let spawned = std::process::Command::new(exe)
+            .arg("--move-vault")
+            .arg(from.as_os_str())
+            .arg(to.as_os_str())
+            .spawn();
+        match spawned {
+            Ok(_) => {
+                crate::util::log(&format!("vault move: {} -> {}, restarting", from.display(), to.display()));
+                let _ = DestroyWindow(self.hwnd);
+            }
+            Err(e) => {
+                // Could not restart: leave the vault where it is.
+                self.cfg.vault_dir = String::new();
+                config::save(&self.cfg);
+                let msg = wide(&format!("Could not restart to move the vault:\n{e}"));
+                MessageBoxW(Some(self.hwnd), PCWSTR(msg.as_ptr()), w!("Blackhole"), MB_ICONERROR);
+            }
+        }
+    }
+
     /// Ctrl+Shift+N: come to the mouse and open a fresh note on the Notes tab.
     unsafe fn new_note(&mut self) {
         if !self.search_open() {
@@ -782,7 +860,7 @@ impl Dot {
     unsafe fn command(&mut self, id: usize) {
         self.command_inner(id);
         // The Settings tab mirrors these; let it redraw with the new values.
-        if matches!(id, MENU_THINK | MENU_CENTER_MSG | MENU_VIEW_FILES | MENU_VIEW_NOTES | MENU_START_LOGIN | MENU_NVIM_CONFIG | MENU_NVIM_BUILTIN | MENU_THEME_NEXT | MENU_AGENT_NOTIFY) && !self.search.is_invalid() {
+        if matches!(id, MENU_THINK | MENU_CENTER_MSG | MENU_VIEW_FILES | MENU_VIEW_NOTES | MENU_START_LOGIN | MENU_NVIM_CONFIG | MENU_NVIM_BUILTIN | MENU_THEME_NEXT | MENU_AGENT_NOTIFY | MENU_STORE_POLICY | MENU_MODEL_NEXT | MENU_MODEL_DOWNLOAD | MENU_VAULT_FOLDER) && !self.search.is_invalid() {
             let _ = PostMessageW(Some(self.search), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
         }
     }
@@ -857,6 +935,31 @@ impl Dot {
                     SearchWin::set_nvim_init(self.search, "");
                 }
             }
+            MENU_STORE_POLICY => {
+                let next = config::StorePolicy::parse(&self.cfg.store_policy).next();
+                self.cfg.store_policy = next.as_str().to_string();
+                config::set_store_policy(next);
+                config::save(&self.cfg);
+            }
+            MENU_MODEL_NEXT => {
+                let data = config::data_dir();
+                let current = crate::models::active(&data).map(|m| m.name).unwrap_or_default();
+                if let Some(next) = crate::models::next_after(&data, &current) {
+                    self.cfg.model_name = next.name.clone();
+                    config::save(&self.cfg);
+                    self.ask.set_model(Some(next.path.clone()));
+                    self.notify_quiet(format!("Ask model: {} ({})", next.name, next.size_text()));
+                }
+            }
+            MENU_MODEL_DOWNLOAD => {
+                if crate::models::downloading() {
+                    crate::models::cancel();
+                } else {
+                    crate::models::start_download(self.hwnd.0 as usize);
+                    self.notify_quiet(format!("Downloading the ask model ({}). It keeps going in the background.", crate::models::size_text(crate::models::default_size())));
+                }
+            }
+            MENU_VAULT_FOLDER => self.move_vault(),
             MENU_START_LOGIN => startup::set(!startup::enabled()),
             MENU_QUIT => {
                 let _ = DestroyWindow(self.hwnd);
@@ -1046,6 +1149,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     if let Some(a) = action {
                         d.run_action(a);
                     }
+                }
+            }
+            LRESULT(0)
+        }
+        crate::models::WM_MODEL_DOWNLOAD => {
+            let text = (lparam.0 != 0).then(|| *Box::from_raw(lparam.0 as *mut String));
+            if let Some(d) = state(hwnd) {
+                if wparam.0 == crate::models::DL_DONE {
+                    // The model is on disk now: ask mode can use it without a restart.
+                    d.ask.set_model(crate::llm_ort::find_model(&config::data_dir()));
+                }
+                if let Some(t) = text {
+                    d.notify(t);
+                }
+                if !d.search.is_invalid() {
+                    // Not WM_SETTINGS_CHANGED: that also takes the focus, and this
+                    // ticks a few times a second while the download runs.
+                    let _ = PostMessageW(Some(d.search), crate::models::WM_MODEL_DOWNLOAD, WPARAM(wparam.0), LPARAM(0));
                 }
             }
             LRESULT(0)
