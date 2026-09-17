@@ -40,10 +40,8 @@ pub struct Report {
 const MAX_CONTENT: usize = 4 * 1024 * 1024;
 
 const TEXT_EXTS: &[&str] = &[
-    "txt", "md", "markdown", "rst", "csv", "tsv", "json", "yaml", "yml", "toml", "ini", "cfg",
-    "conf", "log", "xml", "css", "js", "ts", "jsx", "tsx", "rs", "py", "c", "h",
-    "cpp", "hpp", "cs", "java", "kt", "go", "rb", "php", "sh", "ps1", "bat", "cmd", "sql", "lua",
-    "swift", "m", "tex", "bib", "org", "srt", "vtt",
+    "txt", "md", "markdown", "rst", "csv", "tsv", "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "log", "xml", "css", "js", "ts", "jsx", "tsx", "rs", "py", "c", "h", "cpp", "hpp", "cs", "java",
+    "kt", "go", "rb", "php", "sh", "ps1", "bat", "cmd", "sql", "lua", "swift", "m", "tex", "bib", "org", "srt", "vtt",
 ];
 
 pub fn extract_text(text: &str) -> Extracted {
@@ -56,14 +54,7 @@ pub fn extract_text(text: &str) -> Extracted {
         }
     }
     let first = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Text");
-    Extracted {
-        title: truncate(first, 80).to_string(),
-        kind: "text",
-        source: None,
-        content: truncate(text, MAX_CONTENT).to_string(),
-        bytes_hash: None,
-        stored: None,
-    }
+    Extracted { title: truncate(first, 80).to_string(), kind: "text", source: None, content: truncate(text, MAX_CONTENT).to_string(), bytes_hash: None, stored: None }
 }
 
 /// Fetch a page and turn it into an item: the URL is its identity, so the same
@@ -130,14 +121,8 @@ pub fn store_png(rgb: &[u8], w: u32, h: u32, stem: &str) -> Result<PathBuf, Stri
 }
 
 pub fn extract_file(path: &Path) -> Result<Extracted, String> {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     let source = Some(path.display().to_string());
 
     if path.is_dir() {
@@ -190,14 +175,7 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
         let (title, text) = crate::web::readable(&html);
         let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| name.clone());
         let content = if text.trim().is_empty() { html.into_owned() } else { text };
-        return Ok(Extracted {
-            title: truncate(&title, 120).to_string(),
-            kind: "web",
-            source,
-            content: truncate(&content, MAX_CONTENT).to_string(),
-            bytes_hash: Some(hash),
-            stored: None,
-        });
+        return Ok(Extracted { title: truncate(&title, 120).to_string(), kind: "web", source, content: truncate(&content, MAX_CONTENT).to_string(), bytes_hash: Some(hash), stored: None });
     } else if TEXT_EXTS.contains(&ext.as_str()) {
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
         ("file", String::from_utf8_lossy(&bytes).into_owned())
@@ -273,10 +251,7 @@ pub fn hash_of(e: &Extracted) -> String {
 /// Each chunk is embedded with the item title in front so a fragment of a
 /// résumé still "knows" it is from a résumé.
 pub fn embed_item(store: &Mutex<Store>, embedder: &Embedder, item_id: i64, title: &str, content: &str) {
-    let chunks: Vec<(String, Vec<f32>)> = chunk(content)
-        .into_iter()
-        .filter_map(|c| embedder.embed(&format!("{title}\n{c}")).ok().map(|v| (c, v)))
-        .collect();
+    let chunks: Vec<(String, Vec<f32>)> = chunk(content).into_iter().filter_map(|c| embedder.embed(&format!("{title}\n{c}")).ok().map(|v| (c, v))).collect();
     // Document unit: the title on its own (see Store::add_chunks).
     let title_unit = embedder.embed(title).ok().map(|v| (title.to_string(), v));
     let _ = store.lock().unwrap().add_chunks(item_id, &chunks, title_unit);

@@ -160,11 +160,7 @@ fn model_in(dir: &Path, own_folder: bool) -> Option<Model> {
         }
     }
     let (_, path) = best?;
-    let name = if own_folder {
-        dir.file_name()?.to_string_lossy().into_owned()
-    } else {
-        path.file_stem()?.to_string_lossy().into_owned()
-    };
+    let name = if own_folder { dir.file_name()?.to_string_lossy().into_owned() } else { path.file_stem()?.to_string_lossy().into_owned() };
     let bytes = if own_folder { dir_size(dir) } else { graph_size(&path) };
     Some(Model { name, path, bytes })
 }
@@ -276,7 +272,8 @@ pub fn start_download(hwnd: usize) {
             }
             Err(e) => {
                 *NOTE.write().unwrap() = if CANCEL.load(Ordering::Relaxed) { String::new() } else { format!("failed: {e}") };
-                let text = if CANCEL.load(Ordering::Relaxed) { "Download cancelled — the part that came down is kept, click again to resume.".to_string() } else { format!("Model download failed: {e}") };
+                let text =
+                    if CANCEL.load(Ordering::Relaxed) { "Download cancelled — the part that came down is kept, click again to resume.".to_string() } else { format!("Model download failed: {e}") };
                 post(hwnd, DL_FAILED, text);
             }
         }
@@ -308,10 +305,7 @@ fn assets() -> (String, Vec<Asset>) {
         let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
         return ("testdl".to_string(), vec![Asset { url: leak(url), file: leak(file), sha256: leak(sha), bytes }]);
     }
-    (
-        DEFAULT_MODEL.to_string(),
-        ASSETS.iter().map(|a| Asset { url: a.url, file: a.file, sha256: a.sha256, bytes: a.bytes }).collect(),
-    )
+    (DEFAULT_MODEL.to_string(), ASSETS.iter().map(|a| Asset { url: a.url, file: a.file, sha256: a.sha256, bytes: a.bytes }).collect())
 }
 
 fn run_download(hwnd: usize) -> Result<PathBuf, String> {
@@ -375,7 +369,9 @@ struct Handle(*mut std::ffi::c_void);
 impl Drop for Handle {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            unsafe { let _ = WinHttpCloseHandle(self.0); }
+            unsafe {
+                let _ = WinHttpCloseHandle(self.0);
+            }
         }
     }
 }
@@ -410,13 +406,7 @@ fn fetch(url: &str, part: &Path, base: u64, hwnd: usize) -> Result<(), String> {
     let verb = crate::util::wide("GET");
     let wpath = crate::util::wide(&path);
     unsafe {
-        let session = Handle(WinHttpOpen(
-            PCWSTR(agent.as_ptr()),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        ));
+        let session = Handle(WinHttpOpen(PCWSTR(agent.as_ptr()), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0));
         if session.0.is_null() {
             return Err("WinHttpOpen failed".into());
         }
@@ -427,15 +417,7 @@ fn fetch(url: &str, part: &Path, base: u64, hwnd: usize) -> Result<(), String> {
             return Err(format!("cannot reach {host}"));
         }
         let flags = if secure { WINHTTP_FLAG_SECURE } else { WINHTTP_OPEN_REQUEST_FLAGS(0) };
-        let req = Handle(WinHttpOpenRequest(
-            conn.0,
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(wpath.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            std::ptr::null(),
-            flags,
-        ));
+        let req = Handle(WinHttpOpenRequest(conn.0, PCWSTR(verb.as_ptr()), PCWSTR(wpath.as_ptr()), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), flags));
         if req.0.is_null() {
             return Err("WinHttpOpenRequest failed".into());
         }
@@ -449,15 +431,8 @@ fn fetch(url: &str, part: &Path, base: u64, hwnd: usize) -> Result<(), String> {
         let mut status: u32 = 0;
         let mut len = std::mem::size_of::<u32>() as u32;
         let mut index = 0u32;
-        WinHttpQueryHeaders(
-            req.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some(&mut status as *mut u32 as *mut _),
-            &mut len,
-            &mut index,
-        )
-        .map_err(|e| format!("status: {e}"))?;
+        WinHttpQueryHeaders(req.0, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, PCWSTR::null(), Some(&mut status as *mut u32 as *mut _), &mut len, &mut index)
+            .map_err(|e| format!("status: {e}"))?;
         // 206 = the server honoured the resume; 200 with a resume means it did not,
         // so start the file again rather than appending to a stale prefix.
         let mut from = have;

@@ -112,12 +112,7 @@ impl Bubble {
     pub fn create(dot: HWND) -> HWND {
         unsafe {
             let class = w!("BlackholeBubble");
-            let wc = WNDCLASSW {
-                lpfnWndProc: Some(wndproc),
-                lpszClassName: class,
-                hCursor: LoadCursorW(None, IDC_HAND).unwrap_or_default(),
-                ..Default::default()
-            };
+            let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), lpszClassName: class, hCursor: LoadCursorW(None, IDC_HAND).unwrap_or_default(), ..Default::default() };
             RegisterClassW(&wc);
             let b = Box::new(Bubble {
                 hwnd: HWND::default(),
@@ -143,16 +138,8 @@ impl Bubble {
                 timeout: None,
             });
             let ptr = Box::into_raw(b);
-            CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                class,
-                w!("Blackhole"),
-                WS_POPUP,
-                0, 0, 10, 10,
-                None, None, None,
-                Some(ptr as *const _),
-            )
-            .unwrap_or_default()
+            CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, class, w!("Blackhole"), WS_POPUP, 0, 0, 10, 10, None, None, None, Some(ptr as *const _))
+                .unwrap_or_default()
         }
     }
 
@@ -269,9 +256,20 @@ impl Bubble {
             let _ = DeleteObject(self.font.into());
         }
         self.font = CreateFontW(
-            -(7 * self.unit), 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
-            (FIXED_PITCH.0 | FF_MODERN.0) as u32, w!("Consolas"),
+            -(7 * self.unit),
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            NONANTIALIASED_QUALITY,
+            (FIXED_PITCH.0 | FF_MODERN.0) as u32,
+            w!("Consolas"),
         );
     }
 
@@ -305,8 +303,8 @@ impl Bubble {
         let tail_units = 4;
         let tail_h = tail_units * u;
         let close_units = 5; // the × glyph is 5×5 units
-        // The scrollbar gets its own column on the far right, the same 3-unit bar the
-        // panel draws; the × moves left of it.
+                             // The scrollbar gets its own column on the far right, the same 3-unit bar the
+                             // panel draws; the × moves left of it.
         let bar_col = if scrollable { 4 * u } else { 0 };
         let body_w = text_w + 2 * pad + 2 * border + (close_units + 2) * u + bar_col;
         let body_h = text_h + 2 * pad + 2 * border;
@@ -343,11 +341,7 @@ impl Bubble {
                 return !(cx && cy);
             }
             // Tail: a staircase of rows narrowing towards the dot.
-            let (row, dir_ok) = if above {
-                (py - body_bottom, py >= body_bottom)
-            } else {
-                (body_top - 1 - py, py < body_top)
-            };
+            let (row, dir_ok) = if above { (py - body_bottom, py >= body_bottom) } else { (body_top - 1 - py, py < body_top) };
             if !dir_ok || row < 0 || row >= tail_h {
                 return false;
             }
@@ -450,12 +444,7 @@ impl Bubble {
         let top = body_top + border + pad;
         // Scrolling moves the whole text up by whole lines; the clip box keeps the
         // lines above and below it out of the bubble.
-        let mut tr = RECT {
-            left: border + pad,
-            top: top - self.scroll * self.line_h,
-            right: border + pad + text_w,
-            bottom: top + (self.lines - self.scroll) * self.line_h,
-        };
+        let mut tr = RECT { left: border + pad, top: top - self.scroll * self.line_h, right: border + pad + text_w, bottom: top + (self.lines - self.scroll) * self.line_h };
         IntersectClipRect(self.dc, border + pad, top, border + pad + text_w, top + text_h);
         DrawTextW(self.dc, &mut text, &mut tr, DT_WORDBREAK | DT_NOPREFIX);
         SelectClipRgn(self.dc, None);

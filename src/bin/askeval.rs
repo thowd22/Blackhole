@@ -16,24 +16,42 @@
 //!                                         build a synthetic vault (eval/gen_vault.py)
 //!                                         and measure live-search latency and Hit@1.
 
-#[path = "../config.rs"] mod config;
-#[path = "../util.rs"] mod util;
-#[path = "../runtime.rs"] mod runtime;
-#[path = "../gpu.rs"] mod gpu;
-#[path = "../embed.rs"] mod embed;
-#[path = "../chunk.rs"] mod chunk;
-#[path = "../store.rs"] mod store;
-#[path = "../expand.rs"] mod expand;
-#[path = "../rerank.rs"] mod rerank;
-#[path = "../models.rs"] mod models;
-#[path = "../llm_ort.rs"] mod llm_ort;
-#[path = "../ingest.rs"] mod ingest;
-#[path = "../pdf_layout.rs"] mod pdf_layout;
-#[path = "../ocr.rs"] mod ocr;
-#[path = "../office.rs"] mod office;
-#[path = "../web.rs"] mod web;
-#[path = "../hotkeys.rs"] mod hotkeys;
-#[path = "../theme.rs"] mod theme;
+#[path = "../chunk.rs"]
+mod chunk;
+#[path = "../config.rs"]
+mod config;
+#[path = "../embed.rs"]
+mod embed;
+#[path = "../expand.rs"]
+mod expand;
+#[path = "../gpu.rs"]
+mod gpu;
+#[path = "../hotkeys.rs"]
+mod hotkeys;
+#[path = "../ingest.rs"]
+mod ingest;
+#[path = "../llm_ort.rs"]
+mod llm_ort;
+#[path = "../models.rs"]
+mod models;
+#[path = "../ocr.rs"]
+mod ocr;
+#[path = "../office.rs"]
+mod office;
+#[path = "../pdf_layout.rs"]
+mod pdf_layout;
+#[path = "../rerank.rs"]
+mod rerank;
+#[path = "../runtime.rs"]
+mod runtime;
+#[path = "../store.rs"]
+mod store;
+#[path = "../theme.rs"]
+mod theme;
+#[path = "../util.rs"]
+mod util;
+#[path = "../web.rs"]
+mod web;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -75,9 +93,7 @@ fn rerank_bench(pairs: usize) -> anyhow::Result<()> {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let query = "which document says what I paid for the customs entry and to whom";
     let filler: String = (0..90).map(|i| format!("word{} ", i % 37)).collect();
-    let passages: Vec<String> = (0..pairs)
-        .map(|i| format!("Entry {i}: IMPORTING CARRIER: TRANQUIL ACE 0124A. FROM PORT OF: KOBE, JAPAN. total paid 1240.00 to Zephyr Logistics. {filler}"))
-        .collect();
+    let passages: Vec<String> = (0..pairs).map(|i| format!("Entry {i}: IMPORTING CARRIER: TRANQUIL ACE 0124A. FROM PORT OF: KOBE, JAPAN. total paid 1240.00 to Zephyr Logistics. {filler}")).collect();
     // Warm-up: the first run pays for arena allocation and shape compilation.
     reranker.score(query, &passages[..pairs.min(3)])?;
     let mut runs: Vec<f32> = Vec::new();
@@ -151,11 +167,8 @@ fn scale(dir: &Path, items_json: &Path, questions_json: &Path) -> anyhow::Result
     let mut words = 0usize;
     for (i, it) in items.iter().enumerate() {
         words += it.text.split_whitespace().count();
-        let id = store
-            .lock()
-            .unwrap()
-            .add(&it.title, &it.kind, None, &it.text, &format!("scale-{i}"), util::now_secs() - (items.len() - i) as i64)?
-            .ok_or_else(|| anyhow::anyhow!("duplicate item {i}"))?;
+        let id =
+            store.lock().unwrap().add(&it.title, &it.kind, None, &it.text, &format!("scale-{i}"), util::now_secs() - (items.len() - i) as i64)?.ok_or_else(|| anyhow::anyhow!("duplicate item {i}"))?;
         ingest::embed_item(&store, &embedder, id, &it.title, &it.text);
         if (i + 1) % 50 == 0 {
             println!("  ingested {}/{} … {:.0}s", i + 1, items.len(), t.elapsed().as_secs_f32());
@@ -280,7 +293,10 @@ fn main() -> anyhow::Result<()> {
                 let s = store.lock().unwrap();
                 let absent = s.absent(&q.question, Some(&qvec)) && !s.any_term_present(&aux);
                 let hook = |qq: &str, ps: &[String]| reranker.score(qq, ps).ok();
-                (absent, if absent { Vec::new() } else { s.context_reranked(&q.question, &aux, &qvec, std::env::var("BLACKHOLE_CTX_WORDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1400), Some(&hook)) })
+                (
+                    absent,
+                    if absent { Vec::new() } else { s.context_reranked(&q.question, &aux, &qvec, std::env::var("BLACKHOLE_CTX_WORDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1400), Some(&hook)) },
+                )
             };
             let is_absent_q = q.kind == "absent" || q.expected_items.is_empty();
             let top_title = chunks.first().map(|c| c.0.clone()).unwrap_or_default();
@@ -329,12 +345,21 @@ fn main() -> anyhow::Result<()> {
             n += 1;
             if is_absent_q {
                 absent_total += 1;
-                if ok { absent_ok += 1; }
+                if ok {
+                    absent_ok += 1;
+                }
             } else {
-                if ok { correct += 1; }
-                if top_hit { hit1 += 1; }
+                if ok {
+                    correct += 1;
+                }
+                if top_hit {
+                    hit1 += 1;
+                }
                 ttft_sum += ttft;
-                if tps > 0.0 { tps_sum += tps; tps_n += 1; }
+                if tps > 0.0 {
+                    tps_sum += tps;
+                    tps_n += 1;
+                }
             }
             let flat: String = answer.replace('\n', " ⏎ ").chars().take(150).collect();
             println!("{} {} [{}] doc:{} ttft {:.1}s {:.0}tok/s | {}", if ok { "✓" } else { "✗" }, q.id, q.kind, if top_hit { "✓" } else { "✗" }, ttft, tps, flat);
@@ -349,8 +374,20 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let answerable = n - absent_total;
-    println!("SUMMARY model={} answers {}/{} retrieval-hit1 {}/{} absent {}/{} mean-ttft {:.2}s mean-tok/s {:.1} peak-ws {:.0} MB disk {:.0} MB load {:.1}s",
-        llm.name, correct, answerable, hit1, answerable, absent_ok, absent_total,
-        ttft_sum / answerable.max(1) as f32, if tps_n > 0 { tps_sum / tps_n as f32 } else { 0.0 }, working_set_mb(), size_mb, load_s);
+    println!(
+        "SUMMARY model={} answers {}/{} retrieval-hit1 {}/{} absent {}/{} mean-ttft {:.2}s mean-tok/s {:.1} peak-ws {:.0} MB disk {:.0} MB load {:.1}s",
+        llm.name,
+        correct,
+        answerable,
+        hit1,
+        answerable,
+        absent_ok,
+        absent_total,
+        ttft_sum / answerable.max(1) as f32,
+        if tps_n > 0 { tps_sum / tps_n as f32 } else { 0.0 },
+        working_set_mb(),
+        size_mb,
+        load_s
+    );
     Ok(())
 }

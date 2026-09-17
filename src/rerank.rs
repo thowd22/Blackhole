@@ -75,8 +75,7 @@ impl Reranker {
         let mut b = ok(b.with_intra_threads(threads()))?;
         let session = ok(b.commit_from_memory(MODEL_BYTES))?;
         let mut tok = Tokenizer::from_bytes(TOKENIZER_JSON).map_err(|e| anyhow::anyhow!("{e}"))?;
-        tok.with_truncation(Some(TruncationParams { max_length: MAX_TOKENS, ..Default::default() }))
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        tok.with_truncation(Some(TruncationParams { max_length: MAX_TOKENS, ..Default::default() })).map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(Reranker { session: Mutex::new(session), tok })
     }
 

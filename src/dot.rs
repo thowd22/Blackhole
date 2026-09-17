@@ -51,7 +51,6 @@ const HOTKEY_SHOT: i32 = 3;
 const HOTKEY_NOTE: i32 = 4;
 /// Ctrl+Shift+S was taken; the screenshot key is Ctrl+Alt+S (menu label follows).
 
-
 const MENU_SEARCH: usize = 1;
 const MENU_PASTE: usize = 2;
 const MENU_VAULT: usize = 3;
@@ -265,12 +264,7 @@ impl Dot {
     pub fn create(tx: Sender<Input>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder>, ask: Arc<AskEngine>) -> HWND {
         unsafe {
             let class = w!("BlackholeDot");
-            let wc = WNDCLASSW {
-                lpfnWndProc: Some(wndproc),
-                lpszClassName: class,
-                hCursor: LoadCursorW(None, IDC_HAND).unwrap_or_default(),
-                ..Default::default()
-            };
+            let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), lpszClassName: class, hCursor: LoadCursorW(None, IDC_HAND).unwrap_or_default(), ..Default::default() };
             RegisterClassW(&wc);
             let cfg = config::load();
             crate::llm_ort::set_thinking(cfg.think);
@@ -320,16 +314,8 @@ impl Dot {
             let (x, y, hidden) = (dot.cfg.x, dot.cfg.y, dot.cfg.hidden);
             let ptr = Box::into_raw(dot);
             let style = if hidden { WS_POPUP } else { WS_POPUP | WS_VISIBLE };
-            CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                class,
-                w!("Blackhole"),
-                style,
-                x, y, 64, 64,
-                None, None, None,
-                Some(ptr as *const _),
-            )
-            .unwrap_or_default()
+            CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, class, w!("Blackhole"), style, x, y, 64, 64, None, None, None, Some(ptr as *const _))
+                .unwrap_or_default()
         }
     }
 
@@ -456,7 +442,11 @@ impl Dot {
     /// Eased progress of the current mood transition; 1 once it is over.
     fn blend(&self) -> f32 {
         let t = self.mood_since.elapsed().as_millis() as f32 / TRANSITION_MS as f32;
-        if t >= 1.0 { 1.0 } else { t * t * (3.0 - 2.0 * t) }
+        if t >= 1.0 {
+            1.0
+        } else {
+            t * t * (3.0 - 2.0 * t)
+        }
     }
 
     fn anim(&self) -> Anim {
@@ -732,14 +722,9 @@ impl Dot {
     /// Folder picker for the vault (the shell's browse dialog, new-style with an edit box).
     unsafe fn pick_folder(&self, title: &str) -> Option<String> {
         use windows::Win32::System::Com::CoTaskMemFree;
-        use windows::Win32::UI::Shell::{SHBrowseForFolderW, SHGetPathFromIDListW, BROWSEINFOW, BIF_EDITBOX, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS};
+        use windows::Win32::UI::Shell::{SHBrowseForFolderW, SHGetPathFromIDListW, BIF_EDITBOX, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW};
         let t = wide(title);
-        let bi = BROWSEINFOW {
-            hwndOwner: self.hwnd,
-            lpszTitle: PCWSTR(t.as_ptr()),
-            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX,
-            ..Default::default()
-        };
+        let bi = BROWSEINFOW { hwndOwner: self.hwnd, lpszTitle: PCWSTR(t.as_ptr()), ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX, ..Default::default() };
         let pidl = SHBrowseForFolderW(&bi);
         if pidl.is_null() {
             return None;
@@ -768,22 +753,14 @@ impl Dot {
         if to == from {
             return;
         }
-        let question = wide(&format!(
-            "Move the vault from\n{}\n\nto\n{}\n\nBlackhole restarts to finish the move.",
-            from.display(),
-            to.display()
-        ));
+        let question = wide(&format!("Move the vault from\n{}\n\nto\n{}\n\nBlackhole restarts to finish the move.", from.display(), to.display()));
         if MessageBoxW(Some(self.hwnd), PCWSTR(question.as_ptr()), w!("Blackhole"), MB_OKCANCEL | MB_ICONQUESTION) != IDOK {
             return;
         }
         self.cfg.vault_dir = if to == config::base_dir() { String::new() } else { to.display().to_string() };
         config::save(&self.cfg);
         let Ok(exe) = std::env::current_exe() else { return };
-        let spawned = std::process::Command::new(exe)
-            .arg("--move-vault")
-            .arg(from.as_os_str())
-            .arg(to.as_os_str())
-            .spawn();
+        let spawned = std::process::Command::new(exe).arg("--move-vault").arg(from.as_os_str()).arg(to.as_os_str()).spawn();
         match spawned {
             Ok(_) => {
                 crate::util::log(&format!("vault move: {} -> {}, restarting", from.display(), to.display()));
@@ -889,7 +866,11 @@ impl Dot {
             self.notify(format!("Couldn't swallow that: {e}"));
         }
         if report.updated > 0 {
-            self.notify_quiet(if report.updated == 1 { "Already had that one — its text was re-read and updated".into() } else { format!("Already had {} of those — their text was re-read and updated", report.updated) });
+            self.notify_quiet(if report.updated == 1 {
+                "Already had that one — its text was re-read and updated".into()
+            } else {
+                format!("Already had {} of those — their text was re-read and updated", report.updated)
+            });
         } else if report.duplicates > 0 && report.added == 0 {
             self.notify_quiet("Already swallowed that one".into());
         }
@@ -1052,10 +1033,8 @@ impl Dot {
         let chk = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(header.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let labels: Vec<Vec<u16>> = [("Search", 0), ("Swallow clipboard", 1), ("Take screenshot", 2), ("New note", 3)]
-            .iter()
-            .map(|(l, i)| crate::util::wide(&format!("{l}\t{}", self.cfg.hotkey(*i))))
-            .collect();
+        let labels: Vec<Vec<u16>> =
+            [("Search", 0), ("Swallow clipboard", 1), ("Take screenshot", 2), ("New note", 3)].iter().map(|(l, i)| crate::util::wide(&format!("{l}\t{}", self.cfg.hotkey(*i)))).collect();
         let _ = AppendMenuW(menu, MF_STRING, MENU_SEARCH, PCWSTR(labels[0].as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, MENU_PASTE, PCWSTR(labels[1].as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, MENU_NEW_NOTE, PCWSTR(labels[3].as_ptr()));
@@ -1082,7 +1061,11 @@ impl Dot {
         let _ = AppendMenuW(menu, MF_POPUP, view.0 as usize, w!("Default view"));
         let editor = CreatePopupMenu().unwrap_or_default();
         let _ = AppendMenuW(editor, MF_STRING, MENU_NVIM_CONFIG, w!("Load Neovim config…"));
-        let builtin = crate::util::wide(&if self.cfg.nvim_init.is_empty() { "Built-in config only".to_string() } else { format!("Built-in config only  (now: {})", self.cfg.nvim_init.rsplit(['\\', '/']).next().unwrap_or("")) });
+        let builtin = crate::util::wide(&if self.cfg.nvim_init.is_empty() {
+            "Built-in config only".to_string()
+        } else {
+            format!("Built-in config only  (now: {})", self.cfg.nvim_init.rsplit(['\\', '/']).next().unwrap_or(""))
+        });
         let _ = AppendMenuW(editor, MF_STRING | chk(self.cfg.nvim_init.is_empty()), MENU_NVIM_BUILTIN, PCWSTR(builtin.as_ptr()));
         let _ = AppendMenuW(menu, MF_POPUP, editor.0 as usize, w!("Editor"));
         let _ = AppendMenuW(menu, MF_STRING | chk(startup::enabled()), MENU_START_LOGIN, w!("Start at login"));
@@ -1100,7 +1083,28 @@ impl Dot {
     unsafe fn command(&mut self, id: usize) {
         self.command_inner(id);
         // The Settings tab mirrors these; let it redraw with the new values.
-        if matches!(id, MENU_THINK | MENU_CENTER_MSG | MENU_VIEW_FILES | MENU_VIEW_NOTES | MENU_START_LOGIN | MENU_NVIM_CONFIG | MENU_NVIM_BUILTIN | MENU_THEME_NEXT | MENU_AGENT_NOTIFY | MENU_IDLE_OPACITY | MENU_SHY | MENU_SNAP | MENU_PAUSE | MENU_DOT_PALETTE | MENU_STORE_POLICY | MENU_MODEL_NEXT | MENU_MODEL_DOWNLOAD | MENU_VAULT_FOLDER) && !self.search.is_invalid() {
+        if matches!(
+            id,
+            MENU_THINK
+                | MENU_CENTER_MSG
+                | MENU_VIEW_FILES
+                | MENU_VIEW_NOTES
+                | MENU_START_LOGIN
+                | MENU_NVIM_CONFIG
+                | MENU_NVIM_BUILTIN
+                | MENU_THEME_NEXT
+                | MENU_AGENT_NOTIFY
+                | MENU_IDLE_OPACITY
+                | MENU_SHY
+                | MENU_SNAP
+                | MENU_PAUSE
+                | MENU_DOT_PALETTE
+                | MENU_STORE_POLICY
+                | MENU_MODEL_NEXT
+                | MENU_MODEL_DOWNLOAD
+                | MENU_VAULT_FOLDER
+        ) && !self.search.is_invalid()
+        {
             let _ = PostMessageW(Some(self.search), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
         }
     }
@@ -1427,7 +1431,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_NOTIFY | WM_NOTIFY_QUIET => {
             let text = *Box::from_raw(lparam.0 as *mut String);
             if let Some(d) = state(hwnd) {
-                if msg == WM_NOTIFY_QUIET { d.notify_quiet(text) } else { d.notify(text) }
+                if msg == WM_NOTIFY_QUIET {
+                    d.notify_quiet(text)
+                } else {
+                    d.notify(text)
+                }
             }
             LRESULT(0)
         }

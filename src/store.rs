@@ -57,19 +57,144 @@ const CONTENT_TERM_MIN_LEN: usize = 4;
 /// few items and would otherwise pass for a distinctive term (measured: it flipped
 /// two of nine test questions). Sorted for binary search.
 const STOPWORDS: &[&str] = &[
-    "about", "actually", "after", "again", "also", "another", "anything", "around", "back", "because",
-    "been", "before", "being", "below", "best", "between", "both", "came", "cant", "come", "could",
-    "days", "didnt", "does", "doesnt", "doing", "done", "dont", "down", "during", "each", "else",
-    "even", "ever", "every", "from", "gets", "getting", "give", "given", "going", "good", "have",
-    "having", "here", "hers", "however", "into", "isnt", "just", "keep", "kept", "know", "known",
-    "last", "like", "little", "long", "made", "make", "many", "might", "mine", "more", "most", "much",
-    "must", "myself", "need", "never", "next", "often", "once", "only", "other", "others", "over",
-    "please", "really", "right", "said", "same", "seen", "shall", "should", "show", "since", "some",
-    "something", "soon", "still", "such", "take", "taken", "tell", "than", "that", "their", "them",
-    "then", "there", "these", "they", "thing", "things", "this", "those", "though", "through", "thus",
-    "time", "took", "under", "until", "upon", "used", "using", "very", "want", "well", "went", "were",
-    "what", "whats", "when", "where", "whether", "which", "while", "whom", "whose", "will", "with",
-    "within", "without", "would", "youre", "your",
+    "about",
+    "actually",
+    "after",
+    "again",
+    "also",
+    "another",
+    "anything",
+    "around",
+    "back",
+    "because",
+    "been",
+    "before",
+    "being",
+    "below",
+    "best",
+    "between",
+    "both",
+    "came",
+    "cant",
+    "come",
+    "could",
+    "days",
+    "didnt",
+    "does",
+    "doesnt",
+    "doing",
+    "done",
+    "dont",
+    "down",
+    "during",
+    "each",
+    "else",
+    "even",
+    "ever",
+    "every",
+    "from",
+    "gets",
+    "getting",
+    "give",
+    "given",
+    "going",
+    "good",
+    "have",
+    "having",
+    "here",
+    "hers",
+    "however",
+    "into",
+    "isnt",
+    "just",
+    "keep",
+    "kept",
+    "know",
+    "known",
+    "last",
+    "like",
+    "little",
+    "long",
+    "made",
+    "make",
+    "many",
+    "might",
+    "mine",
+    "more",
+    "most",
+    "much",
+    "must",
+    "myself",
+    "need",
+    "never",
+    "next",
+    "often",
+    "once",
+    "only",
+    "other",
+    "others",
+    "over",
+    "please",
+    "really",
+    "right",
+    "said",
+    "same",
+    "seen",
+    "shall",
+    "should",
+    "show",
+    "since",
+    "some",
+    "something",
+    "soon",
+    "still",
+    "such",
+    "take",
+    "taken",
+    "tell",
+    "than",
+    "that",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "thing",
+    "things",
+    "this",
+    "those",
+    "though",
+    "through",
+    "thus",
+    "time",
+    "took",
+    "under",
+    "until",
+    "upon",
+    "used",
+    "using",
+    "very",
+    "want",
+    "well",
+    "went",
+    "were",
+    "what",
+    "whats",
+    "when",
+    "where",
+    "whether",
+    "which",
+    "while",
+    "whom",
+    "whose",
+    "will",
+    "with",
+    "within",
+    "without",
+    "would",
+    "youre",
+    "your",
 ];
 
 fn is_stopword(t: &str) -> bool {
@@ -78,12 +203,7 @@ fn is_stopword(t: &str) -> bool {
 
 /// Lower-cased alphanumeric query tokens long enough to carry meaning, minus function words.
 fn content_terms(query: &str) -> Vec<String> {
-    let mut out: Vec<String> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() >= CONTENT_TERM_MIN_LEN)
-        .map(|t| t.to_lowercase())
-        .filter(|t| !is_stopword(t))
-        .collect();
+    let mut out: Vec<String> = query.split(|c: char| !c.is_alphanumeric()).filter(|t| t.len() >= CONTENT_TERM_MIN_LEN).map(|t| t.to_lowercase()).filter(|t| !is_stopword(t)).collect();
     out.sort();
     out.dedup();
     out
@@ -112,9 +232,8 @@ pub struct Failure {
 /// Source extensions treated as code (the `kind:code` filter and the code styling
 /// of snippets in the panel).
 pub const CODE_EXTS: &[&str] = &[
-    "rs", "py", "js", "mjs", "ts", "tsx", "jsx", "go", "c", "h", "cpp", "cc", "hpp", "cs", "java",
-    "kt", "rb", "php", "swift", "lua", "sh", "bash", "ps1", "bat", "sql", "json", "toml", "yaml",
-    "yml", "xml", "html", "css", "vim",
+    "rs", "py", "js", "mjs", "ts", "tsx", "jsx", "go", "c", "h", "cpp", "cc", "hpp", "cs", "java", "kt", "rb", "php", "swift", "lua", "sh", "bash", "ps1", "bat", "sql", "json", "toml", "yaml", "yml",
+    "xml", "html", "css", "vim",
 ];
 
 /// Is this file name a code file (by extension)?
@@ -293,7 +412,6 @@ pub fn parse_filters(query: &str) -> (Filters, String) {
     (f, rest.join(" "))
 }
 
-
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Store> {
         let conn = Connection::open(path)?;
@@ -341,9 +459,7 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Vectors from a different embedding model are useless: drop them and
         // let the ingest worker re-embed everything.
-        let stamped: Option<String> = conn
-            .query_row("SELECT value FROM meta WHERE key = 'embed_model'", [], |r| r.get(0))
-            .optional()?;
+        let stamped: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'embed_model'", [], |r| r.get(0)).optional()?;
         if stamped.as_deref() != Some(MODEL_ID) {
             conn.execute("DELETE FROM chunks", [])?;
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('embed_model', ?1)", params![MODEL_ID])?;
@@ -390,18 +506,12 @@ impl Store {
         tx.execute("DELETE FROM chunks WHERE item_id = ?1", params![item_id])?;
         self.index.retain(|e| e.item_id != item_id);
         if let Some((title, vec)) = title_unit {
-            tx.execute(
-                "INSERT INTO chunks (item_id, ord, text, vec) VALUES (?1, -1, ?2, ?3)",
-                params![item_id, title, vec_to_blob(&vec)],
-            )?;
+            tx.execute("INSERT INTO chunks (item_id, ord, text, vec) VALUES (?1, -1, ?2, ?3)", params![item_id, title, vec_to_blob(&vec)])?;
             let chunk_id = tx.last_insert_rowid();
             self.index.push(VecEntry { chunk_id, item_id, vec });
         }
         for (ord, (text, vec)) in chunks.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO chunks (item_id, ord, text, vec) VALUES (?1, ?2, ?3, ?4)",
-                params![item_id, ord as i64, text, vec_to_blob(vec)],
-            )?;
+            tx.execute("INSERT INTO chunks (item_id, ord, text, vec) VALUES (?1, ?2, ?3, ?4)", params![item_id, ord as i64, text, vec_to_blob(vec)])?;
             let chunk_id = tx.last_insert_rowid();
             self.index.push(VecEntry { chunk_id, item_id, vec: vec.clone() });
         }
@@ -436,29 +546,12 @@ impl Store {
     }
 
     /// Returns the new item id, or `None` when an identical item (same hash) is already inside.
-    pub fn add(
-        &self,
-        title: &str,
-        kind: &str,
-        source: Option<&str>,
-        content: &str,
-        hash: &str,
-        added_at: i64,
-    ) -> rusqlite::Result<Option<i64>> {
+    pub fn add(&self, title: &str, kind: &str, source: Option<&str>, content: &str, hash: &str, added_at: i64) -> rusqlite::Result<Option<i64>> {
         self.add_stored(title, kind, source, content, hash, added_at, None)
     }
 
     /// `stored`: path of Blackhole's own copy of the file, if one was made.
-    pub fn add_stored(
-        &self,
-        title: &str,
-        kind: &str,
-        source: Option<&str>,
-        content: &str,
-        hash: &str,
-        added_at: i64,
-        stored: Option<&str>,
-    ) -> rusqlite::Result<Option<i64>> {
+    pub fn add_stored(&self, title: &str, kind: &str, source: Option<&str>, content: &str, hash: &str, added_at: i64, stored: Option<&str>) -> rusqlite::Result<Option<i64>> {
         let n = self.conn.execute(
             "INSERT OR IGNORE INTO items (title, kind, source, content, hash, added_at, stored) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![title, kind, source, content, hash, added_at, stored.unwrap_or("")],
@@ -496,9 +589,7 @@ impl Store {
     }
 
     pub fn count(&self) -> i64 {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
-            .unwrap_or(0)
+        self.conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap_or(0)
     }
 
     /// Hybrid search. Keyword (BM25) and semantic (cosine over chunks) hits are
@@ -539,11 +630,7 @@ impl Store {
 
     /// Set an item's tags from free text ("work, ideas" / "#work #ideas").
     pub fn set_tags(&mut self, id: i64, text: &str) -> rusqlite::Result<()> {
-        let mut tags: Vec<String> = text
-            .split(|c: char| c == ',' || c.is_whitespace())
-            .map(|t| t.trim_start_matches('#').trim().to_lowercase())
-            .filter(|t| !t.is_empty())
-            .collect();
+        let mut tags: Vec<String> = text.split(|c: char| c == ',' || c.is_whitespace()).map(|t| t.trim_start_matches('#').trim().to_lowercase()).filter(|t| !t.is_empty()).collect();
         tags.dedup();
         let stored = if tags.is_empty() { String::new() } else { format!(",{},", tags.join(",")) };
         self.conn.execute("UPDATE items SET tags = ?1 WHERE id = ?2", params![stored, id])?;
@@ -558,7 +645,14 @@ impl Store {
 
     /// Semantic-only search (MCP `retrieve` with mode "semantic").
     pub fn semantic(&self, qvec: &[f32], limit: usize) -> Vec<Hit> {
-        let mut hits: Vec<Hit> = self.search_semantic(qvec, limit).into_iter().map(|(mut h, _)| { h.via = "sem"; h }).collect();
+        let mut hits: Vec<Hit> = self
+            .search_semantic(qvec, limit)
+            .into_iter()
+            .map(|(mut h, _)| {
+                h.via = "sem";
+                h
+            })
+            .collect();
         self.attach_tags(&mut hits);
         hits
     }
@@ -568,7 +662,16 @@ impl Store {
         let mut h = self
             .conn
             .query_row("SELECT id, title, kind, source, substr(content, 1, 120), added_at FROM items WHERE id = ?1", params![id], |r| {
-                Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "), via: "", tags: String::new(), added_at: r.get(5)? })
+                Ok(Hit {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    kind: r.get(2)?,
+                    source: r.get(3)?,
+                    snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "),
+                    via: "",
+                    tags: String::new(),
+                    added_at: r.get(5)?,
+                })
             })
             .ok()?;
         h.tags = self.tags_of(id);
@@ -693,21 +796,13 @@ impl Store {
     #[allow(dead_code)]
     /// The item's chunk nearest to `qvec` (for agents doing RAG over the vault).
     pub fn best_chunk(&self, item_id: i64, qvec: &[f32]) -> Option<String> {
-        let best = self
-            .index
-            .iter()
-            .filter(|e| e.item_id == item_id)
-            .map(|e| (cosine(qvec, &e.vec), e.chunk_id))
-            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))?;
+        let best = self.index.iter().filter(|e| e.item_id == item_id).map(|e| (cosine(qvec, &e.vec), e.chunk_id)).max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))?;
         self.conn.query_row("SELECT text FROM chunks WHERE id = ?1 AND ord >= 0", params![best.1], |r| r.get(0)).ok()
     }
 
     /// Where to open an item: the original path while it exists, else Blackhole's copy.
     pub fn open_path(&self, id: i64) -> Option<String> {
-        let (source, stored): (Option<String>, String) = self
-            .conn
-            .query_row("SELECT source, stored FROM items WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .ok()?;
+        let (source, stored): (Option<String>, String) = self.conn.query_row("SELECT source, stored FROM items WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?))).ok()?;
         match source {
             Some(s) if std::path::Path::new(&s).exists() => Some(s),
             _ if !stored.is_empty() && std::path::Path::new(&stored).exists() => Some(stored),
@@ -735,9 +830,7 @@ impl Store {
 
     /// Number of items whose text contains `term` (FTS5 token match).
     fn items_containing(&self, term: &str) -> i64 {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1", params![format!("\"{term}\"")], |r| r.get(0))
-            .unwrap_or(0)
+        self.conn.query_row("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1", params![format!("\"{term}\"")], |r| r.get(0)).unwrap_or(0)
     }
 
     /// Highest cosine between the query vector and anything in the vault.
@@ -766,9 +859,7 @@ impl Store {
 
     /// Number of items with a token starting with `term` (FTS5 prefix match).
     fn items_with_prefix(&self, term: &str) -> i64 {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1", params![format!("\"{term}\"*")], |r| r.get(0))
-            .unwrap_or(0)
+        self.conn.query_row("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1", params![format!("\"{term}\"*")], |r| r.get(0)).unwrap_or(0)
     }
 
     /// "Not in your vault": the query has ≥2 content terms, none of them (nor an
@@ -830,14 +921,7 @@ impl Store {
     /// `rerank::candidates()` of them, and the document with the highest logit
     /// becomes the top document. Documents it never saw keep their cheap order.
     /// (Rank-fusing the reranker with RRF instead measured a regression.)
-    pub fn context_reranked(
-        &self,
-        query: &str,
-        aux_query: &str,
-        qvec: &[f32],
-        budget_words: usize,
-        rerank: Option<&dyn Fn(&str, &[String]) -> Option<Vec<f32>>>,
-    ) -> Vec<(String, String)> {
+    pub fn context_reranked(&self, query: &str, aux_query: &str, qvec: &[f32], budget_words: usize, rerank: Option<&dyn Fn(&str, &[String]) -> Option<Vec<f32>>>) -> Vec<(String, String)> {
         #[derive(Clone)]
         struct C {
             id: i64,
@@ -910,14 +994,12 @@ impl Store {
         let mut cands: Vec<C> = scored
             .iter()
             .filter_map(|&(c, id)| {
-                meta.query_row(params![id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)))
-                    .ok()
-                    .map(|(item, ord, text)| {
-                        let lower = text.to_lowercase();
-                        let boost: f32 = terms.iter().filter(|(t, _)| lower.contains(t.as_str())).map(|(_, w)| *w).sum();
-                        let literal = !rare.is_empty() && lower.split(|ch: char| !ch.is_alphanumeric()).any(|w| rare.contains(&w));
-                        C { id, item, ord, words: text.split_whitespace().count(), score: c + boost, literal }
-                    })
+                meta.query_row(params![id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))).ok().map(|(item, ord, text)| {
+                    let lower = text.to_lowercase();
+                    let boost: f32 = terms.iter().filter(|(t, _)| lower.contains(t.as_str())).map(|(_, w)| *w).sum();
+                    let literal = !rare.is_empty() && lower.split(|ch: char| !ch.is_alphanumeric()).any(|w| rare.contains(&w));
+                    C { id, item, ord, words: text.split_whitespace().count(), score: c + boost, literal }
+                })
             })
             .collect();
         cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
@@ -958,10 +1040,8 @@ impl Store {
                 .iter()
                 .map(|c| {
                     if c.ord < 0 {
-                        let (title, content): (String, String) = self
-                            .conn
-                            .query_row("SELECT title, content FROM items WHERE id = ?1", params![c.item], |r| Ok((r.get(0)?, r.get(1)?)))
-                            .unwrap_or_default();
+                        let (title, content): (String, String) =
+                            self.conn.query_row("SELECT title, content FROM items WHERE id = ?1", params![c.item], |r| Ok((r.get(0)?, r.get(1)?))).unwrap_or_default();
                         format!("{title}: {}", content.split_whitespace().take(crate::rerank::DOC_UNIT_WORDS).collect::<Vec<_>>().join(" "))
                     } else {
                         meta.query_row(params![c.id], |r| r.get::<_, String>(2)).unwrap_or_default()
@@ -1111,16 +1191,7 @@ impl Store {
             Err(_) => return Vec::new(),
         };
         stmt.query_map(params![fts, limit as i64], |r| {
-            Ok(Hit {
-                id: r.get(0)?,
-                title: r.get(1)?,
-                kind: r.get(2)?,
-                source: r.get(3)?,
-                snippet: r.get(4)?,
-                via: "kw",
-                tags: String::new(),
-                added_at: r.get(5)?,
-            })
+            Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get(4)?, via: "kw", tags: String::new(), added_at: r.get(5)? })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
@@ -1164,13 +1235,20 @@ impl Store {
     }
 
     fn notes_inner(&self, limit: usize) -> Vec<Hit> {
-        let Ok(mut stmt) = self.conn.prepare(
-            "SELECT id, title, kind, source, substr(content, 1, 160), added_at FROM items WHERE kind = 'note' ORDER BY added_at DESC, id DESC LIMIT ?1",
-        ) else {
+        let Ok(mut stmt) = self.conn.prepare("SELECT id, title, kind, source, substr(content, 1, 160), added_at FROM items WHERE kind = 'note' ORDER BY added_at DESC, id DESC LIMIT ?1") else {
             return Vec::new();
         };
         stmt.query_map(params![limit as i64], |r| {
-            Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "), via: "", tags: String::new(), added_at: r.get(5)? })
+            Ok(Hit {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                kind: r.get(2)?,
+                source: r.get(3)?,
+                snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "),
+                via: "",
+                tags: String::new(),
+                added_at: r.get(5)?,
+            })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
@@ -1185,10 +1263,8 @@ impl Store {
     /// Rewrite a note's title and text; chunks are dropped so the caller re-embeds it.
     /// Rewrite a note's text; `title` applies unless the user named the note (`set_note_title`).
     pub fn update_note(&mut self, id: i64, title: &str, content: &str) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE items SET title = CASE WHEN custom_title = 1 THEN title ELSE ?1 END, content = ?2, added_at = ?3 WHERE id = ?4",
-            params![title, content, crate::util::now_secs(), id],
-        )?;
+        self.conn
+            .execute("UPDATE items SET title = CASE WHEN custom_title = 1 THEN title ELSE ?1 END, content = ?2, added_at = ?3 WHERE id = ?4", params![title, content, crate::util::now_secs(), id])?;
         self.conn.execute("DELETE FROM chunks WHERE item_id = ?1", params![id])?;
         self.conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])?;
         self.index.retain(|e| e.item_id != id);
@@ -1204,11 +1280,7 @@ impl Store {
     }
 
     pub fn content(&self, id: i64) -> Option<String> {
-        self.conn
-            .query_row("SELECT content FROM items WHERE id = ?1", params![id], |r| r.get(0))
-            .optional()
-            .ok()
-            .flatten()
+        self.conn.query_row("SELECT content FROM items WHERE id = ?1", params![id], |r| r.get(0)).optional().ok().flatten()
     }
 
     // ---- undigested: things that could not be read (FEATURES.md §3.5) ----
@@ -1219,10 +1291,7 @@ impl Store {
         if !path.is_empty() {
             let _ = self.conn.execute("DELETE FROM undigested WHERE path = ?1", params![path]);
         }
-        let _ = self.conn.execute(
-            "INSERT INTO undigested (path, title, error, at) VALUES (?1, ?2, ?3, ?4)",
-            params![path, title, error, at],
-        );
+        let _ = self.conn.execute("INSERT INTO undigested (path, title, error, at) VALUES (?1, ?2, ?3, ?4)", params![path, title, error, at]);
     }
 
     /// A path went down successfully: it is not undigested any more.
@@ -1241,11 +1310,9 @@ impl Store {
         let Ok(mut st) = self.conn.prepare("SELECT id, path, title, error, at FROM undigested ORDER BY at DESC, id DESC LIMIT ?1") else {
             return Vec::new();
         };
-        st.query_map(params![limit as i64], |r| {
-            Ok(Failure { id: r.get(0)?, path: r.get(1)?, title: r.get(2)?, error: r.get(3)?, at: r.get(4)? })
-        })
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
+        st.query_map(params![limit as i64], |r| Ok(Failure { id: r.get(0)?, path: r.get(1)?, title: r.get(2)?, error: r.get(3)?, at: r.get(4)? }))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
     }
 
     pub fn undigested_count(&self) -> i64 {
@@ -1290,10 +1357,7 @@ fn blob_to_vec(b: &[u8]) -> Vec<f32> {
 /// OR-ed (so one typo doesn't empty the list; BM25 still ranks docs matching
 /// more terms higher), the last one as a prefix so results update while typing.
 fn fts_tokens(q: &str) -> Vec<String> {
-    q.split_whitespace()
-        .map(|t| t.replace('"', ""))
-        .filter(|t| !t.is_empty())
-        .collect()
+    q.split_whitespace().map(|t| t.replace('"', "")).filter(|t| !t.is_empty()).collect()
 }
 
 fn to_fts_query(q: &str) -> Option<String> {
@@ -1302,14 +1366,7 @@ fn to_fts_query(q: &str) -> Option<String> {
         return None;
     }
     let n = tokens.len();
-    Some(
-        tokens
-            .iter()
-            .enumerate()
-            .map(|(i, t)| if i + 1 == n { format!("\"{t}\"*") } else { format!("\"{t}\"") })
-            .collect::<Vec<_>>()
-            .join(" OR "),
-    )
+    Some(tokens.iter().enumerate().map(|(i, t)| if i + 1 == n { format!("\"{t}\"*") } else { format!("\"{t}\"") }).collect::<Vec<_>>().join(" OR "))
 }
 
 #[cfg(debug_assertions)]
@@ -1319,12 +1376,15 @@ impl Store {
         for e in &self.index {
             let c = cosine(qvec, &e.vec);
             let entry = best.entry(e.item_id).or_insert((c, e.chunk_id));
-            if c > entry.0 { *entry = (c, e.chunk_id); }
+            if c > entry.0 {
+                *entry = (c, e.chunk_id);
+            }
         }
         let mut v: Vec<_> = best.into_iter().collect();
-        v.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
+        v.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
         for (item, (c, ch)) in v {
-            let (title, text): (String, String) = self.conn.query_row("SELECT i.title, substr(c.text,1,60) FROM items i JOIN chunks c ON c.id=?2 WHERE i.id=?1", params![item, ch], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            let (title, text): (String, String) =
+                self.conn.query_row("SELECT i.title, substr(c.text,1,60) FROM items i JOIN chunks c ON c.id=?2 WHERE i.id=?1", params![item, ch], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
             println!("   {c:.3} {} — {}", title.chars().take(30).collect::<String>(), text.replace('\n', " "));
         }
     }
@@ -1364,9 +1424,7 @@ mod tests {
     }
 
     fn add(s: &Store, title: &str, content: &str) -> i64 {
-        s.add(title, "note", None, content, &format!("hash-{title}-{}", content.len()), 1_700_000_000)
-            .expect("insert")
-            .expect("new item")
+        s.add(title, "note", None, content, &format!("hash-{title}-{}", content.len()), 1_700_000_000).expect("insert").expect("new item")
     }
 
     /// A unit vector along axis `i` — cosine 1 with itself, 0 with any other.

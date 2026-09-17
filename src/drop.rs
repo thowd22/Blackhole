@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use windows::core::implement;
 use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, POINTL, WPARAM};
-use windows::Win32::System::Com::{IDataObject, FORMATETC, DVASPECT_CONTENT, TYMED_HGLOBAL};
+use windows::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW};
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::{IDropTarget, IDropTarget_Impl, ReleaseStgMedium, CF_DIB, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE};
@@ -32,13 +32,7 @@ impl DropTarget {
 }
 
 fn fmt(cf: u16) -> FORMATETC {
-    FORMATETC {
-        cfFormat: cf,
-        ptd: std::ptr::null_mut(),
-        dwAspect: DVASPECT_CONTENT.0,
-        lindex: -1,
-        tymed: TYMED_HGLOBAL.0 as u32,
-    }
+    FORMATETC { cfFormat: cf, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 }
 }
 
 /// `CFSTR_INETURLW`: what a browser puts on the clipboard (and in the drag) for a
@@ -50,11 +44,7 @@ fn url_format() -> u16 {
 }
 
 fn acceptable(obj: &IDataObject) -> bool {
-    unsafe {
-        obj.QueryGetData(&fmt(CF_HDROP.0)).is_ok()
-            || obj.QueryGetData(&fmt(CF_UNICODETEXT.0)).is_ok()
-            || obj.QueryGetData(&fmt(url_format())).is_ok()
-    }
+    unsafe { obj.QueryGetData(&fmt(CF_HDROP.0)).is_ok() || obj.QueryGetData(&fmt(CF_UNICODETEXT.0)).is_ok() || obj.QueryGetData(&fmt(url_format())).is_ok() }
 }
 
 unsafe fn files_from_hdrop(h: HDROP) -> Vec<PathBuf> {
@@ -203,13 +193,7 @@ pub fn read_clipboard(owner: HWND) -> Option<Input> {
 }
 
 impl IDropTarget_Impl for DropTarget_Impl {
-    fn DragEnter(
-        &self,
-        pdataobj: windows::core::Ref<'_, IDataObject>,
-        _keys: MODIFIERKEYS_FLAGS,
-        _pt: &POINTL,
-        effect: *mut DROPEFFECT,
-    ) -> windows::core::Result<()> {
+    fn DragEnter(&self, pdataobj: windows::core::Ref<'_, IDataObject>, _keys: MODIFIERKEYS_FLAGS, _pt: &POINTL, effect: *mut DROPEFFECT) -> windows::core::Result<()> {
         let ok = pdataobj.as_ref().map(acceptable).unwrap_or(false);
         unsafe {
             // Paused: nothing is accepted, and the dot says so the moment something
@@ -239,13 +223,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         Ok(())
     }
 
-    fn Drop(
-        &self,
-        pdataobj: windows::core::Ref<'_, IDataObject>,
-        _keys: MODIFIERKEYS_FLAGS,
-        _pt: &POINTL,
-        effect: *mut DROPEFFECT,
-    ) -> windows::core::Result<()> {
+    fn Drop(&self, pdataobj: windows::core::Ref<'_, IDataObject>, _keys: MODIFIERKEYS_FLAGS, _pt: &POINTL, effect: *mut DROPEFFECT) -> windows::core::Result<()> {
         unsafe {
             if crate::config::paused() {
                 *effect = DROPEFFECT_NONE;

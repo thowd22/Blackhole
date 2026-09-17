@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Foundation::{HANDLE, HGLOBAL};
+use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_DIB;
@@ -114,48 +114,29 @@ pub fn start(dot: HWND, tx: Sender<Input>, unit: i32) {
         std::ptr::copy_nonoverlapping(dim.as_ptr(), bits, n);
 
         let font = CreateFontW(
-            -(7 * unit), 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
-            (FIXED_PITCH.0 | FF_MODERN.0) as u32, w!("Consolas"),
+            -(7 * unit),
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            NONANTIALIASED_QUALITY,
+            (FIXED_PITCH.0 | FF_MODERN.0) as u32,
+            w!("Consolas"),
         );
 
         let class = w!("BlackholeCapture");
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
-            lpszClassName: class,
-            hCursor: LoadCursorW(None, IDC_CROSS).unwrap_or_default(),
-            ..Default::default()
-        };
+        let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), lpszClassName: class, hCursor: LoadCursorW(None, IDC_CROSS).unwrap_or_default(), ..Default::default() };
         RegisterClassW(&wc);
-        let ov = Box::new(Overlay {
-            hwnd: HWND::default(),
-            dot,
-            tx,
-            unit: unit.max(1),
-            w,
-            h,
-            shot,
-            dim,
-            dib,
-            dc,
-            bits,
-            font,
-            anchor: None,
-            cursor: POINT::default(),
-            drawn: None,
-        });
+        let ov = Box::new(Overlay { hwnd: HWND::default(), dot, tx, unit: unit.max(1), w, h, shot, dim, dib, dc, bits, font, anchor: None, cursor: POINT::default(), drawn: None });
         let ptr = Box::into_raw(ov);
         // Not a tool window: it needs the keyboard for Esc, so it activates normally.
-        let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST,
-            class,
-            w!("Blackhole screenshot"),
-            WS_POPUP,
-            origin.x, origin.y, w, h,
-            None, None, None,
-            Some(ptr as *const _),
-        )
-        .unwrap_or_default();
+        let hwnd = CreateWindowExW(WS_EX_TOPMOST, class, w!("Blackhole screenshot"), WS_POPUP, origin.x, origin.y, w, h, None, None, None, Some(ptr as *const _)).unwrap_or_default();
         if hwnd.is_invalid() {
             drop(Box::from_raw(ptr));
             let _ = DeleteDC(dc);

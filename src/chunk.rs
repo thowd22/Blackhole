@@ -38,7 +38,13 @@ pub fn chunk(text: &str) -> Vec<String> {
         let mut words: Vec<Tok> = Vec::new();
         for (li, line) in para.lines().enumerate() {
             for (wi, w) in line.split_whitespace().enumerate() {
-                let sep = if wi > 0 { " " } else if li > 0 { "\n" } else { "\n\n" };
+                let sep = if wi > 0 {
+                    " "
+                } else if li > 0 {
+                    "\n"
+                } else {
+                    "\n\n"
+                };
                 words.push((w, sep));
             }
         }

@@ -43,10 +43,7 @@ pub fn init() -> anyhow::Result<PathBuf> {
                 unsafe {
                     let _ = SetDllDirectoryW(PCWSTR(wide(&dir.display().to_string()).as_ptr()));
                 }
-                ort::init_from(&dll)
-                    .map_err(|e| anyhow::anyhow!("load {}: {e}", dll.display()))?
-                    .with_name("blackhole")
-                    .commit();
+                ort::init_from(&dll).map_err(|e| anyhow::anyhow!("load {}: {e}", dll.display()))?.with_name("blackhole").commit();
                 return Ok(dir);
             }
             Err(e) => last_err = Some(e),

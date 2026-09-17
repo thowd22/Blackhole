@@ -166,7 +166,30 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0, nvim_init: String::new(), hotkeys: Vec::new(), theme: String::new(), agent_notify: true, idle_opacity: 100, shy: false, snap: true, paused: false, dot_palette: String::new(), vault_dir: String::new(), store_policy: copy(), model_name: String::new() }
+        Config {
+            x: 200,
+            y: 200,
+            scale: 2,
+            center_on_message: true,
+            hidden: false,
+            tutorial_step: 0,
+            think: true,
+            notes_default: false,
+            panel_w: 0,
+            panel_h: 0,
+            nvim_init: String::new(),
+            hotkeys: Vec::new(),
+            theme: String::new(),
+            agent_notify: true,
+            idle_opacity: 100,
+            shy: false,
+            snap: true,
+            paused: false,
+            dot_palette: String::new(),
+            vault_dir: String::new(),
+            store_policy: copy(),
+            model_name: String::new(),
+        }
     }
 }
 
@@ -279,10 +302,7 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 pub fn load() -> Config {
-    std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    std::fs::read_to_string(config_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 pub fn save(cfg: &Config) {

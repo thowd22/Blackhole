@@ -49,11 +49,7 @@ static SYNONYMS: &[(&str, &[&str])] = &[
 /// Synonyms for the query's words, deduplicated against the query and each
 /// other, keeping only those `in_vault` accepts.
 pub fn expand(query: &str, in_vault: impl Fn(&str) -> bool) -> Vec<&'static str> {
-    let terms: Vec<String> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_lowercase())
-        .collect();
+    let terms: Vec<String> = query.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).map(|t| t.to_lowercase()).collect();
     if terms.len() < MIN_QUERY_WORDS {
         return Vec::new();
     }

@@ -167,13 +167,7 @@ pub fn shade() -> u32 {
 }
 
 /// Upset is red whatever the palette: an error should never read as normal.
-const RING_UPSET: [Rgb; 5] = [
-    Rgb(60, 6, 6),
-    Rgb(120, 12, 12),
-    Rgb(200, 30, 30),
-    Rgb(255, 80, 60),
-    Rgb(255, 210, 200),
-];
+const RING_UPSET: [Rgb; 5] = [Rgb(60, 6, 6), Rgb(120, 12, 12), Rgb(200, 30, 30), Rgb(255, 80, 60), Rgb(255, 210, 200)];
 
 /// Thinking breathes in and out over this period.
 const BREATH_MS: u32 = 2600;

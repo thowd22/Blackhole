@@ -186,11 +186,7 @@ impl LayoutOutput {
             }
             if cells.len() >= 4 {
                 // Each cell → one line: sorted by the cell's top, then left.
-                let mut lines: Vec<(f64, f64, String)> = cells
-                    .into_iter()
-                    .map(|((l, t, _, _), gs)| (t as f64, l as f64, cell_text(gs)))
-                    .filter(|(_, _, s)| !s.is_empty())
-                    .collect();
+                let mut lines: Vec<(f64, f64, String)> = cells.into_iter().map(|((l, t, _, _), gs)| (t as f64, l as f64, cell_text(gs))).filter(|(_, _, s)| !s.is_empty()).collect();
                 // Loose text keeps its row grouping and is merged in by position.
                 for (y, x, s, _) in rows_of(loose).into_iter() {
                     lines.push((y, x, s));
@@ -278,7 +274,9 @@ impl LayoutOutput {
                 lines.push(line);
             } else if let Some(l) = lines.last_mut() {
                 // dropped row: don't let its gap create a stray blank line later
-                if l.is_empty() { lines.pop(); }
+                if l.is_empty() {
+                    lines.pop();
+                }
             }
         }
         if !self.out.is_empty() {
@@ -289,7 +287,14 @@ impl LayoutOutput {
         let mut compact = String::with_capacity(text.len());
         let mut blank = 0;
         for l in text.lines() {
-            if l.is_empty() { blank += 1; if blank > 1 { continue; } } else { blank = 0; }
+            if l.is_empty() {
+                blank += 1;
+                if blank > 1 {
+                    continue;
+                }
+            } else {
+                blank = 0;
+            }
             compact.push_str(l);
             compact.push('\n');
         }

@@ -47,10 +47,7 @@ impl<'a> Zip<'a> {
         }
         // End of central directory: its signature lives in the last 64 KiB + 22 bytes.
         let tail = bytes.len().saturating_sub(66 * 1024);
-        let eocd = (tail..=bytes.len() - 22)
-            .rev()
-            .find(|&i| u32_at(bytes, i) == 0x0605_4b50)
-            .ok_or("not a zip container")?;
+        let eocd = (tail..=bytes.len() - 22).rev().find(|&i| u32_at(bytes, i) == 0x0605_4b50).ok_or("not a zip container")?;
         if u32_at(bytes, eocd + 16) == u32::MAX {
             return Err("zip64 archives are not supported".into());
         }
@@ -480,15 +477,9 @@ fn sheets(zip: &Zip) -> Vec<(String, String)> {
                 if local(t) == "sheet" {
                     let n = out.len() + 1;
                     let name = attr(a, "name").unwrap_or_else(|| format!("Sheet {n}"));
-                    let target = attr(a, "r:id")
-                        .or_else(|| attr(a, "id"))
-                        .and_then(|id| rels.iter().find(|(i, _)| *i == id).map(|(_, t)| t.clone()))
-                        .unwrap_or_else(|| format!("worksheets/sheet{n}.xml"));
-                    let part = if let Some(abs) = target.strip_prefix('/') {
-                        abs.to_string()
-                    } else {
-                        format!("xl/{}", target.trim_start_matches("./"))
-                    };
+                    let target =
+                        attr(a, "r:id").or_else(|| attr(a, "id")).and_then(|id| rels.iter().find(|(i, _)| *i == id).map(|(_, t)| t.clone())).unwrap_or_else(|| format!("worksheets/sheet{n}.xml"));
+                    let part = if let Some(abs) = target.strip_prefix('/') { abs.to_string() } else { format!("xl/{}", target.trim_start_matches("./")) };
                     out.push((name, part));
                 }
             }
@@ -496,11 +487,7 @@ fn sheets(zip: &Zip) -> Vec<(String, String)> {
     }
     out.retain(|(_, part)| zip.has(part));
     if out.is_empty() {
-        let mut parts: Vec<String> = zip
-            .names()
-            .filter(|n| n.starts_with("xl/worksheets/sheet") && n.ends_with(".xml"))
-            .map(str::to_string)
-            .collect();
+        let mut parts: Vec<String> = zip.names().filter(|n| n.starts_with("xl/worksheets/sheet") && n.ends_with(".xml")).map(str::to_string).collect();
         parts.sort_by_key(|n| part_number(n));
         out = parts.iter().enumerate().map(|(i, p)| (format!("Sheet {}", i + 1), p.clone())).collect();
     }
@@ -543,11 +530,7 @@ fn sheet_rows(xml: &str, shared: &[String], out: &mut String) {
             "t" => in_t = false,
             "c" => {
                 let text = std::mem::take(&mut cur);
-                let value = if cell_type == "s" {
-                    text.trim().parse::<usize>().ok().and_then(|i| shared.get(i).cloned()).unwrap_or_default()
-                } else {
-                    text
-                };
+                let value = if cell_type == "s" { text.trim().parse::<usize>().ok().and_then(|i| shared.get(i).cloned()).unwrap_or_default() } else { text };
                 row.push(value.replace(['\r', '\n'], " ").trim().to_string());
             }
             "row" => {
@@ -573,11 +556,7 @@ fn sheet_rows(xml: &str, shared: &[String], out: &mut String) {
 
 /// PowerPoint: slides in order, each headed "Slide n", then its text runs.
 pub fn pptx(zip: &Zip) -> Result<String, String> {
-    let mut slides: Vec<String> = zip
-        .names()
-        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
-        .map(str::to_string)
-        .collect();
+    let mut slides: Vec<String> = zip.names().filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml")).map(str::to_string).collect();
     if slides.is_empty() {
         return Err("no slides in this .pptx".into());
     }

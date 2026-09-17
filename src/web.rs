@@ -101,7 +101,9 @@ struct Handle(*mut c_void);
 impl Drop for Handle {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            unsafe { let _ = WinHttpCloseHandle(self.0); }
+            unsafe {
+                let _ = WinHttpCloseHandle(self.0);
+            }
         }
     }
 }
@@ -109,7 +111,11 @@ impl Drop for Handle {
 fn last_error() -> String {
     let e = windows::core::Error::from_win32();
     let msg = e.message();
-    if msg.is_empty() { format!("WinHTTP error {:#x}", e.code().0) } else { msg }
+    if msg.is_empty() {
+        format!("WinHTTP error {:#x}", e.code().0)
+    } else {
+        msg
+    }
 }
 
 /// GET a URL. Returns (final URL after redirects, content-type, body bytes).
@@ -118,13 +124,7 @@ pub fn fetch(url: &str) -> Result<(String, String, Vec<u8>), String> {
     // These buffers must outlive every PCWSTR handed to WinHTTP.
     let (agent, verb, host_w, path_w) = (crate::util::wide("Blackhole"), crate::util::wide("GET"), crate::util::wide(&host), crate::util::wide(&path));
     unsafe {
-        let session = Handle(WinHttpOpen(
-            PCWSTR(agent.as_ptr()),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        ));
+        let session = Handle(WinHttpOpen(PCWSTR(agent.as_ptr()), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0));
         if session.0.is_null() {
             return Err(format!("could not start WinHTTP: {}", last_error()));
         }
@@ -159,21 +159,11 @@ pub fn fetch(url: &str) -> Result<(String, String, Vec<u8>), String> {
 
         let mut status: u32 = 0;
         let mut len = 4u32;
-        let _ = WinHttpQueryHeaders(
-            req.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some(&mut status as *mut u32 as *mut c_void),
-            &mut len,
-            std::ptr::null_mut(),
-        );
+        let _ = WinHttpQueryHeaders(req.0, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, PCWSTR::null(), Some(&mut status as *mut u32 as *mut c_void), &mut len, std::ptr::null_mut());
         if !(200..300).contains(&status) {
             return Err(format!("HTTP {status}"));
         }
-        let content_type = query_string(req.0, |h, buf, len| {
-            WinHttpQueryHeaders(h, WINHTTP_QUERY_CONTENT_TYPE, PCWSTR::null(), Some(buf), len, std::ptr::null_mut())
-        })
-        .unwrap_or_default();
+        let content_type = query_string(req.0, |h, buf, len| WinHttpQueryHeaders(h, WINHTTP_QUERY_CONTENT_TYPE, PCWSTR::null(), Some(buf), len, std::ptr::null_mut())).unwrap_or_default();
         let final_url = query_string(req.0, |h, buf, len| WinHttpQueryOption(h, WINHTTP_OPTION_URL, Some(buf), len)).unwrap_or_else(|| url.to_string());
 
         let mut body: Vec<u8> = Vec::new();
@@ -220,12 +210,14 @@ fn decode_body(bytes: &[u8], content_type: &str) -> String {
 
 fn cp1252(b: u8) -> char {
     const HIGH: [char; 32] = [
-        '\u{20ac}', '\u{81}', '\u{201a}', '\u{192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}',
-        '\u{2c6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8d}', '\u{17d}', '\u{8f}',
-        '\u{90}', '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}',
-        '\u{2dc}', '\u{2122}', '\u{161}', '\u{203a}', '\u{153}', '\u{9d}', '\u{17e}', '\u{178}',
+        '\u{20ac}', '\u{81}', '\u{201a}', '\u{192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}', '\u{2c6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8d}', '\u{17d}', '\u{8f}', '\u{90}',
+        '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{2dc}', '\u{2122}', '\u{161}', '\u{203a}', '\u{153}', '\u{9d}', '\u{17e}', '\u{178}',
     ];
-    if (0x80..0xa0).contains(&b) { HIGH[(b - 0x80) as usize] } else { b as char }
+    if (0x80..0xa0).contains(&b) {
+        HIGH[(b - 0x80) as usize]
+    } else {
+        b as char
+    }
 }
 
 /// Fetch a URL and read it as a page. Text/plain comes through as it is; other
@@ -257,7 +249,11 @@ fn host_of(url: &str) -> String {
 fn last_segment(url: &str) -> String {
     let path = url.split("//").nth(1).unwrap_or(url);
     let seg = path.split(['?', '#']).next().unwrap_or(path).trim_end_matches('/').rsplit('/').next().unwrap_or("");
-    if seg.is_empty() || seg == host_of(url) { host_of(url) } else { seg.to_string() }
+    if seg.is_empty() || seg == host_of(url) {
+        host_of(url)
+    } else {
+        seg.to_string()
+    }
 }
 
 // ------------------------------------------------------------ HTML → text
@@ -315,11 +311,9 @@ fn strip_raw(html: &str) -> String {
         };
         out.push_str(&html[i..lt]);
         let tag = &lower[lt..];
-        let raw = ["script", "style", "noscript", "svg", "template"].iter().find(|t| {
-            tag.len() > t.len() + 1
-                && tag[1..].starts_with(**t)
-                && matches!(tag.as_bytes()[1 + t.len()], b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/')
-        });
+        let raw = ["script", "style", "noscript", "svg", "template"]
+            .iter()
+            .find(|t| tag.len() > t.len() + 1 && tag[1..].starts_with(**t) && matches!(tag.as_bytes()[1 + t.len()], b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/'));
         match raw {
             Some(t) => {
                 let close = format!("</{t}");
@@ -411,8 +405,7 @@ fn tree(toks: &[Tok]) -> Vec<Node> {
                     nodes[top].tags += 1;
                 }
                 let hint = format!("{} {}", attr(attrs, "id").unwrap_or_default(), attr(attrs, "class").unwrap_or_default()).to_ascii_lowercase();
-                let hinted = attr(attrs, "role").as_deref() == Some("main")
-                    || ["article", "content", "post", "story", "entry", "markdown", "prose"].iter().any(|k| hint.contains(k));
+                let hinted = attr(attrs, "role").as_deref() == Some("main") || ["article", "content", "post", "story", "entry", "markdown", "prose"].iter().any(|k| hint.contains(k));
                 nodes.push(Node { name: name.clone(), start: i, end: toks.len(), text: 0, tags: 0, hinted });
                 stack.push(nodes.len() - 1);
             }
@@ -531,9 +524,7 @@ fn render(toks: &[Tok]) -> String {
                         flush(&mut cur, &mut out, &mut pending, &mut heading);
                         heading = name[1..].parse::<usize>().ok();
                     }
-                    "p" | "div" | "tr" | "ul" | "ol" | "table" | "section" | "article" | "blockquote" | "pre" | "dd" | "dt" | "hr" | "figure" => {
-                        flush(&mut cur, &mut out, &mut pending, &mut heading)
-                    }
+                    "p" | "div" | "tr" | "ul" | "ol" | "table" | "section" | "article" | "blockquote" | "pre" | "dd" | "dt" | "hr" | "figure" => flush(&mut cur, &mut out, &mut pending, &mut heading),
                     _ => {}
                 }
             }
@@ -544,7 +535,10 @@ fn render(toks: &[Tok]) -> String {
                     }
                     continue;
                 }
-                if matches!(name.as_str(), "p" | "div" | "tr" | "li" | "ul" | "ol" | "table" | "section" | "article" | "blockquote" | "pre" | "dd" | "dt" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "figure") {
+                if matches!(
+                    name.as_str(),
+                    "p" | "div" | "tr" | "li" | "ul" | "ol" | "table" | "section" | "article" | "blockquote" | "pre" | "dd" | "dt" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "figure"
+                ) {
                     flush(&mut cur, &mut out, &mut pending, &mut heading);
                 }
             }

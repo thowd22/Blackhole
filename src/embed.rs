@@ -103,11 +103,7 @@ struct WordPiece {
 
 impl WordPiece {
     fn new(vocab_txt: &str) -> WordPiece {
-        let vocab: HashMap<String, u32> = vocab_txt
-            .lines()
-            .enumerate()
-            .map(|(i, w)| (w.trim_end().to_string(), i as u32))
-            .collect();
+        let vocab: HashMap<String, u32> = vocab_txt.lines().enumerate().map(|(i, w)| (w.trim_end().to_string(), i as u32)).collect();
         let get = |k: &str| *vocab.get(k).expect("special token missing from vocab");
         WordPiece { cls: get("[CLS]"), sep: get("[SEP]"), unk: get("[UNK]"), vocab }
     }

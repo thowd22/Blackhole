@@ -12,8 +12,8 @@ use ort::ep::{DirectML, ExecutionProvider, CPU};
 use ort::memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::builder::SessionBuilder;
 use ort::session::Session;
-use ort::AsPointer;
 use ort::value::{DynValue, Tensor};
+use ort::AsPointer;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,7 +51,11 @@ fn think_budget() -> usize {
     if let Some(b) = std::env::var("BLACKHOLE_THINK").ok().and_then(|v| v.parse().ok()) {
         return b;
     }
-    if THINK_ENABLED.load(Ordering::Relaxed) { THINK_BUDGET } else { 0 }
+    if THINK_ENABLED.load(Ordering::Relaxed) {
+        THINK_BUDGET
+    } else {
+        0
+    }
 }
 /// Dedicated VRAM below which GPU decode (two weight copies) is not attempted by default.
 const LOW_VRAM_MB: u64 = 7000;
@@ -127,10 +131,7 @@ pub fn model_size(p: &Path) -> u64 {
         _ => Path::new("."),
     };
     let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
-    rd.flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with(&stem))
-        .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
-        .sum()
+    rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&stem)).map(|e| e.metadata().map(|m| m.len()).unwrap_or(0)).sum()
 }
 
 /// A model's tokenizer: `tokenizer.json` beside it, else the built-in Qwen2.5 one.
@@ -295,8 +296,7 @@ impl Llm {
             crate::util::log(&format!("llm: {} MB of VRAM: decoding on the CPU (set BLACKHOLE_DECODE=gpu to force GPU decode)", adapter.as_ref().map(|a| a.vram_mb).unwrap_or(0)));
         }
         // Graph-only files are small; a `logit_index` input marks a graph prepared for static shapes.
-        let has_logit_index = std::fs::metadata(path).map(|m| m.len() < 64 << 20).unwrap_or(false)
-            && std::fs::read(path).map(|b| b.windows(11).any(|w| w == b"logit_index")).unwrap_or(false);
+        let has_logit_index = std::fs::metadata(path).map(|m| m.len() < 64 << 20).unwrap_or(false) && std::fs::read(path).map(|b| b.windows(11).any(|w| w == b"logit_index")).unwrap_or(false);
         let seq = if want_gpu_decode && has_logit_index { static_seq() } else { 0 };
         let static_shapes = if seq > 0 { Some((seq, kv_capacity())) } else { None };
         let mut gpu_device = 0;
@@ -333,7 +333,13 @@ impl Llm {
         } else {
             None
         };
-        let backend = if gpu_decode { "DirectML" } else if gpu.is_some() { "DirectML + CPU" } else { "CPU" };
+        let backend = if gpu_decode {
+            "DirectML"
+        } else if gpu.is_some() {
+            "DirectML + CPU"
+        } else {
+            "CPU"
+        };
         let _ = &gpu_device;
         let seq = if gpu_decode { seq } else { 0 };
         if seq > 0 {
@@ -360,8 +366,12 @@ impl Llm {
                 layers += 1;
                 if let Some(dims) = input.dtype().tensor_shape() {
                     if dims.len() == 4 {
-                        if dims[1] > 0 { kv_heads = dims[1] as usize; }
-                        if dims[3] > 0 { head_dim = dims[3] as usize; }
+                        if dims[1] > 0 {
+                            kv_heads = dims[1] as usize;
+                        }
+                        if dims[3] > 0 {
+                            head_dim = dims[3] as usize;
+                        }
                     }
                 }
             }
@@ -374,9 +384,36 @@ impl Llm {
         let no_think = family == Family::ChatMl && tok.token_to_id("<think>").is_some();
         let eos: Vec<u32> = STOP_TOKENS.iter().filter_map(|t| tok.token_to_id(t)).collect();
         let end_think = if no_think { tok.token_to_id("</think>") } else { None };
-        crate::util::log(&format!("llm: {} layout, {family:?} template{}, {} stop tokens, kv {}", if wants_position_ids { "HF" } else { "GenAI" }, if no_think { " (no-think)" } else { "" }, eos.len(), if kv_f16 { "f16" } else { "f32" }));
+        crate::util::log(&format!(
+            "llm: {} layout, {family:?} template{}, {} stop tokens, kv {}",
+            if wants_position_ids { "HF" } else { "GenAI" },
+            if no_think { " (no-think)" } else { "" },
+            eos.len(),
+            if kv_f16 { "f16" } else { "f32" }
+        ));
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Llm { family, no_think, end_think, eos, cpu, gpu, tok, layers, kv_heads, head_dim, wants_position_ids, kv_f16, gpu_decode, has_logit_index, seq, prompt_live: None, gpu_device, gpu_alloc, backend, name })
+        Ok(Llm {
+            family,
+            no_think,
+            end_think,
+            eos,
+            cpu,
+            gpu,
+            tok,
+            layers,
+            kv_heads,
+            head_dim,
+            wants_position_ids,
+            kv_f16,
+            gpu_decode,
+            has_logit_index,
+            seq,
+            prompt_live: None,
+            gpu_device,
+            gpu_alloc,
+            backend,
+            name,
+        })
     }
 
     /// Questions about the files themselves rather than their contents: "which
@@ -385,7 +422,13 @@ impl Llm {
         let q = question.to_lowercase();
         let words: Vec<&str> = q.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
         let noun = words.iter().any(|w| matches!(*w, "file" | "files" | "doc" | "docs" | "document" | "documents" | "paper" | "papers" | "note" | "notes" | "pdf" | "pdfs" | "snippet" | "receipt"));
-        let ask = q.starts_with("which") || q.starts_with("what file") || q.starts_with("is there") || q.starts_with("do i have") || q.starts_with("are there") || q.contains("which file") || q.contains("which doc");
+        let ask = q.starts_with("which")
+            || q.starts_with("what file")
+            || q.starts_with("is there")
+            || q.starts_with("do i have")
+            || q.starts_with("are there")
+            || q.contains("which file")
+            || q.contains("which doc");
         noun && ask
     }
 
@@ -501,7 +544,17 @@ impl Llm {
         fn pick<T: Copy + Into<f32>>(shape: &[i64], data: &[T]) -> u32 {
             let vocab = *shape.last().unwrap_or(&(data.len() as i64)) as usize;
             let last = &data[data.len() - vocab..];
-            last.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |b, (i, &x)| { let x: f32 = x.into(); if x > b.1 { (i, x) } else { b } }).0 as u32
+            last.iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |b, (i, &x)| {
+                    let x: f32 = x.into();
+                    if x > b.1 {
+                        (i, x)
+                    } else {
+                        b
+                    }
+                })
+                .0 as u32
         }
         if let Ok((shape, data)) = logits.try_extract_tensor::<f32>() {
             return Ok(pick(shape, data));
@@ -517,26 +570,14 @@ impl Llm {
     fn device_kv(&self) -> anyhow::Result<Vec<DynValue>> {
         let alloc = self.gpu_alloc.as_ref().ok_or_else(|| anyhow::anyhow!("no GPU allocator"))?;
         let shape = [1usize, self.kv_heads, kv_capacity(), self.head_dim];
-        (0..self.layers * 2)
-            .map(|_| {
-                Ok(if self.kv_f16 {
-                    ok(Tensor::<half::f16>::new(alloc, shape))?.into_dyn()
-                } else {
-                    ok(Tensor::<f32>::new(alloc, shape))?.into_dyn()
-                })
-            })
-            .collect()
+        (0..self.layers * 2).map(|_| Ok(if self.kv_f16 { ok(Tensor::<half::f16>::new(alloc, shape))?.into_dyn() } else { ok(Tensor::<f32>::new(alloc, shape))?.into_dyn() })).collect()
     }
 
     fn empty_past(&self) -> anyhow::Result<Vec<DynValue>> {
         let shape = [1usize, self.kv_heads, 0, self.head_dim];
         (0..self.layers * 2)
             .map(|_| {
-                Ok(if self.kv_f16 {
-                    ok(Tensor::<half::f16>::from_array((shape, Vec::<half::f16>::new())))?.into_dyn()
-                } else {
-                    ok(Tensor::<f32>::from_array((shape, Vec::<f32>::new())))?.into_dyn()
-                })
+                Ok(if self.kv_f16 { ok(Tensor::<half::f16>::from_array((shape, Vec::<half::f16>::new())))?.into_dyn() } else { ok(Tensor::<f32>::from_array((shape, Vec::<f32>::new())))?.into_dyn() })
             })
             .collect()
     }
@@ -571,9 +612,7 @@ impl Llm {
         }
         let mut outputs = ok(gpu.run_binding(&binding))?;
         let next = Self::argmax(&outputs["logits"])?;
-        let present = (0..layers * 2)
-            .map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output")))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let present = (0..layers * 2).map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output"))).collect::<anyhow::Result<Vec<_>>>()?;
         Ok((next, present))
     }
 
@@ -650,9 +689,7 @@ impl Llm {
                 crate::util::log("gpu-decode: ran");
             }
             let next = Self::argmax(&outputs["logits"])?;
-            let past = (0..layers * 2)
-                .map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output")))
-                .collect::<anyhow::Result<Vec<_>>>()?;
+            let past = (0..layers * 2).map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output"))).collect::<anyhow::Result<Vec<_>>>()?;
             if dbg {
                 crate::util::log(&format!("gpu-decode: next={next}"));
             }
@@ -684,20 +721,12 @@ impl Llm {
         }
         let mut outputs = ok(self.cpu.run(inputs))?;
         let next = Self::argmax(&outputs["logits"])?;
-        let present = (0..layers * 2)
-            .map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output")))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let present = (0..layers * 2).map(|i| outputs.remove(Self::kv_name(i, "present")).ok_or_else(|| anyhow::anyhow!("missing present output"))).collect::<anyhow::Result<Vec<_>>>()?;
         Ok((next, present))
     }
 
     /// Generate an answer, streaming decoded text through `on_token`.
-    pub fn answer(
-        &mut self,
-        question: &str,
-        sources: &[Source],
-        cancel: &AtomicBool,
-        on_token: impl FnMut(&str),
-    ) -> anyhow::Result<String> {
+    pub fn answer(&mut self, question: &str, sources: &[Source], cancel: &AtomicBool, on_token: impl FnMut(&str)) -> anyhow::Result<String> {
         let prompt = self.prompt(question, sources);
         let prefill = (Self::is_temporal(question) && !self.thinking()).then_some(PREFILL_TIMELINE);
         let think = self.thinking();
@@ -706,28 +735,13 @@ impl Llm {
 
     /// Greedy generation from a finished prompt; `prefill` is text already in the
     /// prompt that counts as output (echoed to `on_token` first).
-    fn generate(
-        &mut self,
-        prompt: String,
-        prefill: Option<&str>,
-        max_new: usize,
-        cancel: &AtomicBool,
-        on_token: impl FnMut(&str),
-    ) -> anyhow::Result<String> {
+    fn generate(&mut self, prompt: String, prefill: Option<&str>, max_new: usize, cancel: &AtomicBool, on_token: impl FnMut(&str)) -> anyhow::Result<String> {
         self.generate_ex(prompt, prefill, max_new, false, cancel, on_token)
     }
 
     /// `think`: the prompt ends inside an open `<think>` block; tokens up to `</think>`
     /// (or the budget, after which `</think>` is forced) are kept private, the rest streams.
-    fn generate_ex(
-        &mut self,
-        prompt: String,
-        prefill: Option<&str>,
-        max_new: usize,
-        think: bool,
-        cancel: &AtomicBool,
-        mut on_token: impl FnMut(&str),
-    ) -> anyhow::Result<String> {
+    fn generate_ex(&mut self, prompt: String, prefill: Option<&str>, max_new: usize, think: bool, cancel: &AtomicBool, mut on_token: impl FnMut(&str)) -> anyhow::Result<String> {
         let enc = self.tok.encode(prompt, false).map_err(|e| anyhow::anyhow!("{e}"))?;
         let prompt_ids: Vec<u32> = enc.get_ids().to_vec();
         if std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some() {
@@ -817,7 +831,12 @@ impl Llm {
                     in_think = false;
                     if std::env::var_os("BLACKHOLE_LLM_DEBUG").is_some() {
                         let text = self.tok.decode(&think_tokens, true).unwrap_or_default();
-                        crate::util::log(&format!("llm think ({} tokens{}): {}", think_tokens.len(), if closed { "" } else { ", budget hit" }, text.replace('\n', " ⏎ ").chars().take(400).collect::<String>()));
+                        crate::util::log(&format!(
+                            "llm think ({} tokens{}): {}",
+                            think_tokens.len(),
+                            if closed { "" } else { ", budget hit" },
+                            text.replace('\n', " ⏎ ").chars().take(400).collect::<String>()
+                        ));
                     }
                     continue;
                 }

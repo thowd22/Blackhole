@@ -131,7 +131,6 @@ impl AskEngine {
         });
     }
 
-
     /// Kick off an answer for `question`; messages go to `target`.
     pub fn ask(self: &Arc<Self>, question: String, target: HWND, id: u64) -> Job {
         let cancel = Arc::new(AtomicBool::new(false));
@@ -236,9 +235,7 @@ impl AskEngine {
         let aux = rewrites.join(" ");
         self.ensure_reranker();
         let reranker = self.reranker.lock().unwrap();
-        let rerank_fn = |q: &str, passages: &[String]| -> Option<Vec<f32>> {
-            reranker.as_ref().and_then(|r| r.score(q, passages).ok())
-        };
+        let rerank_fn = |q: &str, passages: &[String]| -> Option<Vec<f32>> { reranker.as_ref().and_then(|r| r.score(q, passages).ok()) };
         let (absent, chunks) = {
             let store = store_arc.lock().unwrap();
             let absent = store.absent(question, Some(&qvec)) && !store.any_term_present(&aux);
@@ -373,9 +370,7 @@ impl AskEngine {
             }
             None => match self.scratch_vault() {
                 Ok(store) => (sanity_questions(), Some(store), "built-in sanity set over a scratch vault".to_string()),
-                Err(e) => {
-                    return SelfCheck { total: 0, passed: 0, mode: "failed", source: format!("could not build a scratch vault: {e}"), report: None, secs: 0.0 }
-                }
+                Err(e) => return SelfCheck { total: 0, passed: 0, mode: "failed", source: format!("could not build a scratch vault: {e}"), report: None, secs: 0.0 },
             },
         };
         let store: &Mutex<Store> = scratch.as_ref().unwrap_or(&self.store);
@@ -435,12 +430,7 @@ impl AskEngine {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let store = Mutex::new(Store::open(&dir.join("vault.db")).map_err(|e| e.to_string())?);
         for (i, (title, body)) in SANITY_ITEMS.iter().enumerate() {
-            let id = store
-                .lock()
-                .unwrap()
-                .add(title, "text", None, body, &format!("selfcheck-{i}"), crate::util::now_secs())
-                .map_err(|e| e.to_string())?
-                .ok_or("duplicate in the scratch vault")?;
+            let id = store.lock().unwrap().add(title, "text", None, body, &format!("selfcheck-{i}"), crate::util::now_secs()).map_err(|e| e.to_string())?.ok_or("duplicate in the scratch vault")?;
             crate::ingest::embed_item(&store, &self.embedder, id, title, body);
         }
         Ok(store)

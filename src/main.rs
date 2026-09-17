@@ -7,20 +7,19 @@ mod bubble;
 mod chunk;
 mod config;
 mod dot;
+mod drop;
 mod embed;
 mod expand;
-mod drop;
-mod ingest;
-mod pdf_layout;
 mod gpu;
+mod hotkeys;
+mod ingest;
 mod llm_ort;
 mod mcp;
 mod models;
-mod hotkeys;
-mod theme;
 mod nvim;
 mod ocr;
 mod office;
+mod pdf_layout;
 mod rerank;
 mod runtime;
 mod screenshot;
@@ -28,6 +27,7 @@ mod search;
 mod sprite;
 mod startup;
 mod store;
+mod theme;
 mod tray;
 mod util;
 mod web;
@@ -53,14 +53,17 @@ fn main() {
             }
             let t = std::time::Instant::now();
             let p = std::path::Path::new(&path);
-            let text = if p.extension().map(|e| e.eq_ignore_ascii_case("pdf")).unwrap_or(false) {
-                std::fs::read(p).ok().and_then(|b| ocr::read_pdf_images(&b))
-            } else {
-                ocr::read_file(p)
-            };
+            let text = if p.extension().map(|e| e.eq_ignore_ascii_case("pdf")).unwrap_or(false) { std::fs::read(p).ok().and_then(|b| ocr::read_pdf_images(&b)) } else { ocr::read_file(p) };
             match text {
-                Some(t2) => { println!("{t2}"); eprintln!("[{:.0} ms]", t.elapsed().as_secs_f32() * 1000.0); std::process::exit(0) }
-                None => { eprintln!("no text / could not read"); std::process::exit(2) }
+                Some(t2) => {
+                    println!("{t2}");
+                    eprintln!("[{:.0} ms]", t.elapsed().as_secs_f32() * 1000.0);
+                    std::process::exit(0)
+                }
+                None => {
+                    eprintln!("no text / could not read");
+                    std::process::exit(2)
+                }
             }
         }
     }
@@ -182,8 +185,14 @@ fn move_vault_now(from: &std::path::Path, to: &std::path::Path) {
 fn selftest() -> i32 {
     let step = |name: &str, r: Result<(), String>| -> bool {
         match r {
-            Ok(()) => { println!("ok    {name}"); true }
-            Err(e) => { println!("FAIL  {name}: {e}"); false }
+            Ok(()) => {
+                println!("ok    {name}");
+                true
+            }
+            Err(e) => {
+                println!("FAIL  {name}: {e}");
+                false
+            }
         }
     };
     let t0 = std::time::Instant::now();
@@ -191,13 +200,28 @@ fn selftest() -> i32 {
         return 1;
     }
     let embedder = match embed::Embedder::load() {
-        Ok(e) => { println!("ok    embedder on {}", e.backend); e }
-        Err(e) => { println!("FAIL  embedder: {e}"); return 1; }
+        Ok(e) => {
+            println!("ok    embedder on {}", e.backend);
+            e
+        }
+        Err(e) => {
+            println!("FAIL  embedder: {e}");
+            return 1;
+        }
     };
     let vec = match embedder.embed("a small black hole that eats files") {
-        Ok(v) if v.len() == embed::DIM => { println!("ok    embed ({} dims)", v.len()); v }
-        Ok(v) => { println!("FAIL  embed: {} dims", v.len()); return 1; }
-        Err(e) => { println!("FAIL  embed: {e}"); return 1; }
+        Ok(v) if v.len() == embed::DIM => {
+            println!("ok    embed ({} dims)", v.len());
+            v
+        }
+        Ok(v) => {
+            println!("FAIL  embed: {} dims", v.len());
+            return 1;
+        }
+        Err(e) => {
+            println!("FAIL  embed: {e}");
+            return 1;
+        }
     };
     let dir = std::env::temp_dir().join(format!("blackhole-selftest-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);

@@ -51,19 +51,14 @@ struct Ctx {
 
 /// Start the HTTP endpoint in a background thread. Returns the port.
 pub fn start(store: Arc<Mutex<Store>>, embedder: Arc<Embedder>, ask: Arc<crate::ask::AskEngine>, hwnd: usize) -> Option<u16> {
-    let server = tiny_http::Server::http(("127.0.0.1", DEFAULT_PORT))
-        .or_else(|_| tiny_http::Server::http(("127.0.0.1", 0)))
-        .ok()?;
+    let server = tiny_http::Server::http(("127.0.0.1", DEFAULT_PORT)).or_else(|_| tiny_http::Server::http(("127.0.0.1", 0))).ok()?;
     let port = server.server_addr().to_ip().map(|a| a.port())?;
     let tok = token();
     let _ = std::fs::write(info_path(), json!({ "port": port, "token": tok, "pid": std::process::id() }).to_string());
     let ctx = Arc::new(Ctx { store, embedder, ask, hwnd });
     std::thread::spawn(move || {
         for mut req in server.incoming_requests() {
-            let authed = req
-                .headers()
-                .iter()
-                .any(|h| h.field.equiv("Authorization") && h.value.as_str().trim() == format!("Bearer {tok}"));
+            let authed = req.headers().iter().any(|h| h.field.equiv("Authorization") && h.value.as_str().trim() == format!("Bearer {tok}"));
             if !authed {
                 let _ = req.respond(tiny_http::Response::from_string("unauthorized").with_status_code(401));
                 continue;
@@ -117,7 +112,9 @@ fn dispatch(ctx: &Ctx, msg: &Value) -> Option<Value> {
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
         "resources/list" => Ok(resources_list(ctx)),
-        "resources/templates/list" => Ok(json!({ "resourceTemplates": [{ "uriTemplate": "blackhole://item/{id}", "name": "Vault item", "description": "The full text of one vault item (see retrieve / list_recent for ids).", "mimeType": "text/plain" }] })),
+        "resources/templates/list" => Ok(
+            json!({ "resourceTemplates": [{ "uriTemplate": "blackhole://item/{id}", "name": "Vault item", "description": "The full text of one vault item (see retrieve / list_recent for ids).", "mimeType": "text/plain" }] }),
+        ),
         "resources/read" => match params.get("uri").and_then(|v| v.as_str()).and_then(|u| u.strip_prefix("blackhole://item/")).and_then(|i| i.parse::<i64>().ok()) {
             Some(id) => match item_json(ctx, id, usize::MAX) {
                 Some(v) => Ok(json!({ "contents": [{ "uri": format!("blackhole://item/{id}"), "mimeType": "text/plain", "text": v.get("content").and_then(|c| c.as_str()).unwrap_or("") }] })),
@@ -439,7 +436,8 @@ fn retrieve(ctx: &Ctx, args: &Value) -> Result<String, String> {
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(8).clamp(1, 25) as usize;
     let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("hybrid");
     let qvec = if mode == "keyword" { None } else { ctx.embedder.embed(query).ok() };
-    let tags: Vec<String> = tags_arg(args).map(|t| t.split(|c: char| c == ',' || c.is_whitespace()).map(|x| x.trim_start_matches('#').to_lowercase()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+    let tags: Vec<String> =
+        tags_arg(args).map(|t| t.split(|c: char| c == ',' || c.is_whitespace()).map(|x| x.trim_start_matches('#').to_lowercase()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
     let kind = args.get("kind").and_then(|v| v.as_str()).map(str::to_string);
     let store = ctx.store.lock().unwrap();
     let filtered = !tags.is_empty() || kind.is_some();

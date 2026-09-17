@@ -132,13 +132,7 @@ impl Ocr {
             let (bw, bh) = ((x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32);
             let d = bw * bh * UNCLIP / (2.0 * (bw + bh));
             let (sx, sy) = (img.w as f32 / nw as f32, img.h as f32 / nh as f32);
-            boxes.push((
-                ((x0 as f32 - d).max(0.0)) * sx,
-                ((y0 as f32 - d).max(0.0)) * sy,
-                ((x1 as f32 + 1.0 + d).min(nw as f32)) * sx,
-                ((y1 as f32 + 1.0 + d).min(nh as f32)) * sy,
-                score,
-            ));
+            boxes.push((((x0 as f32 - d).max(0.0)) * sx, ((y0 as f32 - d).max(0.0)) * sy, ((x1 as f32 + 1.0 + d).min(nw as f32)) * sx, ((y1 as f32 + 1.0 + d).min(nh as f32)) * sy, score));
         }
         Ok(boxes)
     }

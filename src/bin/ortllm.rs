@@ -2,14 +2,22 @@
 //! Console bench: load an ONNX LLM on DirectML and time prompt + decode.
 //! Usage: ortllm <model.onnx> [prompt words]
 
-#[path = "../config.rs"] mod config;
-#[path = "../hotkeys.rs"] mod hotkeys;
-#[path = "../theme.rs"] mod theme;
-#[path = "../util.rs"] mod util;
-#[path = "../runtime.rs"] mod runtime;
-#[path = "../gpu.rs"] mod gpu;
-#[path = "../models.rs"] mod models;
-#[path = "../llm_ort.rs"] mod llm_ort;
+#[path = "../config.rs"]
+mod config;
+#[path = "../gpu.rs"]
+mod gpu;
+#[path = "../hotkeys.rs"]
+mod hotkeys;
+#[path = "../llm_ort.rs"]
+mod llm_ort;
+#[path = "../models.rs"]
+mod models;
+#[path = "../runtime.rs"]
+mod runtime;
+#[path = "../theme.rs"]
+mod theme;
+#[path = "../util.rs"]
+mod util;
 
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -27,14 +35,19 @@ fn main() -> anyhow::Result<()> {
     let filler: String = (0..words).map(|i| format!("word{} ", i % 50)).collect();
     let text = format!("Tyler Howd Maxar Technologies, Principal MLOps Engineer 10/2021-Pres. Amazon Web Services, Senior DevOps Engineer 4/2021-10/2021. Raytheon, Storage Solutions Architect 4/2020-4/2021. {filler}");
     let sources = [llm_ort::Source { title: "resume.pdf", text: &text }];
-    let qs: Vec<String> = match std::env::args().nth(3) { Some(q) => vec![q], None => vec!["What is my most recent job title?".into(), "Where did I work before Maxar?".into()] };
+    let qs: Vec<String> = match std::env::args().nth(3) {
+        Some(q) => vec![q],
+        None => vec!["What is my most recent job title?".into(), "Where did I work before Maxar?".into()],
+    };
     for q in qs.iter().map(String::as_str) {
         let t = Instant::now();
         let mut first = None;
         let mut n = 0;
         print!("\n> {q}\n");
         let ans = llm.answer(q, &sources, &AtomicBool::new(false), |tok| {
-            if first.is_none() { first = Some(t.elapsed()); }
+            if first.is_none() {
+                first = Some(t.elapsed());
+            }
             n += 1;
             print!("{tok}");
             let _ = std::io::stdout().flush();

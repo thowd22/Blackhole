@@ -16,8 +16,8 @@
 //! fight the control's own repaints — so the bar simply lives outside the control.
 
 use crate::ask::{AskEngine, Job, WM_ASK_DONE, WM_ASK_STATUS, WM_ASK_TOKEN};
-use crate::nvim::{self, WM_NVIM_CHANGED, WM_NVIM_CMD, WM_NVIM_ESCAPE, WM_NVIM_FLUSH, WM_NVIM_STATUS};
 use crate::embed::Embedder;
+use crate::nvim::{self, WM_NVIM_CHANGED, WM_NVIM_CMD, WM_NVIM_ESCAPE, WM_NVIM_FLUSH, WM_NVIM_STATUS};
 use crate::store::{Hit, Store};
 use crate::util::wide;
 use std::sync::atomic::Ordering;
@@ -96,11 +96,21 @@ const ANSWER_MAX_LINES: i32 = 10;
 const ANIM_MS: f32 = 150.0;
 
 // Colours come from the current theme (src/theme.rs); brushes are rebuilt on change.
-fn c_bg() -> COLORREF { crate::theme::cr(crate::theme::current().bg) }
-fn c_bg_edit() -> COLORREF { crate::theme::cr(crate::theme::current().bg_edit) }
-fn c_fg() -> COLORREF { crate::theme::cr(crate::theme::current().fg) }
-fn c_fg_dim() -> COLORREF { crate::theme::cr(crate::theme::current().fg_dim) }
-fn c_accent() -> COLORREF { crate::theme::cr(crate::theme::current().accent) }
+fn c_bg() -> COLORREF {
+    crate::theme::cr(crate::theme::current().bg)
+}
+fn c_bg_edit() -> COLORREF {
+    crate::theme::cr(crate::theme::current().bg_edit)
+}
+fn c_fg() -> COLORREF {
+    crate::theme::cr(crate::theme::current().fg)
+}
+fn c_fg_dim() -> COLORREF {
+    crate::theme::cr(crate::theme::current().fg_dim)
+}
+fn c_accent() -> COLORREF {
+    crate::theme::cr(crate::theme::current().accent)
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Ctl {
@@ -293,13 +303,7 @@ impl SearchWin {
     pub fn create(dot: HWND, store: Arc<Mutex<Store>>, embedder: Arc<Embedder>, ask: Arc<AskEngine>, size: (i32, i32), notes_default: bool, nvim_init: &str) -> HWND {
         unsafe {
             let class = w!("BlackholeSearch");
-            let wc = WNDCLASSW {
-                lpfnWndProc: Some(wndproc),
-                lpszClassName: class,
-                hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                hbrBackground: HBRUSH::default(),
-                ..Default::default()
-            };
+            let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), lpszClassName: class, hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), hbrBackground: HBRUSH::default(), ..Default::default() };
             RegisterClassW(&wc);
             let boxed = Box::new(SearchWin {
                 hwnd: HWND::default(),
@@ -364,16 +368,7 @@ impl SearchWin {
                 gear_rc: RECT::default(),
             });
             let ptr = Box::into_raw(boxed);
-            let hwnd = CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                class,
-                w!("Blackhole"),
-                WS_POPUP | WS_CLIPCHILDREN,
-                0, 0, 10, 10,
-                None, None, None,
-                Some(ptr as *const _),
-            )
-            .unwrap_or_default();
+            let hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, class, w!("Blackhole"), WS_POPUP | WS_CLIPCHILDREN, 0, 0, 10, 10, None, None, None, Some(ptr as *const _)).unwrap_or_default();
             hwnd
         }
     }
@@ -424,7 +419,11 @@ impl SearchWin {
 
     /// Items in the list, whichever view the Files tab is in.
     fn list_len(&self) -> usize {
-        if self.tab == Tab::Files && self.undigested { self.fails.len() } else { self.hits.len() }
+        if self.tab == Tab::Files && self.undigested {
+            self.fails.len()
+        } else {
+            self.hits.len()
+        }
     }
 
     fn bar_w(&self) -> i32 {
@@ -451,11 +450,7 @@ impl SearchWin {
         if !self.answer_shown {
             return 0;
         }
-        let lines = if self.thinking {
-            ANSWER_MIN_LINES
-        } else {
-            (SendMessageW(self.answer, EM_GETLINECOUNT, None, None).0 as i32).clamp(ANSWER_MIN_LINES, ANSWER_MAX_LINES)
-        };
+        let lines = if self.thinking { ANSWER_MIN_LINES } else { (SendMessageW(self.answer, EM_GETLINECOUNT, None, None).0 as i32).clamp(ANSWER_MIN_LINES, ANSWER_MAX_LINES) };
         lines * self.line_h + self.px(6) + self.pad()
     }
 
@@ -472,14 +467,36 @@ impl SearchWin {
             let _ = DeleteObject(self.font_small.into());
         }
         self.font = CreateFontW(
-            -self.px(15), 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            (FIXED_PITCH.0 | FF_MODERN.0) as u32, w!("Consolas"),
+            -self.px(15),
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            (FIXED_PITCH.0 | FF_MODERN.0) as u32,
+            w!("Consolas"),
         );
         self.font_small = CreateFontW(
-            -self.px(12), 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            (FIXED_PITCH.0 | FF_MODERN.0) as u32, w!("Consolas"),
+            -self.px(12),
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            (FIXED_PITCH.0 | FF_MODERN.0) as u32,
+            w!("Consolas"),
         );
         SendMessageW(self.edit, WM_SETFONT, Some(WPARAM(self.font.0 as usize)), Some(LPARAM(1)));
         SendMessageW(self.answer, WM_SETFONT, Some(WPARAM(self.font.0 as usize)), Some(LPARAM(1)));
@@ -589,11 +606,7 @@ impl SearchWin {
         }
         let _ = ShowWindow(self.list, SW_SHOWNA);
         self.editor_rc = RECT::default();
-        let answer_h = if self.answer_shown {
-            self.answer_wanted_h().min(h - self.fixed_h() - MIN_ROWS * self.row_height()).max(0)
-        } else {
-            0
-        };
+        let answer_h = if self.answer_shown { self.answer_wanted_h().min(h - self.fixed_h() - MIN_ROWS * self.row_height()).max(0) } else { 0 };
         self.answer_rc = RECT { left: pad, top: y, right: pad + inner_w, bottom: y + (answer_h - pad).max(0) };
         let _ = SetWindowPos(self.answer, None, pad, y, inner_w, (answer_h - pad).max(0), SWP_NOZORDER | SWP_NOACTIVATE);
         let _ = ShowWindow(self.answer, if self.answer_shown && !self.thinking { SW_SHOWNA } else { SW_HIDE });
@@ -700,7 +713,11 @@ impl SearchWin {
 
     /// The EDIT control behind a scrollable text area.
     fn text_ctl(&self, c: Ctl) -> HWND {
-        if c == Ctl::Editor { self.editor } else { self.answer }
+        if c == Ctl::Editor {
+            self.editor
+        } else {
+            self.answer
+        }
     }
 
     /// (first visible line, lines per page, line count) — the control's own numbers.
@@ -854,7 +871,11 @@ impl SearchWin {
         let old = SelectObject(hdc, self.font_small.into());
         for (i, label) in ["Files", "Notes"].iter().enumerate() {
             let r = self.tab_rc[i];
-            let active = match self.tab { Tab::Files => i == 0, Tab::Notes => i == 1, Tab::Settings => false };
+            let active = match self.tab {
+                Tab::Files => i == 0,
+                Tab::Notes => i == 1,
+                Tab::Settings => false,
+            };
             FillRect(hdc, &r, if active { self.brush_edit } else { self.brush_bg });
             if active {
                 // Framed on three sides; the open bottom joins it to the content below.
@@ -1010,7 +1031,11 @@ impl SearchWin {
         }
         self.refresh();
         let _ = InvalidateRect(Some(self.hwnd), None, true);
-        let _ = SetFocus(Some(match tab { Tab::Notes => self.editor_hwnd(), Tab::Settings => self.hwnd, Tab::Files => self.edit }));
+        let _ = SetFocus(Some(match tab {
+            Tab::Notes => self.editor_hwnd(),
+            Tab::Settings => self.hwnd,
+            Tab::Files => self.edit,
+        }));
     }
 
     /// Right-click → Settings…: the Settings tab.
@@ -1056,17 +1081,67 @@ impl SearchWin {
             };
             rows.push(Setting { label: label.to_string(), value, hint, kind: SettingKind::Hotkey(i) });
         }
-        rows.push(Setting { label: "Theme".into(), value: crate::theme::current().name.into(), hint: format!("click for {} · panel and editor colours; the dot keeps its own", crate::theme::next_name()), kind: SettingKind::Command(crate::dot::MENU_THEME_NEXT) });
+        rows.push(Setting {
+            label: "Theme".into(),
+            value: crate::theme::current().name.into(),
+            hint: format!("click for {} · panel and editor colours; the dot keeps its own", crate::theme::next_name()),
+            kind: SettingKind::Command(crate::dot::MENU_THEME_NEXT),
+        });
         let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
-        rows.push(Setting { label: "Think before answering".into(), value: onoff(cfg.think), hint: "~3 s of reasoning; more correct answers".into(), kind: SettingKind::Command(crate::dot::MENU_THINK) });
-        rows.push(Setting { label: "Center on new message".into(), value: onoff(cfg.center_on_message), hint: "the dot warps to the screen centre for notifications".into(), kind: SettingKind::Command(crate::dot::MENU_CENTER_MSG_PUB) });
-        rows.push(Setting { label: "Default view".into(), value: if cfg.notes_default { "Notes".into() } else { "Files".into() }, hint: "which tab opens on click / summon".into(), kind: SettingKind::Command(if cfg.notes_default { crate::dot::MENU_VIEW_FILES } else { crate::dot::MENU_VIEW_NOTES }) });
-        rows.push(Setting { label: "Dot colours".into(), value: crate::sprite::palette_name().into(), hint: format!("click for {} · the dot, tray icon and bubble border; the panel theme is separate", crate::sprite::next_palette_name()), kind: SettingKind::Command(crate::dot::MENU_DOT_PALETTE) });
-        rows.push(Setting { label: "Idle opacity".into(), value: format!("{}%", cfg.idle_opacity.clamp(20, 100)), hint: "how solid the dot is when left alone; it fades back in on hover".into(), kind: SettingKind::Command(crate::dot::MENU_IDLE_OPACITY) });
-        rows.push(Setting { label: "Shy mode".into(), value: onoff(cfg.shy), hint: "shrink to a few pixels after a few seconds; hover or summon brings it back".into(), kind: SettingKind::Command(crate::dot::MENU_SHY) });
-        rows.push(Setting { label: "Snap to edges".into(), value: onoff(cfg.snap), hint: "dragging near a screen edge or corner parks the dot flush against it".into(), kind: SettingKind::Command(crate::dot::MENU_SNAP) });
-        rows.push(Setting { label: "Pause swallowing".into(), value: onoff(cfg.paused), hint: "refuse drops, paste, screenshots and agent puts until resumed".into(), kind: SettingKind::Command(crate::dot::MENU_PAUSE) });
-        rows.push(Setting { label: "Agent bubbles".into(), value: onoff(cfg.agent_notify), hint: "let MCP clients (Claude Code…) show speech bubbles".into(), kind: SettingKind::Command(crate::dot::MENU_AGENT_NOTIFY) });
+        rows.push(Setting {
+            label: "Think before answering".into(),
+            value: onoff(cfg.think),
+            hint: "~3 s of reasoning; more correct answers".into(),
+            kind: SettingKind::Command(crate::dot::MENU_THINK),
+        });
+        rows.push(Setting {
+            label: "Center on new message".into(),
+            value: onoff(cfg.center_on_message),
+            hint: "the dot warps to the screen centre for notifications".into(),
+            kind: SettingKind::Command(crate::dot::MENU_CENTER_MSG_PUB),
+        });
+        rows.push(Setting {
+            label: "Default view".into(),
+            value: if cfg.notes_default { "Notes".into() } else { "Files".into() },
+            hint: "which tab opens on click / summon".into(),
+            kind: SettingKind::Command(if cfg.notes_default { crate::dot::MENU_VIEW_FILES } else { crate::dot::MENU_VIEW_NOTES }),
+        });
+        rows.push(Setting {
+            label: "Dot colours".into(),
+            value: crate::sprite::palette_name().into(),
+            hint: format!("click for {} · the dot, tray icon and bubble border; the panel theme is separate", crate::sprite::next_palette_name()),
+            kind: SettingKind::Command(crate::dot::MENU_DOT_PALETTE),
+        });
+        rows.push(Setting {
+            label: "Idle opacity".into(),
+            value: format!("{}%", cfg.idle_opacity.clamp(20, 100)),
+            hint: "how solid the dot is when left alone; it fades back in on hover".into(),
+            kind: SettingKind::Command(crate::dot::MENU_IDLE_OPACITY),
+        });
+        rows.push(Setting {
+            label: "Shy mode".into(),
+            value: onoff(cfg.shy),
+            hint: "shrink to a few pixels after a few seconds; hover or summon brings it back".into(),
+            kind: SettingKind::Command(crate::dot::MENU_SHY),
+        });
+        rows.push(Setting {
+            label: "Snap to edges".into(),
+            value: onoff(cfg.snap),
+            hint: "dragging near a screen edge or corner parks the dot flush against it".into(),
+            kind: SettingKind::Command(crate::dot::MENU_SNAP),
+        });
+        rows.push(Setting {
+            label: "Pause swallowing".into(),
+            value: onoff(cfg.paused),
+            hint: "refuse drops, paste, screenshots and agent puts until resumed".into(),
+            kind: SettingKind::Command(crate::dot::MENU_PAUSE),
+        });
+        rows.push(Setting {
+            label: "Agent bubbles".into(),
+            value: onoff(cfg.agent_notify),
+            hint: "let MCP clients (Claude Code…) show speech bubbles".into(),
+            kind: SettingKind::Command(crate::dot::MENU_AGENT_NOTIFY),
+        });
         let n = self.store.lock().unwrap().undigested_count();
         rows.push(Setting {
             label: "Undigested items".into(),
@@ -1074,9 +1149,19 @@ impl SearchWin {
             hint: if n == 0 { "everything that fell in went down".into() } else { "things Blackhole could not read — click to list, retry or dismiss them".into() },
             kind: SettingKind::Command(crate::dot::MENU_UNDIGESTED),
         });
-        rows.push(Setting { label: "Start at sign-in".into(), value: onoff(crate::startup::enabled()), hint: "run Blackhole when you log in".into(), kind: SettingKind::Command(crate::dot::MENU_START_LOGIN_PUB) });
+        rows.push(Setting {
+            label: "Start at sign-in".into(),
+            value: onoff(crate::startup::enabled()),
+            hint: "run Blackhole when you log in".into(),
+            kind: SettingKind::Command(crate::dot::MENU_START_LOGIN_PUB),
+        });
         let data = crate::config::data_dir();
-        rows.push(Setting { label: "Vault folder".into(), value: short_path(&data, 34), hint: format!("{} · click to move it somewhere else", data.display()), kind: SettingKind::Command(crate::dot::MENU_VAULT_FOLDER) });
+        rows.push(Setting {
+            label: "Vault folder".into(),
+            value: short_path(&data, 34),
+            hint: format!("{} · click to move it somewhere else", data.display()),
+            kind: SettingKind::Command(crate::dot::MENU_VAULT_FOLDER),
+        });
         let policy = crate::config::StorePolicy::parse(&cfg.store_policy);
         let policy_hint = match policy {
             crate::config::StorePolicy::Copy => "images and PDFs are copied into the vault, so they open even if you move the original",
@@ -1098,14 +1183,23 @@ impl SearchWin {
                 // A model already found while a download runs: the row that matters is
                 // the one with the progress on it.
                 if let Some(m) = active {
-                    rows.push(Setting { label: "Ask model".into(), value: format!("{} ({})", m.name, m.size_text()), hint: "in use until the download finishes".into(), kind: SettingKind::Command(crate::dot::MENU_MODEL_NEXT) });
+                    rows.push(Setting {
+                        label: "Ask model".into(),
+                        value: format!("{} ({})", m.name, m.size_text()),
+                        hint: "in use until the download finishes".into(),
+                        kind: SettingKind::Command(crate::dot::MENU_MODEL_NEXT),
+                    });
                 }
                 let value = if downloading { crate::models::progress_text() } else { crate::models::size_text(crate::models::default_size()) };
                 let hint = if downloading {
                     "click to stop · what is downloaded is kept and resumes".to_string()
                 } else {
                     let note = crate::models::progress_text();
-                    if note.is_empty() { "Qwen3-4B, so ? questions get answers; search works without it".to_string() } else { format!("{note} · click to try again") }
+                    if note.is_empty() {
+                        "Qwen3-4B, so ? questions get answers; search works without it".to_string()
+                    } else {
+                        format!("{note} · click to try again")
+                    }
                 };
                 rows.push(Setting { label: "Download the default model".into(), value, hint, kind: SettingKind::Command(crate::dot::MENU_MODEL_DOWNLOAD) });
             }
@@ -1250,11 +1344,33 @@ impl SearchWin {
         let name = hit.source.as_deref().unwrap_or(&hit.title).to_lowercase();
         let ext = name.rsplit('.').next().unwrap_or("");
         match ext {
-            "rs" => "rust", "py" => "python", "js" | "mjs" => "javascript", "ts" => "typescript", "lua" => "lua",
-            "md" | "markdown" => "markdown", "json" => "json", "toml" => "toml", "yml" | "yaml" => "yaml",
-            "c" | "h" => "c", "cpp" | "cc" | "hpp" => "cpp", "go" => "go", "sh" | "bash" => "sh", "ps1" => "ps1",
-            "html" | "htm" => "html", "css" => "css", "sql" => "sql", "xml" => "xml", "java" => "java", "cs" => "cs",
-            _ => if hit.kind == "text" || hit.kind == "note" { "markdown" } else { "text" },
+            "rs" => "rust",
+            "py" => "python",
+            "js" | "mjs" => "javascript",
+            "ts" => "typescript",
+            "lua" => "lua",
+            "md" | "markdown" => "markdown",
+            "json" => "json",
+            "toml" => "toml",
+            "yml" | "yaml" => "yaml",
+            "c" | "h" => "c",
+            "cpp" | "cc" | "hpp" => "cpp",
+            "go" => "go",
+            "sh" | "bash" => "sh",
+            "ps1" => "ps1",
+            "html" | "htm" => "html",
+            "css" => "css",
+            "sql" => "sql",
+            "xml" => "xml",
+            "java" => "java",
+            "cs" => "cs",
+            _ => {
+                if hit.kind == "text" || hit.kind == "note" {
+                    "markdown"
+                } else {
+                    "text"
+                }
+            }
         }
     }
 
@@ -1508,7 +1624,8 @@ impl SearchWin {
     unsafe fn cancel_job(&mut self) {
         if let Some(j) = self.job.take() {
             j.cancel.store(true, Ordering::Relaxed);
-            let _ = PostMessageW(Some(self.dot), WM_ASK_FIRST_TOKEN, WPARAM(0), LPARAM(0)); // stop the dot's thinking
+            let _ = PostMessageW(Some(self.dot), WM_ASK_FIRST_TOKEN, WPARAM(0), LPARAM(0));
+            // stop the dot's thinking
         }
         self.set_thinking(false);
     }
@@ -2105,7 +2222,11 @@ impl SearchWin {
         let old = SelectObject(hdc, self.font.into());
         let mut title_r = r;
         title_r.left = text_left;
-        let via = match hit.via { "sem" => "≈", "both" => "≈=", _ => "" };
+        let via = match hit.via {
+            "sem" => "≈",
+            "both" => "≈=",
+            _ => "",
+        };
         if !via.is_empty() {
             SetTextColor(hdc, c_accent());
             let mut v = wide(via);
@@ -2176,7 +2297,14 @@ impl SearchWin {
             if x >= rc.right || run.text.is_empty() {
                 break;
             }
-            SetTextColor(hdc, match run.ink { Ink::Accent => c_accent(), Ink::Fg => c_fg(), Ink::Dim => c_fg_dim() });
+            SetTextColor(
+                hdc,
+                match run.ink {
+                    Ink::Accent => c_accent(),
+                    Ink::Fg => c_fg(),
+                    Ink::Dim => c_fg_dim(),
+                },
+            );
             let mut w16 = wide(&run.text);
             let mut draw = RECT { left: x, top: rc.top, right: rc.right, bottom: rc.bottom };
             DrawTextW(hdc, &mut w16, &mut draw, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -2259,18 +2387,12 @@ impl SearchWin {
         let q = Self::question_of(&raw).unwrap_or(&raw).to_string();
         let (_, unfiltered) = crate::store::parse_filters(&q);
         let (_, text) = crate::store::split_tags(&unfiltered);
-        let terms: Vec<String> = text
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|t| t.chars().count() >= 3)
-            .map(str::to_lowercase)
-            .collect();
+        let terms: Vec<String> = text.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|t| t.chars().count() >= 3).map(str::to_lowercase).collect();
         let (row_h, lh) = (self.row_height(), self.snip_h());
         let mut rows = Vec::with_capacity(self.hits.len());
         for (i, hit) in self.hits.iter().enumerate() {
             let code = code_hit(hit);
-            let lines = self
-                .snippet_block(hit, &terms, i < DETAIL_ROWS)
-                .unwrap_or_else(|| vec![snippet_line(&hit.snippet, !code, code)]);
+            let lines = self.snippet_block(hit, &terms, i < DETAIL_ROWS).unwrap_or_else(|| vec![snippet_line(&hit.snippet, !code, code)]);
             let n = lines.len().max(1) as i32;
             rows.push(RowPlan { lines, height: row_h + (n - 1) * lh });
         }
@@ -2292,10 +2414,7 @@ impl SearchWin {
         if lines.is_empty() {
             return None;
         }
-        let at = terms
-            .iter()
-            .filter_map(|t| lines.iter().position(|l| l.to_lowercase().contains(t.as_str())))
-            .min();
+        let at = terms.iter().filter_map(|t| lines.iter().position(|l| l.to_lowercase().contains(t.as_str()))).min();
         // A fenced block or a code file is shown as code, keeping its blank lines;
         // prose and markdown show the hit's line and its neighbours, blanks skipped.
         let (start, end, code, want) = match (at.and_then(|i| fence_around(&lines, i)), code_file, at) {
@@ -2352,10 +2471,7 @@ const ICON: [Icon; 10] = [
     ([0b0011100, 0b0100010, 0b1000001, 0b1000001, 0b1000001, 0b0100010, 0b0011100], [0, 0b0011100, 0b0011100, 0b1111111, 0b0011100, 0b0011100, 0]),
 ];
 /// The undigested list's warning triangle.
-const ICON_WARN: Icon = (
-    [0b0001000, 0b0010100, 0b0010100, 0b0100010, 0b0100010, 0b1000001, 0b1111111],
-    [0, 0, 0b0001000, 0b0001000, 0, 0b0001000, 0],
-);
+const ICON_WARN: Icon = ([0b0001000, 0b0010100, 0b0010100, 0b0100010, 0b0100010, 0b1000001, 0b1111111], [0, 0, 0b0001000, 0b0001000, 0, 0b0001000, 0]);
 
 /// "just now" / "12 min ago" / "3 d ago" for an undigested entry.
 fn ago(at: i64) -> String {
@@ -2543,7 +2659,13 @@ fn snippet_line(raw: &str, md: bool, code: bool) -> SnipLine {
         }
         chars.drain(..i);
     }
-    let base = if heading { Ink::Accent } else if code { Ink::Fg } else { Ink::Dim };
+    let base = if heading {
+        Ink::Accent
+    } else if code {
+        Ink::Fg
+    } else {
+        Ink::Dim
+    };
     let mut runs: Vec<Run> = Vec::new();
     let mut cur = String::new();
     let mut lit = false;
@@ -2634,33 +2756,98 @@ unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 let page = s.scroll_info(Ctl::List).1;
                 match key {
                     // The undigested list has its own keys; the query box is idle there.
-                    VK_ESCAPE if s.undigested => { s.leave_undigested(); return LRESULT(0); }
-                    VK_RETURN if s.undigested => { s.retry_failure(); return LRESULT(0); }
-                    VK_DELETE if s.undigested => { s.dismiss_failure(); return LRESULT(0); }
-                    _ if key == VK_R && s.undigested => { s.retry_failure(); return LRESULT(0); }
+                    VK_ESCAPE if s.undigested => {
+                        s.leave_undigested();
+                        return LRESULT(0);
+                    }
+                    VK_RETURN if s.undigested => {
+                        s.retry_failure();
+                        return LRESULT(0);
+                    }
+                    VK_DELETE if s.undigested => {
+                        s.dismiss_failure();
+                        return LRESULT(0);
+                    }
+                    _ if key == VK_R && s.undigested => {
+                        s.retry_failure();
+                        return LRESULT(0);
+                    }
                     // Ctrl+R re-indexes the selected item (FEATURES.md §5.7).
-                    _ if key == VK_R && ctrl && s.tab == Tab::Files => { s.reindex_selected(); return LRESULT(0); }
-                    VK_ESCAPE if s.job.is_some() => { s.cancel_job(); s.set_status("stopped"); s.fit(true); return LRESULT(0); }
-                    VK_ESCAPE if s.preview => { s.set_preview(false); return LRESULT(0); }
-                    VK_TAB if !ctrl && s.tab == Tab::Files => { let on = !s.preview; s.set_preview(on); return LRESULT(0); }
+                    _ if key == VK_R && ctrl && s.tab == Tab::Files => {
+                        s.reindex_selected();
+                        return LRESULT(0);
+                    }
+                    VK_ESCAPE if s.job.is_some() => {
+                        s.cancel_job();
+                        s.set_status("stopped");
+                        s.fit(true);
+                        return LRESULT(0);
+                    }
+                    VK_ESCAPE if s.preview => {
+                        s.set_preview(false);
+                        return LRESULT(0);
+                    }
+                    VK_TAB if !ctrl && s.tab == Tab::Files => {
+                        let on = !s.preview;
+                        s.set_preview(on);
+                        return LRESULT(0);
+                    }
                     // Esc on a restored view forgets it; otherwise the panel just closes (and keeps the view).
-                    VK_ESCAPE if s.restored => { s.clear_view(); SearchWin::hide(parent); return LRESULT(0); }
-                    VK_ESCAPE => { SearchWin::hide(parent); return LRESULT(0); }
-                    VK_TAB if ctrl => { s.set_tab(if s.tab == Tab::Notes { Tab::Files } else { Tab::Notes }); return LRESULT(0); }
-                    _ if key == VK_N && ctrl => { s.begin_new_note(); s.fit(true); return LRESULT(0); }
-                    VK_DOWN => { s.move_sel(1); return LRESULT(0); }
-                    VK_UP => { s.move_sel(-1); return LRESULT(0); }
-                    VK_NEXT => { s.move_sel(page); return LRESULT(0); }
-                    VK_PRIOR => { s.move_sel(-page); return LRESULT(0); }
+                    VK_ESCAPE if s.restored => {
+                        s.clear_view();
+                        SearchWin::hide(parent);
+                        return LRESULT(0);
+                    }
+                    VK_ESCAPE => {
+                        SearchWin::hide(parent);
+                        return LRESULT(0);
+                    }
+                    VK_TAB if ctrl => {
+                        s.set_tab(if s.tab == Tab::Notes { Tab::Files } else { Tab::Notes });
+                        return LRESULT(0);
+                    }
+                    _ if key == VK_N && ctrl => {
+                        s.begin_new_note();
+                        s.fit(true);
+                        return LRESULT(0);
+                    }
+                    VK_DOWN => {
+                        s.move_sel(1);
+                        return LRESULT(0);
+                    }
+                    VK_UP => {
+                        s.move_sel(-1);
+                        return LRESULT(0);
+                    }
+                    VK_NEXT => {
+                        s.move_sel(page);
+                        return LRESULT(0);
+                    }
+                    VK_PRIOR => {
+                        s.move_sel(-page);
+                        return LRESULT(0);
+                    }
                     VK_RETURN if s.tab == Tab::Notes && SearchWin::question_of(&s.query_text()).is_some() => {
                         let q = SearchWin::question_of(&s.query_text()).unwrap_or("").to_string();
                         s.ask_note(&q, false);
                         return LRESULT(0);
                     }
-                    VK_RETURN if SearchWin::question_of(&s.query_text()).is_some() => { s.start_ask(); return LRESULT(0); }
-                    VK_RETURN => { s.open_selected(ctrl); return LRESULT(0); }
-                    VK_DELETE if !s.query_text().is_empty() && ctrl => { s.forget_selected(); return LRESULT(0); }
-                    VK_DELETE if s.query_text().is_empty() => { s.forget_selected(); return LRESULT(0); }
+                    VK_RETURN if SearchWin::question_of(&s.query_text()).is_some() => {
+                        s.start_ask();
+                        return LRESULT(0);
+                    }
+                    VK_RETURN => {
+                        s.open_selected(ctrl);
+                        return LRESULT(0);
+                    }
+                    VK_DELETE if !s.query_text().is_empty() && ctrl => {
+                        s.forget_selected();
+                        return LRESULT(0);
+                    }
+                    VK_DELETE if s.query_text().is_empty() => {
+                        s.forget_selected();
+                        return LRESULT(0);
+                    }
                     _ if key == VK_C && ctrl => {
                         // Copy the selected item unless there is a text selection in the box.
                         let sel = SendMessageW(hwnd, EM_GETSEL, None, None).0 as u32;
@@ -2717,9 +2904,7 @@ unsafe extern "system" fn scroll_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, 
     }
     let moved = matches!(
         msg,
-        WM_KEYDOWN | WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_VSCROLL | WM_SETTEXT | WM_SIZE
-            | LB_SETTOPINDEX | LB_SETCURSEL | LB_RESETCONTENT | LB_ADDSTRING
-            | EM_LINESCROLL | EM_SCROLLCARET | EM_SETSEL
+        WM_KEYDOWN | WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_VSCROLL | WM_SETTEXT | WM_SIZE | LB_SETTOPINDEX | LB_SETCURSEL | LB_RESETCONTENT | LB_ADDSTRING | EM_LINESCROLL | EM_SCROLLCARET | EM_SETSEL
     );
     if moved {
         if let Some(s) = state(parent) {
@@ -2739,12 +2924,32 @@ unsafe extern "system" fn editor_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, 
             let key = VIRTUAL_KEY(wparam.0 as u16);
             if let Some(s) = state(parent) {
                 match key {
-                    VK_ESCAPE => { s.flush_note(); SearchWin::hide(parent); return LRESULT(0); }
-                    VK_TAB if ctrl => { s.set_tab(Tab::Files); return LRESULT(0); }
-                    VK_TAB => { SendMessageW(hwnd, EM_REPLACESEL, Some(WPARAM(1)), Some(LPARAM(w!("\t").as_ptr() as isize))); return LRESULT(0); }
-                    _ if key == VK_N && ctrl => { s.begin_new_note(); s.fit(true); return LRESULT(0); }
-                    VK_DELETE if ctrl => { s.forget_selected(); return LRESULT(0); }
-                    _ if key == VK_A && ctrl => { SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1))); return LRESULT(0); }
+                    VK_ESCAPE => {
+                        s.flush_note();
+                        SearchWin::hide(parent);
+                        return LRESULT(0);
+                    }
+                    VK_TAB if ctrl => {
+                        s.set_tab(Tab::Files);
+                        return LRESULT(0);
+                    }
+                    VK_TAB => {
+                        SendMessageW(hwnd, EM_REPLACESEL, Some(WPARAM(1)), Some(LPARAM(w!("\t").as_ptr() as isize)));
+                        return LRESULT(0);
+                    }
+                    _ if key == VK_N && ctrl => {
+                        s.begin_new_note();
+                        s.fit(true);
+                        return LRESULT(0);
+                    }
+                    VK_DELETE if ctrl => {
+                        s.forget_selected();
+                        return LRESULT(0);
+                    }
+                    _ if key == VK_A && ctrl => {
+                        SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                        return LRESULT(0);
+                    }
                     _ => {}
                 }
             }
@@ -2771,34 +2976,72 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let s = &mut *ptr;
             s.hwnd = hwnd;
             s.edit = CreateWindowExW(
-                WINDOW_EX_STYLE(0), w!("EDIT"), w!(""),
+                WINDOW_EX_STYLE(0),
+                w!("EDIT"),
+                w!(""),
                 WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-                0, 0, 10, 10, Some(hwnd), Some(HMENU(ID_EDIT as *mut _)), None, None,
-            ).unwrap_or_default();
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_EDIT as *mut _)),
+                None,
+                None,
+            )
+            .unwrap_or_default();
             // No WS_VSCROLL on the list or the answer box: the panel paints their bars.
             s.list = CreateWindowExW(
-                WINDOW_EX_STYLE(0), w!("LISTBOX"), w!(""),
+                WINDOW_EX_STYLE(0),
+                w!("LISTBOX"),
+                w!(""),
                 WS_CHILD | WS_VISIBLE | WINDOW_STYLE((LBS_OWNERDRAWVARIABLE | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32),
-                0, 0, 10, 10, Some(hwnd), Some(HMENU(ID_LIST as *mut _)), None, None,
-            ).unwrap_or_default();
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_LIST as *mut _)),
+                None,
+                None,
+            )
+            .unwrap_or_default();
             s.answer = CreateWindowExW(
-                WINDOW_EX_STYLE(0), w!("EDIT"), w!(""),
+                WINDOW_EX_STYLE(0),
+                w!("EDIT"),
+                w!(""),
                 WS_CHILD | WINDOW_STYLE((ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32),
-                0, 0, 10, 10, Some(hwnd), Some(HMENU(ID_ANSWER as *mut _)), None, None,
-            ).unwrap_or_default();
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_ANSWER as *mut _)),
+                None,
+                None,
+            )
+            .unwrap_or_default();
             // The note editor: a plain multi-line EDIT in the panel's font; the panel paints
             // its frame and scrollbar. (An embedded Neovim for LSP is the planned upgrade —
             // FEATURES.md §5.8 — this is the v1 editor.)
             s.editor = CreateWindowExW(
-                WINDOW_EX_STYLE(0), w!("EDIT"), w!(""),
+                WINDOW_EX_STYLE(0),
+                w!("EDIT"),
+                w!(""),
                 WS_CHILD | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL) as u32),
-                0, 0, 10, 10, Some(hwnd), Some(HMENU(ID_EDITOR as *mut _)), None, None,
-            ).unwrap_or_default();
-            s.status = CreateWindowExW(
-                WINDOW_EX_STYLE(0), w!("STATIC"), w!(""),
-                WS_CHILD | WS_VISIBLE | WINDOW_STYLE(SS_LEFTNOWORDWRAP.0 | SS_ENDELLIPSIS.0),
-                0, 0, 10, 10, Some(hwnd), None, None, None,
-            ).unwrap_or_default();
+                0,
+                0,
+                10,
+                10,
+                Some(hwnd),
+                Some(HMENU(ID_EDITOR as *mut _)),
+                None,
+                None,
+            )
+            .unwrap_or_default();
+            s.status =
+                CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_CHILD | WS_VISIBLE | WINDOW_STYLE(SS_LEFTNOWORDWRAP.0 | SS_ENDELLIPSIS.0), 0, 0, 10, 10, Some(hwnd), None, None, None)
+                    .unwrap_or_default();
             let _ = SetWindowSubclass(s.edit, Some(edit_subclass), 1, hwnd.0 as usize);
             let _ = SetWindowSubclass(s.list, Some(scroll_subclass), SC_LIST, hwnd.0 as usize);
             let _ = SetWindowSubclass(s.answer, Some(scroll_subclass), SC_ANSWER, hwnd.0 as usize);
@@ -2909,8 +3152,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 match VIRTUAL_KEY(wparam.0 as u16) {
                     VK_ESCAPE => s.set_tab(Tab::Files),
                     VK_RETURN | VK_SPACE => s.activate_setting(),
-                    VK_DOWN => { let n = s.settings.len() as isize; let i = (SendMessageW(s.list, LB_GETCURSEL, None, None).0 + 1).min(n - 1); SendMessageW(s.list, LB_SETCURSEL, Some(WPARAM(i.max(0) as usize)), None); }
-                    VK_UP => { let i = (SendMessageW(s.list, LB_GETCURSEL, None, None).0 - 1).max(0); SendMessageW(s.list, LB_SETCURSEL, Some(WPARAM(i as usize)), None); }
+                    VK_DOWN => {
+                        let n = s.settings.len() as isize;
+                        let i = (SendMessageW(s.list, LB_GETCURSEL, None, None).0 + 1).min(n - 1);
+                        SendMessageW(s.list, LB_SETCURSEL, Some(WPARAM(i.max(0) as usize)), None);
+                    }
+                    VK_UP => {
+                        let i = (SendMessageW(s.list, LB_GETCURSEL, None, None).0 - 1).max(0);
+                        SendMessageW(s.list, LB_SETCURSEL, Some(WPARAM(i as usize)), None);
+                    }
                     VK_TAB if GetKeyState(VK_CONTROL.0 as i32) < 0 => s.set_tab(Tab::Files),
                     _ => {}
                 }
@@ -2923,9 +3173,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if let Some(s) = state(hwnd) {
                 let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                 match VIRTUAL_KEY(wparam.0 as u16) {
-                    VK_ESCAPE => { s.flush_note(); SearchWin::hide(hwnd); }
+                    VK_ESCAPE => {
+                        s.flush_note();
+                        SearchWin::hide(hwnd);
+                    }
                     VK_TAB if ctrl => s.set_tab(if s.tab == Tab::Notes { Tab::Files } else { Tab::Notes }),
-                    VK_N if ctrl => { s.begin_new_note(); s.fit(true); }
+                    VK_N if ctrl => {
+                        s.begin_new_note();
+                        s.fit(true);
+                    }
                     VK_DELETE if ctrl => s.forget_selected(),
                     _ => {}
                 }
@@ -2953,7 +3209,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 } else if id == ID_EDITOR && code == EN_CHANGE && !s.loading {
                     s.note_changed();
                 } else if id == ID_LIST && code == LBN_DBLCLK {
-                    if s.tab == Tab::Settings { s.activate_setting() } else if s.undigested { s.retry_failure() } else { s.open_selected(false) }
+                    if s.tab == Tab::Settings {
+                        s.activate_setting()
+                    } else if s.undigested {
+                        s.retry_failure()
+                    } else {
+                        s.open_selected(false)
+                    }
                 } else if id == ID_LIST && code == LBN_SELCHANGE {
                     if s.tab == Tab::Settings {
                         let _ = SetFocus(Some(s.hwnd));
@@ -3043,7 +3305,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if over_editor && s.nvim.is_some() {
                     s.nvim.as_ref().unwrap().wheel(delta > 0);
                 } else {
-                    s.scroll_by(if over_editor { Ctl::Editor } else if over_answer { Ctl::Answer } else { Ctl::List }, -(delta / 120) * 3);
+                    s.scroll_by(
+                        if over_editor {
+                            Ctl::Editor
+                        } else if over_answer {
+                            Ctl::Answer
+                        } else {
+                            Ctl::List
+                        },
+                        -(delta / 120) * 3,
+                    );
                 }
             }
             LRESULT(0)

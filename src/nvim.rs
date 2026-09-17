@@ -77,12 +77,26 @@ enum Event {
     Resize(usize, usize),
     DefaultColors(u32, u32),
     HlAttr(u32, Attr),
-    Line { row: usize, col: usize, cells: Vec<(String, u32, usize)> },
+    Line {
+        row: usize,
+        col: usize,
+        cells: Vec<(String, u32, usize)>,
+    },
     Clear,
     Cursor(usize, usize),
-    Scroll { top: usize, bot: usize, left: usize, right: usize, rows: i64 },
+    Scroll {
+        top: usize,
+        bot: usize,
+        left: usize,
+        right: usize,
+        rows: i64,
+    },
     Mode(String),
-    Viewport { top: i64, bot: i64, lines: i64 },
+    Viewport {
+        top: i64,
+        bot: i64,
+        lines: i64,
+    },
     /// ext_messages / ext_cmdline: text for the panel's status line (None = clear).
     Status(Option<String>),
     Flush,
@@ -159,13 +173,9 @@ fn parse_redraw(params: &Value, out: &mut Vec<Event>) {
                 }
                 "grid_clear" => out.push(Event::Clear),
                 "grid_cursor_goto" if a.len() >= 3 => out.push(Event::Cursor(v_u64(&a[1]) as usize, v_u64(&a[2]) as usize)),
-                "grid_scroll" if a.len() >= 6 => out.push(Event::Scroll {
-                    top: v_u64(&a[1]) as usize,
-                    bot: v_u64(&a[2]) as usize,
-                    left: v_u64(&a[3]) as usize,
-                    right: v_u64(&a[4]) as usize,
-                    rows: v_i64(&a[5]),
-                }),
+                "grid_scroll" if a.len() >= 6 => {
+                    out.push(Event::Scroll { top: v_u64(&a[1]) as usize, bot: v_u64(&a[2]) as usize, left: v_u64(&a[3]) as usize, right: v_u64(&a[4]) as usize, rows: v_i64(&a[5]) })
+                }
                 "mode_change" if !a.is_empty() => out.push(Event::Mode(v_str(&a[0]))),
                 "win_viewport" if a.len() >= 7 => out.push(Event::Viewport { top: v_i64(&a[2]), bot: v_i64(&a[3]), lines: v_i64(&a[6]) }),
                 // Messages and the command line are drawn by the panel's status line, so the
@@ -539,18 +549,9 @@ impl Host {
         let exe = find_nvim()?;
         unsafe {
             let class = w!("BlackholeNvim");
-            let wc = WNDCLASSW {
-                lpfnWndProc: Some(wndproc),
-                lpszClassName: class,
-                hCursor: LoadCursorW(None, IDC_IBEAM).unwrap_or_default(),
-                hbrBackground: HBRUSH::default(),
-                ..Default::default()
-            };
+            let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), lpszClassName: class, hCursor: LoadCursorW(None, IDC_IBEAM).unwrap_or_default(), hbrBackground: HBRUSH::default(), ..Default::default() };
             RegisterClassW(&wc);
-            let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE(0), class, w!(""), WS_CHILD | WS_CLIPSIBLINGS,
-                0, 0, 10, 10, Some(parent), None, None, None,
-            ).ok()?;
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!(""), WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 10, 10, Some(parent), None, None, None).ok()?;
             let mk = |weight: i32, italic: u32| {
                 CreateFontW(-font_px, 0, 0, 0, weight, italic, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, (FIXED_PITCH.0 | FF_MODERN.0) as u32, w!("Consolas"))
             };
@@ -609,7 +610,29 @@ impl Host {
                 crate::util::log(&format!("nvim: embedded {} from {}", NVIM_VERSION, exe.display()));
             }
             // Move out of the box: the window owns the state now; return a handle copy for the panel.
-            Some(Host { hwnd, rpc: h.rpc.clone(), cols: 0, rows: 0, grid: Vec::new(), attrs: HashMap::new(), default_fg: 0, default_bg: 0, cursor: (0, 0), mode: String::new(), viewport: (0, 0, 1), font: HFONT::default(), font_bold: HFONT::default(), font_italic: HFONT::default(), cell_w: h.cell_w, cell_h: h.cell_h, own_tick: 0, mouse_down: false, unit, accent, high_surrogate: None })
+            Some(Host {
+                hwnd,
+                rpc: h.rpc.clone(),
+                cols: 0,
+                rows: 0,
+                grid: Vec::new(),
+                attrs: HashMap::new(),
+                default_fg: 0,
+                default_bg: 0,
+                cursor: (0, 0),
+                mode: String::new(),
+                viewport: (0, 0, 1),
+                font: HFONT::default(),
+                font_bold: HFONT::default(),
+                font_italic: HFONT::default(),
+                cell_w: h.cell_w,
+                cell_h: h.cell_h,
+                own_tick: 0,
+                mouse_down: false,
+                unit,
+                accent,
+                high_surrogate: None,
+            })
         }
     }
 
@@ -857,7 +880,13 @@ impl Host {
                 if a.reverse {
                     std::mem::swap(&mut fg, &mut bg);
                 }
-                let font = if a.bold { self.font_bold } else if a.italic { self.font_italic } else { self.font };
+                let font = if a.bold {
+                    self.font_bold
+                } else if a.italic {
+                    self.font_italic
+                } else {
+                    self.font
+                };
                 old_font = SelectObject(mem, font.into());
                 SetBkColor(mem, rgb(bg));
                 SetTextColor(mem, rgb(fg));
@@ -919,9 +948,15 @@ impl Host {
 /// "C", "S", "A" letters for the modifier string / key notation.
 unsafe fn key_mods() -> String {
     let mut m = String::new();
-    if GetKeyState(VK_CONTROL.0 as i32) < 0 { m.push('C'); }
-    if GetKeyState(VK_SHIFT.0 as i32) < 0 { m.push('S'); }
-    if GetKeyState(VK_MENU.0 as i32) < 0 { m.push('A'); }
+    if GetKeyState(VK_CONTROL.0 as i32) < 0 {
+        m.push('C');
+    }
+    if GetKeyState(VK_SHIFT.0 as i32) < 0 {
+        m.push('S');
+    }
+    if GetKeyState(VK_MENU.0 as i32) < 0 {
+        m.push('A');
+    }
     m
 }
 
@@ -942,8 +977,18 @@ unsafe fn special_key(vk: VIRTUAL_KEY) -> Option<&'static str> {
         VK_END => "End",
         VK_PRIOR => "PageUp",
         VK_NEXT => "PageDown",
-        VK_F1 => "F1", VK_F2 => "F2", VK_F3 => "F3", VK_F4 => "F4", VK_F5 => "F5", VK_F6 => "F6",
-        VK_F7 => "F7", VK_F8 => "F8", VK_F9 => "F9", VK_F10 => "F10", VK_F11 => "F11", VK_F12 => "F12",
+        VK_F1 => "F1",
+        VK_F2 => "F2",
+        VK_F3 => "F3",
+        VK_F4 => "F4",
+        VK_F5 => "F5",
+        VK_F6 => "F6",
+        VK_F7 => "F7",
+        VK_F8 => "F8",
+        VK_F9 => "F9",
+        VK_F10 => "F10",
+        VK_F11 => "F11",
+        VK_F12 => "F12",
         _ => return None,
     })
 }
@@ -1033,7 +1078,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 // WM_CHAR too; characters outside the BMP come as two surrogate halves.
                 let c = wparam.0 as u32;
                 let ch = match c {
-                    0xD800..=0xDBFF => { h.high_surrogate = Some(c as u16); None }
+                    0xD800..=0xDBFF => {
+                        h.high_surrogate = Some(c as u16);
+                        None
+                    }
                     0xDC00..=0xDFFF => h.high_surrogate.take().and_then(|hi| char::decode_utf16([hi, c as u16]).next().and_then(|r| r.ok())),
                     c if c >= 0x20 && c != 0x7F => char::from_u32(c),
                     _ => None,
@@ -1061,7 +1109,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
             let _ = SetFocus(Some(hwnd));
             if let Some(h) = state(hwnd) {
-                let b = match msg { WM_LBUTTONDOWN => "left", WM_RBUTTONDOWN => "right", _ => "middle" };
+                let b = match msg {
+                    WM_LBUTTONDOWN => "left",
+                    WM_RBUTTONDOWN => "right",
+                    _ => "middle",
+                };
                 h.mouse_down = msg == WM_LBUTTONDOWN;
                 SetCapture(hwnd);
                 h.mouse(b, "press", lparam_point(lparam));
@@ -1070,7 +1122,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
             if let Some(h) = state(hwnd) {
-                let b = match msg { WM_LBUTTONUP => "left", WM_RBUTTONUP => "right", _ => "middle" };
+                let b = match msg {
+                    WM_LBUTTONUP => "left",
+                    WM_RBUTTONUP => "right",
+                    _ => "middle",
+                };
                 h.mouse_down = false;
                 let _ = ReleaseCapture();
                 h.mouse(b, "release", lparam_point(lparam));

@@ -36,7 +36,10 @@ BEGIN
 END
 "#,
         ico = std::env::current_dir().unwrap().join("installer/blackhole.ico").display().to_string().replace('\\', "/"),
-        a = parts[0], b = parts[1], c = parts[2], d = parts[3]
+        a = parts[0],
+        b = parts[1],
+        c = parts[2],
+        d = parts[3]
     );
     let rc_path = out.join("blackhole.rc");
     std::fs::write(&rc_path, rc).unwrap();
