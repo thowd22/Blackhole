@@ -1189,6 +1189,10 @@ impl SearchWin {
 
     /// Filetype for Neovim's colours, from the hit's title/path extension.
     fn filetype_of(hit: &Hit) -> &'static str {
+        if hit.kind == "web" {
+            // A page's stored text is the readable extraction ("# heading" lines), not HTML.
+            return "markdown";
+        }
         let name = hit.source.as_deref().unwrap_or(&hit.title).to_lowercase();
         let ext = name.rsplit('.').next().unwrap_or("");
         match ext {
@@ -1906,7 +1910,7 @@ impl SearchWin {
         self.set_status(&format!("re-indexing {short}…"));
         let _ = UpdateWindow(self.status);
         let path = self.store.lock().unwrap().open_path(id);
-        let from_file = matches!(kind.as_str(), "pdf" | "image" | "file");
+        let from_file = matches!(kind.as_str(), "pdf" | "image" | "file" | "docx" | "xlsx" | "pptx");
         if let (true, Some(p)) = (from_file, path.as_deref()) {
             match crate::ingest::extract_file(std::path::Path::new(p)) {
                 Ok(e) => {
@@ -2037,11 +2041,11 @@ impl SearchWin {
         r.right -= pad;
         r.top += self.px(4);
 
-        // A 7x7 pixel type icon (text / pdf / image / note / code / file) in place of the
+        // A 7x7 pixel type icon (text / pdf / image / note / code / file / docx / xlsx /
+        // pptx / web) in place of the
         // old "[kind]" tag; how it matched stays as a small accent mark before the title.
         let p = self.unit();
-        let name = hit.source.as_deref().unwrap_or(&hit.title);
-        self.draw_icon(hdc, ICON[kind_index(&hit.kind, crate::store::is_code_name(name))], r.left, r.top + self.px(2));
+        self.draw_icon(hdc, ICON[kind_index(&hit.kind, code_hit(hit))], r.left, r.top + self.px(2));
         let text_left = r.left + 7 * p + pad;
 
         let old = SelectObject(hdc, self.font.into());
@@ -2209,7 +2213,7 @@ impl SearchWin {
         let (row_h, lh) = (self.row_height(), self.snip_h());
         let mut rows = Vec::with_capacity(self.hits.len());
         for (i, hit) in self.hits.iter().enumerate() {
-            let code = crate::store::is_code_name(hit.source.as_deref().unwrap_or(&hit.title));
+            let code = code_hit(hit);
             let lines = self
                 .snippet_block(hit, &terms, i < DETAIL_ROWS)
                 .unwrap_or_else(|| vec![snippet_line(&hit.snippet, !code, code)]);
@@ -2225,7 +2229,7 @@ impl SearchWin {
         if !detail || matches!(hit.kind.as_str(), "image" | "pdf") {
             return None;
         }
-        let code_file = crate::store::is_code_name(hit.source.as_deref().unwrap_or(&hit.title));
+        let code_file = code_hit(hit);
         let content = self.store.lock().unwrap().content(hit.id)?;
         if content.len() > MAX_SCAN_BYTES {
             return None;
@@ -2270,8 +2274,8 @@ impl SearchWin {
 
 /// Icons, one bit per pixel, bit 6 leftmost: (outline in the accent, detail in dim).
 type Icon = ([u8; 7], [u8; 7]);
-/// text, pdf, image, note, code, file — see `kind_index`.
-const ICON: [Icon; 6] = [
+/// text, pdf, image, note, code, file, docx, xlsx, pptx, web — see `kind_index`.
+const ICON: [Icon; 10] = [
     // text: a page with lines
     ([0b1111110, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1111110], [0, 0, 0b0111100, 0, 0b0111100, 0, 0]),
     // pdf: a page with a "P"
@@ -2284,6 +2288,14 @@ const ICON: [Icon; 6] = [
     ([0, 0b0010100, 0b0100010, 0b1000001, 0b0100010, 0b0010100, 0], [0, 0, 0, 0, 0, 0, 0]),
     // file: a plain sheet with a folded corner
     ([0b1111100, 0b1000110, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1111110], [0, 0, 0, 0, 0, 0, 0]),
+    // docx: a page with a "W"
+    ([0b1111110, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1111110], [0, 0, 0b0100010, 0b0101010, 0b0010100, 0, 0]),
+    // xlsx: a page with a grid
+    ([0b1111110, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1111110], [0, 0b0111110, 0b0010100, 0b0111110, 0b0010100, 0b0111110, 0]),
+    // pptx: a slide on a stand
+    ([0b1111110, 0b1000010, 0b1000010, 0b1000010, 0b1111110, 0b0001000, 0b0011100], [0, 0, 0b0111100, 0b0111100, 0, 0, 0]),
+    // web: a globe with meridians
+    ([0b0011100, 0b0100010, 0b1000001, 0b1000001, 0b1000001, 0b0100010, 0b0011100], [0, 0b0011100, 0b0011100, 0b1111111, 0b0011100, 0b0011100, 0]),
 ];
 /// The undigested list's warning triangle.
 const ICON_WARN: Icon = (
@@ -2302,6 +2314,12 @@ fn ago(at: i64) -> String {
     }
 }
 
+/// Is this hit a code file? A page saved as .html is kind "web": what is stored is the
+/// readable text the extractor pulled out, not source, so it is not styled as code.
+fn code_hit(hit: &Hit) -> bool {
+    hit.kind != "web" && crate::store::is_code_name(hit.source.as_deref().unwrap_or(&hit.title))
+}
+
 fn kind_index(kind: &str, code: bool) -> usize {
     if code {
         return 4;
@@ -2311,6 +2329,10 @@ fn kind_index(kind: &str, code: bool) -> usize {
         "image" => 2,
         "note" => 3,
         "file" => 5,
+        "docx" => 6,
+        "xlsx" => 7,
+        "pptx" => 8,
+        "web" => 9,
         _ => 0,
     }
 }

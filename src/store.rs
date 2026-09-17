@@ -124,7 +124,7 @@ pub fn is_code_name(name: &str) -> bool {
 /// They work like the `#tag` words — pulled out of the text, applied to the result set.
 #[derive(Clone, Debug, Default)]
 pub struct Filters {
-    /// Item kinds to keep ("pdf", "note", "image", "text", "file"); empty = any.
+    /// Item kinds to keep ("pdf", "note", "image", "text", "file", "docx"/"xlsx"/"pptx", "web"); empty = any.
     pub kinds: Vec<String>,
     /// `kind:code` — any item whose source/title looks like a code file.
     pub code: bool,
@@ -150,7 +150,9 @@ impl Filters {
         if !self.kinds.is_empty() && !self.kinds.iter().any(|k| *k == h.kind) {
             return false;
         }
-        if self.code && !is_code_name(h.source.as_deref().unwrap_or(&h.title)) {
+        // A fetched or saved page is kind "web" — plain text now, so `kind:code` skips it
+        // even when it came from a .html file.
+        if self.code && (h.kind == "web" || !is_code_name(h.source.as_deref().unwrap_or(&h.title))) {
             return false;
         }
         if let Some(t) = self.since {
@@ -233,7 +235,12 @@ fn parse_kind(v: &str) -> Option<(Vec<String>, bool)> {
         "text" | "txt" | "texts" => one("text"),
         "file" | "files" => one("file"),
         "code" => Some((Vec::new(), true)),
-        "doc" | "docs" | "document" | "documents" => Some((vec!["pdf".into(), "file".into()], false)),
+        "docx" | "word" => one("docx"),
+        "xlsx" | "excel" | "sheet" | "sheets" | "spreadsheet" | "spreadsheets" => one("xlsx"),
+        "pptx" | "powerpoint" | "slide" | "slides" | "deck" | "decks" | "presentation" | "presentations" => one("pptx"),
+        "web" | "page" | "pages" | "url" | "urls" | "link" | "links" | "html" | "site" | "sites" => one("web"),
+        "office" => Some((vec!["docx".into(), "xlsx".into(), "pptx".into()], false)),
+        "doc" | "docs" | "document" | "documents" => Some((vec!["pdf".into(), "file".into(), "docx".into(), "xlsx".into(), "pptx".into()], false)),
         _ => None,
     }
 }
