@@ -113,6 +113,9 @@ pub fn extract_file(path: &Path) -> Result<Extracted, String> {
     if path.is_dir() {
         return Err(format!("{name}: folders are not supported yet"));
     }
+    if !path.exists() {
+        return Err(format!("{name}: no such file ({})", path.display()));
+    }
 
     let mut bytes_hash = None;
     let mut stored = None;
@@ -220,6 +223,17 @@ pub fn embed_item(store: &Mutex<Store>, embedder: &Embedder, item_id: i64, title
     let _ = store.lock().unwrap().add_chunks(item_id, &chunks, title_unit);
 }
 
+/// Name to show for a failed ingest: the file name, or the first words of the message.
+pub fn failure_title(path: &str, msg: &str) -> String {
+    let name = Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned());
+    name.unwrap_or_else(|| msg.split(':').next().unwrap_or("dropped text").trim().to_string())
+}
+
+/// Extractors prefix their errors with the file name; the list shows that separately.
+pub fn strip_title<'a>(msg: &'a str, title: &str) -> &'a str {
+    msg.strip_prefix(title).map(|r| r.trim_start_matches(':').trim()).unwrap_or(msg)
+}
+
 /// Worker loop. `notify` is called after each batch with the outcome.
 pub fn run(rx: Receiver<Input>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder>, notify: impl Fn(Report)) {
     // Stored PDF text predates the current extractor: read the files again where they
@@ -250,13 +264,16 @@ pub fn run(rx: Receiver<Input>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder
 
     while let Ok(input) = rx.recv() {
         let mut report = Report { added: 0, updated: 0, duplicates: 0, failed: 0, errors: Vec::new() };
-        let extracted: Vec<Result<Extracted, String>> = match input {
-            Input::Text(t) => vec![Ok(extract_text(&t))],
-            Input::Files(paths) => paths.iter().map(|p| extract_file(p)).collect(),
+        // Each result keeps the path it came from: a failure is remembered in the vault's
+        // undigested list (FEATURES.md §3.5) so the panel can show, retry or dismiss it.
+        let extracted: Vec<(String, Result<Extracted, String>)> = match input {
+            Input::Text(t) => vec![(String::new(), Ok(extract_text(&t)))],
+            Input::Files(paths) => paths.iter().map(|p| (p.display().to_string(), extract_file(p))).collect(),
         };
-        for e in extracted {
+        for (path, e) in extracted {
             match e {
                 Ok(e) => {
+                    store.lock().unwrap().clear_failure_path(&path);
                     let hash = hash_of(&e);
                     let added = store.lock().unwrap().add_stored(&e.title, e.kind, e.source.as_deref(), &e.content, &hash, now_secs(), e.stored.as_deref());
                     match added {
@@ -282,11 +299,14 @@ pub fn run(rx: Receiver<Input>, store: Arc<Mutex<Store>>, embedder: Arc<Embedder
                         Err(err) => {
                             report.failed += 1;
                             report.errors.push(format!("{}: {err}", e.title));
+                            store.lock().unwrap().record_failure(&path, &e.title, &err.to_string(), now_secs());
                         }
                     }
                 }
                 Err(msg) => {
                     report.failed += 1;
+                    let title = failure_title(&path, &msg);
+                    store.lock().unwrap().record_failure(&path, &title, strip_title(&msg, &title), now_secs());
                     report.errors.push(msg);
                 }
             }

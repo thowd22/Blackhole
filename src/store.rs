@@ -34,6 +34,8 @@ pub struct Hit {
     pub via: &'static str,
     /// User tags, space-separated without the '#'.
     pub tags: String,
+    /// When it was swallowed (unix seconds) — browse filters and row dates.
+    pub added_at: i64,
 }
 
 /// Semantic matches must clear this cosine (bge: relevant ≈ 0.6+, noise ≈ 0.5)…
@@ -87,6 +89,197 @@ const KW_WEIGHT: f32 = 0.6;
 /// …and also be within this much of the best match, so a strong top hit
 /// isn't followed by a tail of weak ones.
 const COSINE_WINDOW: f32 = 0.12;
+/// How many recent items a filtered browse looks at (`kind:pdf` with no query).
+const BROWSE_POOL: usize = 600;
+
+/// A failed ingest, kept so the panel can list, retry or dismiss it (FEATURES.md §3.5, §7).
+#[derive(Clone, Debug)]
+pub struct Failure {
+    pub id: i64,
+    /// Where it came from ("" for pasted text).
+    pub path: String,
+    pub title: String,
+    pub error: String,
+    pub at: i64,
+}
+
+/// Source extensions treated as code (the `kind:code` filter and the code styling
+/// of snippets in the panel).
+pub const CODE_EXTS: &[&str] = &[
+    "rs", "py", "js", "mjs", "ts", "tsx", "jsx", "go", "c", "h", "cpp", "cc", "hpp", "cs", "java",
+    "kt", "rb", "php", "swift", "lua", "sh", "bash", "ps1", "bat", "sql", "json", "toml", "yaml",
+    "yml", "xml", "html", "css", "vim",
+];
+
+/// Is this file name a code file (by extension)?
+pub fn is_code_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    match lower.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => CODE_EXTS.contains(&ext),
+        _ => false,
+    }
+}
+
+/// Browse filters typed into the query: `kind:pdf`, `since:7d`, `source:invoice`.
+/// They work like the `#tag` words — pulled out of the text, applied to the result set.
+#[derive(Clone, Debug, Default)]
+pub struct Filters {
+    /// Item kinds to keep ("pdf", "note", "image", "text", "file"); empty = any.
+    pub kinds: Vec<String>,
+    /// `kind:code` — any item whose source/title looks like a code file.
+    pub code: bool,
+    /// Unix seconds: nothing older than this.
+    pub since: Option<i64>,
+    /// Lower-cased substring of the source path or the title.
+    pub source: Option<String>,
+    /// The filters as typed, for the status line.
+    pub labels: Vec<String>,
+}
+
+impl Filters {
+    pub fn is_empty(&self) -> bool {
+        self.kinds.is_empty() && !self.code && self.since.is_none() && self.source.is_none()
+    }
+
+    /// "kind:pdf · since:7d" for the status line.
+    pub fn describe(&self) -> String {
+        self.labels.join(" \u{b7} ")
+    }
+
+    pub fn matches(&self, h: &Hit) -> bool {
+        if !self.kinds.is_empty() && !self.kinds.iter().any(|k| *k == h.kind) {
+            return false;
+        }
+        if self.code && !is_code_name(h.source.as_deref().unwrap_or(&h.title)) {
+            return false;
+        }
+        if let Some(t) = self.since {
+            if h.added_at < t {
+                return false;
+            }
+        }
+        if let Some(sub) = &self.source {
+            let hay = format!("{} {}", h.source.as_deref().unwrap_or(""), h.title).to_lowercase();
+            if !hay.contains(sub) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Midnight today, this Monday and the 1st of this month, in unix seconds (local clock).
+fn day_starts() -> (i64, i64, i64) {
+    let now = crate::util::now_secs();
+    let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    let today = now - (st.wHour as i64 * 3600 + st.wMinute as i64 * 60 + st.wSecond as i64);
+    // wDayOfWeek: 0 = Sunday. Weeks start on Monday.
+    let back = (st.wDayOfWeek as i64 + 6) % 7;
+    (today, today - back * 86400, today - (st.wDay as i64 - 1) * 86400)
+}
+
+/// "2026-09-16" → unix seconds at that date's midnight (UTC; close enough for a filter).
+fn parse_date(s: &str) -> Option<i64> {
+    let mut it = s.split('-');
+    let (y, m, d) = (it.next()?.parse::<i64>().ok()?, it.next()?.parse::<i64>().ok()?, it.next()?.parse::<i64>().ok()?);
+    if it.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) || !(1970..=3000).contains(&y) {
+        return None;
+    }
+    // Days from the civil epoch (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146097 + doe - 719468) * 86400)
+}
+
+/// `since:7d` / `since:2w` / `since:today` / `since:week` / `since:2026-09-01` → a timestamp.
+fn parse_since(v: &str) -> Option<i64> {
+    let now = crate::util::now_secs();
+    let (today, week, month) = day_starts();
+    match v {
+        "today" => return Some(today),
+        "yesterday" => return Some(today - 86400),
+        "week" | "thisweek" => return Some(week),
+        "month" | "thismonth" => return Some(month),
+        _ => {}
+    }
+    if v.contains('-') {
+        return parse_date(v);
+    }
+    let (num, unit) = v.split_at(v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len()));
+    let n: i64 = num.parse().ok()?;
+    let secs = match unit {
+        "" | "d" | "day" | "days" => 86400,
+        "h" | "hour" | "hours" => 3600,
+        "w" | "week" | "weeks" => 7 * 86400,
+        "m" | "month" | "months" => 30 * 86400,
+        "y" | "year" | "years" => 365 * 86400,
+        _ => return None,
+    };
+    Some(now - n * secs)
+}
+
+/// The stored kinds a `kind:` word means ("images" → image, "files" → file, "code" → any
+/// code file). Returns None for a word that is not a kind, so it stays part of the query.
+fn parse_kind(v: &str) -> Option<(Vec<String>, bool)> {
+    let one = |k: &str| Some((vec![k.to_string()], false));
+    match v {
+        "pdf" | "pdfs" => one("pdf"),
+        "note" | "notes" => one("note"),
+        "image" | "images" | "img" | "picture" | "pictures" | "screenshot" | "screenshots" => one("image"),
+        "text" | "txt" | "texts" => one("text"),
+        "file" | "files" => one("file"),
+        "code" => Some((Vec::new(), true)),
+        "doc" | "docs" | "document" | "documents" => Some((vec!["pdf".into(), "file".into()], false)),
+        _ => None,
+    }
+}
+
+/// Pull `kind:`/`since:`/`source:` words out of a query; the rest is the search text.
+/// An unknown value ("kind:banana") is left in the query rather than silently dropped.
+pub fn parse_filters(query: &str) -> (Filters, String) {
+    let mut f = Filters::default();
+    let mut rest = Vec::new();
+    for w in query.split_whitespace() {
+        let lower = w.to_lowercase();
+        let Some((key, value)) = lower.split_once(':') else {
+            rest.push(w);
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            rest.push(w);
+            continue;
+        }
+        match key {
+            "kind" | "type" | "is" => match parse_kind(value) {
+                Some((kinds, code)) => {
+                    f.kinds.extend(kinds);
+                    f.code |= code;
+                    f.labels.push(format!("kind:{value}"));
+                }
+                None => rest.push(w),
+            },
+            "since" | "after" => match parse_since(value) {
+                Some(t) => {
+                    f.since = Some(f.since.map_or(t, |old: i64| old.max(t)));
+                    f.labels.push(format!("since:{value}"));
+                }
+                None => rest.push(w),
+            },
+            "source" | "from" | "in" => {
+                f.source = Some(value.to_string());
+                f.labels.push(format!("source:{value}"));
+            }
+            _ => rest.push(w),
+        }
+    }
+    (f, rest.join(" "))
+}
+
 
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Store> {
@@ -121,6 +314,15 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS chunks_item ON chunks(item_id);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            -- Things that fell in but could not be read (FEATURES.md §3.5): shown in the
+            -- panel's undigested list, where they can be retried or dismissed.
+            CREATE TABLE IF NOT EXISTS undigested (
+                id    INTEGER PRIMARY KEY,
+                path  TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL,
+                error TEXT NOT NULL,
+                at    INTEGER NOT NULL
+            );
             "#,
         )?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -285,16 +487,24 @@ impl Store {
     /// where coverage is the fraction of query terms the item contains. So an
     /// exact phrase wins outright, a one-word coincidence barely registers.
     pub fn search(&self, query: &str, qvec: Option<&[f32]>, limit: usize) -> Vec<Hit> {
-        // "#tag" words filter by tag; whatever is left is the search itself.
-        let (tags, rest) = split_tags(query);
-        if !tags.is_empty() {
-            let mut hits = if rest.trim().is_empty() { self.tagged(limit * 4) } else { self.search_inner(&rest, qvec, limit * 4) };
-            hits.retain(|h| tags.iter().all(|t| h.tags.split(' ').any(|x| x == t)));
-            hits.truncate(limit);
+        // "#tag" words filter by tag, "kind:/since:/source:" words browse; whatever is
+        // left is the search itself. An empty rest with filters is a browse (recent order).
+        let (filters, without_filters) = parse_filters(query);
+        let (tags, rest) = split_tags(&without_filters);
+        if tags.is_empty() && filters.is_empty() {
+            let mut hits = self.search_inner(query, qvec, limit);
+            self.attach_tags(&mut hits);
             return hits;
         }
-        let mut hits = self.search_inner(query, qvec, limit);
-        self.attach_tags(&mut hits);
+        // Filtered: cast a wider net, then keep what matches.
+        let browsing = rest.trim().is_empty();
+        let wide = if browsing { BROWSE_POOL } else { (limit * 6).max(200) };
+        let mut hits = if browsing { self.recent(wide) } else { self.search_inner(&rest, qvec, wide) };
+        if !browsing {
+            self.attach_tags(&mut hits);
+        }
+        hits.retain(|h| tags.iter().all(|t| h.tags.split(' ').any(|x| x == t)) && filters.matches(h));
+        hits.truncate(limit);
         hits
     }
 
@@ -337,8 +547,8 @@ impl Store {
     pub fn item(&self, id: i64) -> Option<Hit> {
         let mut h = self
             .conn
-            .query_row("SELECT id, title, kind, source, substr(content, 1, 120) FROM items WHERE id = ?1", params![id], |r| {
-                Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "), via: "", tags: String::new() })
+            .query_row("SELECT id, title, kind, source, substr(content, 1, 120), added_at FROM items WHERE id = ?1", params![id], |r| {
+                Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "), via: "", tags: String::new(), added_at: r.get(5)? })
             })
             .ok()?;
         h.tags = self.tags_of(id);
@@ -353,13 +563,6 @@ impl Store {
         let raw: String = self.conn.query_row("SELECT cursor FROM items WHERE id = ?1", params![id], |r| r.get(0)).ok()?;
         let (r, c) = raw.split_once(',')?;
         Some((r.parse().ok()?, c.parse().ok()?))
-    }
-
-    /// Every item carrying at least one tag, newest first.
-    fn tagged(&self, limit: usize) -> Vec<Hit> {
-        let mut hits = self.recent(limit.max(200));
-        hits.retain(|h| !h.tags.is_empty());
-        hits
     }
 
     fn search_inner(&self, query: &str, qvec: Option<&[f32]>, limit: usize) -> Vec<Hit> {
@@ -438,7 +641,7 @@ impl Store {
         let mut stmt = match self.conn.prepare(
             "SELECT i.title, i.kind, i.source,
                     CASE WHEN c.ord < 0 THEN (SELECT substr(text, 1, 160) FROM chunks WHERE item_id = i.id AND ord = 0)
-                         ELSE substr(c.text, 1, 160) END
+                         ELSE substr(c.text, 1, 160) END, i.added_at
              FROM items i JOIN chunks c ON c.id = ?2 WHERE i.id = ?1",
         ) {
             Ok(s) => s,
@@ -457,6 +660,7 @@ impl Store {
                             snippet: r.get::<_, String>(3)?.replace(['\r', '\n'], " "),
                             via: "sem",
                             tags: String::new(),
+                            added_at: r.get(4)?,
                         },
                         c,
                     ))
@@ -852,7 +1056,7 @@ impl Store {
         };
         let mut stmt = match self.conn.prepare(
             "SELECT i.id, i.title, i.kind, i.source,
-                    snippet(items_fts, 1, '\u{1}', '\u{2}', ' … ', 14)
+                    snippet(items_fts, 1, '\u{1}', '\u{2}', ' … ', 14), i.added_at
              FROM items_fts JOIN items i ON i.id = items_fts.rowid
              WHERE items_fts MATCH ?1
              ORDER BY bm25(items_fts, 3.0, 1.0)
@@ -870,6 +1074,7 @@ impl Store {
                 snippet: r.get(4)?,
                 via: "kw",
                 tags: String::new(),
+                added_at: r.get(5)?,
             })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -884,7 +1089,7 @@ impl Store {
 
     fn recent_inner(&self, limit: usize) -> Vec<Hit> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, title, kind, source, substr(content, 1, 120)
+            "SELECT id, title, kind, source, substr(content, 1, 120), added_at
              FROM items ORDER BY added_at DESC, id DESC LIMIT ?1",
         ) {
             Ok(s) => s,
@@ -899,6 +1104,7 @@ impl Store {
                 snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "),
                 via: "",
                 tags: String::new(),
+                added_at: r.get(5)?,
             })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -914,12 +1120,12 @@ impl Store {
 
     fn notes_inner(&self, limit: usize) -> Vec<Hit> {
         let Ok(mut stmt) = self.conn.prepare(
-            "SELECT id, title, kind, source, substr(content, 1, 160) FROM items WHERE kind = 'note' ORDER BY added_at DESC, id DESC LIMIT ?1",
+            "SELECT id, title, kind, source, substr(content, 1, 160), added_at FROM items WHERE kind = 'note' ORDER BY added_at DESC, id DESC LIMIT ?1",
         ) else {
             return Vec::new();
         };
         stmt.query_map(params![limit as i64], |r| {
-            Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "), via: "", tags: String::new() })
+            Ok(Hit { id: r.get(0)?, title: r.get(1)?, kind: r.get(2)?, source: r.get(3)?, snippet: r.get::<_, String>(4)?.replace(['\r', '\n'], " "), via: "", tags: String::new(), added_at: r.get(5)? })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
@@ -958,6 +1164,47 @@ impl Store {
             .optional()
             .ok()
             .flatten()
+    }
+
+    // ---- undigested: things that could not be read (FEATURES.md §3.5) ----
+
+    /// Remember a failed ingest. One row per path (a retry replaces the old error);
+    /// pasted text (no path) always adds a row.
+    pub fn record_failure(&self, path: &str, title: &str, error: &str, at: i64) {
+        if !path.is_empty() {
+            let _ = self.conn.execute("DELETE FROM undigested WHERE path = ?1", params![path]);
+        }
+        let _ = self.conn.execute(
+            "INSERT INTO undigested (path, title, error, at) VALUES (?1, ?2, ?3, ?4)",
+            params![path, title, error, at],
+        );
+    }
+
+    /// A path went down successfully: it is not undigested any more.
+    pub fn clear_failure_path(&self, path: &str) {
+        if !path.is_empty() {
+            let _ = self.conn.execute("DELETE FROM undigested WHERE path = ?1", params![path]);
+        }
+    }
+
+    pub fn dismiss_failure(&self, id: i64) {
+        let _ = self.conn.execute("DELETE FROM undigested WHERE id = ?1", params![id]);
+    }
+
+    /// The undigested list, newest failure first.
+    pub fn undigested(&self, limit: usize) -> Vec<Failure> {
+        let Ok(mut st) = self.conn.prepare("SELECT id, path, title, error, at FROM undigested ORDER BY at DESC, id DESC LIMIT ?1") else {
+            return Vec::new();
+        };
+        st.query_map(params![limit as i64], |r| {
+            Ok(Failure { id: r.get(0)?, path: r.get(1)?, title: r.get(2)?, error: r.get(3)?, at: r.get(4)? })
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    pub fn undigested_count(&self) -> i64 {
+        self.conn.query_row("SELECT COUNT(*) FROM undigested", [], |r| r.get(0)).unwrap_or(0)
     }
 
     pub fn delete(&mut self, id: i64) -> rusqlite::Result<()> {

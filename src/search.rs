@@ -62,6 +62,26 @@ const MAX_NOTES: usize = 200;
 const SC_LIST: usize = 2;
 const SC_ANSWER: usize = 3;
 const MAX_HITS: usize = 40;
+/// Most snippet lines one result row ever shows (a fenced code block).
+const SNIP_MAX_LINES: usize = 6;
+/// Rows that get the expensive snippet (the item's text is read to find the block).
+const DETAIL_ROWS: usize = 12;
+/// Lines shown while browsing (no query to centre the block on).
+const SNIP_BROWSE_LINES: usize = 2;
+/// Lines of prose/markdown shown around a hit.
+const SNIP_TEXT_LINES: usize = 3;
+/// Items longer than this keep the cheap one-line snippet.
+const MAX_SCAN_BYTES: usize = 400 * 1024;
+/// Undigested entries listed at once.
+const MAX_FAILS: usize = 200;
+// Right-click menu on a result row (FEATURES.md §5.7). The menu posts these to the
+// panel, so every entry goes through the same code as its keyboard shortcut.
+const MENU_ITEM_OPEN: usize = 31;
+const MENU_ITEM_REVEAL: usize = 32;
+const MENU_ITEM_COPY: usize = 33;
+const MENU_ITEM_REINDEX: usize = 34;
+const MENU_ITEM_FORGET: usize = 35;
+const MENU_ITEM_RETRY: usize = 36;
 
 // Logical (96-DPI) sizes.
 const DEFAULT_W: i32 = 480;
@@ -112,6 +132,40 @@ enum SettingKind {
     Hotkey(usize),
     /// Toggle / choice / action handled by the dot's menu command.
     Command(usize),
+}
+
+/// Ink of one run of snippet text.
+#[derive(Clone, Copy, PartialEq)]
+enum Ink {
+    /// Ordinary snippet text.
+    Dim,
+    /// A match, a markdown heading, a bullet.
+    Accent,
+    /// Code inside a block (on the darker code ground).
+    Fg,
+}
+
+#[derive(Clone)]
+struct Run {
+    text: String,
+    ink: Ink,
+}
+
+/// One drawn line of a result's snippet.
+#[derive(Clone, Default)]
+struct SnipLine {
+    runs: Vec<Run>,
+    /// Drawn on the editor ground: a code file or a fenced block.
+    code: bool,
+    /// Markdown list item: a pixel dot stands in for the "-".
+    bullet: bool,
+}
+
+/// What one result row draws below its title, and how tall that makes it.
+#[derive(Clone, Default)]
+struct RowPlan {
+    lines: Vec<SnipLine>,
+    height: i32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -200,6 +254,11 @@ pub struct SearchWin {
     /// A Neovim message / command line currently shown in place of the status.
     nvim_status: Option<String>,
     settings: Vec<Setting>,
+    /// Per-hit snippet plan (markdown/code formatting and row height), rebuilt on refresh.
+    rows: Vec<RowPlan>,
+    /// Files tab showing the undigested list (things that could not be read) instead of results.
+    undigested: bool,
+    fails: Vec<crate::store::Failure>,
     /// Settings tab: waiting for the user to press the keys for this action.
     capturing: Option<usize>,
     gear_rc: RECT,
@@ -279,6 +338,9 @@ impl SearchWin {
                 nvim_init: nvim_init.to_string(),
                 nvim_status: None,
                 settings: Vec::new(),
+                rows: Vec::new(),
+                undigested: false,
+                fails: Vec::new(),
                 capturing: None,
                 gear_rc: RECT::default(),
             });
@@ -317,6 +379,33 @@ impl SearchWin {
 
     fn pad(&self) -> i32 {
         self.px(8)
+    }
+
+    /// Height of one snippet line below a result's title.
+    fn snip_h(&self) -> i32 {
+        self.px(15)
+    }
+
+    /// Height of row `i` in the list (result rows grow with their snippet).
+    fn item_height(&self, i: usize) -> i32 {
+        if self.tab != Tab::Files {
+            return self.row_height();
+        }
+        if self.undigested {
+            return self.row_height() + self.snip_h();
+        }
+        self.rows.get(i).map(|r| r.height).unwrap_or_else(|| self.row_height())
+    }
+
+    /// Total height of every row in the list.
+    fn rows_total_h(&self) -> i32 {
+        let n = if self.undigested { self.fails.len() } else { self.hits.len() };
+        (0..n).map(|i| self.item_height(i)).sum()
+    }
+
+    /// Items in the list, whichever view the Files tab is in.
+    fn list_len(&self) -> usize {
+        if self.tab == Tab::Files && self.undigested { self.fails.len() } else { self.hits.len() }
     }
 
     fn bar_w(&self) -> i32 {
@@ -419,8 +508,8 @@ impl SearchWin {
             // The editor wants room: the Notes tab always uses the full (dragged or default) height.
             cap.max(self.min_h())
         } else {
-            let rows = (self.hits.len() as i32).max(MIN_ROWS);
-            let want = self.fixed_h() + self.answer_wanted_h() + rows * self.row_height();
+            let rows = self.rows_total_h().max(MIN_ROWS * self.row_height());
+            let want = self.fixed_h() + self.answer_wanted_h() + rows;
             want.min(cap).max(self.min_h())
         };
         (self.snap(w), self.snap(h))
@@ -601,7 +690,8 @@ impl SearchWin {
             Ctl::List => {
                 let count = SendMessageW(self.list, LB_GETCOUNT, None, None).0 as i32;
                 let pos = SendMessageW(self.list, LB_GETTOPINDEX, None, None).0 as i32;
-                let page = ((self.list_rc.bottom - self.list_rc.top) / self.row_height()).max(1);
+                let avg = if count > 0 { (self.rows_total_h() / count).max(self.px(8)) } else { self.row_height() };
+                let page = ((self.list_rc.bottom - self.list_rc.top) / avg).max(1);
                 (pos, page, count)
             }
             Ctl::Editor if self.nvim.is_some() => self.nvim.as_ref().unwrap().scroll_info(),
@@ -890,6 +980,7 @@ impl SearchWin {
         }
         self.flush_note();
         self.set_preview(false);
+        self.undigested = false;
         self.tab = tab;
         self.restored = false;
         let _ = SetWindowTextW(self.edit, w!(""));
@@ -952,6 +1043,13 @@ impl SearchWin {
         rows.push(Setting { label: "Center on new message".into(), value: onoff(cfg.center_on_message), hint: "the dot warps to the screen centre for notifications".into(), kind: SettingKind::Command(crate::dot::MENU_CENTER_MSG_PUB) });
         rows.push(Setting { label: "Default view".into(), value: if cfg.notes_default { "Notes".into() } else { "Files".into() }, hint: "which tab opens on click / summon".into(), kind: SettingKind::Command(if cfg.notes_default { crate::dot::MENU_VIEW_FILES } else { crate::dot::MENU_VIEW_NOTES }) });
         rows.push(Setting { label: "Agent bubbles".into(), value: onoff(cfg.agent_notify), hint: "let MCP clients (Claude Code…) show speech bubbles".into(), kind: SettingKind::Command(crate::dot::MENU_AGENT_NOTIFY) });
+        let n = self.store.lock().unwrap().undigested_count();
+        rows.push(Setting {
+            label: "Undigested items".into(),
+            value: if n == 0 { "none".into() } else { n.to_string() },
+            hint: if n == 0 { "everything that fell in went down".into() } else { "things Blackhole could not read — click to list, retry or dismiss them".into() },
+            kind: SettingKind::Command(crate::dot::MENU_UNDIGESTED),
+        });
         rows.push(Setting { label: "Start at sign-in".into(), value: onoff(crate::startup::enabled()), hint: "run Blackhole when you log in".into(), kind: SettingKind::Command(crate::dot::MENU_START_LOGIN_PUB) });
         let nv = if cfg.nvim_init.is_empty() { "built-in".to_string() } else { cfg.nvim_init.rsplit(['\\', '/']).next().unwrap_or("").to_string() };
         rows.push(Setting { label: "Neovim config".into(), value: nv, hint: "click to load your init.lua / init.vim".into(), kind: SettingKind::Command(crate::dot::MENU_NVIM_CONFIG) });
@@ -1011,6 +1109,7 @@ impl SearchWin {
         self.flush_note();
         self.remember_caret();
         self.tab = Tab::Notes;
+        self.undigested = false;
         self.ensure_nvim();
         self.editing = None;
         self.dirty = false;
@@ -1546,6 +1645,7 @@ impl SearchWin {
 
     /// Forget the previous view: empty query, recent items, no answer.
     unsafe fn clear_view(&mut self) {
+        self.undigested = false;
         self.cancel_job();
         self.answer_text.clear();
         let _ = SetWindowTextW(self.answer, w!(""));
@@ -1605,20 +1705,34 @@ impl SearchWin {
             self.fit(true);
             return;
         }
+        if self.undigested {
+            self.refresh_undigested();
+            return;
+        }
+        self.fails.clear();
         let asking = Self::question_of(&raw).is_some();
         if !asking {
             self.cancel_job();
             self.answer_shown = false;
         }
         let q = Self::question_of(&raw).unwrap_or(&raw).to_string();
+        // The filter and tag words are not part of the question: they must not reach the
+        // embedding or the "not in your vault" gate, or `kind:pdf` alone reads as a query
+        // about the words "kind" and "pdf".
+        let (_, unfiltered) = crate::store::parse_filters(&q);
+        let (_, words) = crate::store::split_tags(&unfiltered);
+        let words = words.trim().to_string();
         // Embed outside the store lock; the worker may be holding it to write.
-        let qvec = if q.trim().is_empty() { None } else { self.embedder.embed(&q).ok() };
+        let qvec = if words.is_empty() { None } else { self.embedder.embed(&words).ok() };
         let (hits, total, absent) = {
             let store = self.store.lock().unwrap();
-            let absent = !q.trim().is_empty() && store.absent(&q, qvec.as_deref());
+            let absent = !words.is_empty() && store.absent(&words, qvec.as_deref());
             (if absent { Vec::new() } else { store.search(&q, qvec.as_deref(), MAX_HITS) }, store.count(), absent)
         };
         self.hits = hits;
+        // Row heights depend on the snippet, so the plan is built before the rows are added
+        // (the listbox asks the panel for each row's height as it goes).
+        self.build_rows();
         SendMessageW(self.list, LB_RESETCONTENT, None, None);
         for i in 0..self.hits.len() {
             SendMessageW(self.list, LB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(i as isize)));
@@ -1627,18 +1741,196 @@ impl SearchWin {
             SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(0)), None);
         }
         if self.job.is_none() {
-            let status = if q.trim().is_empty() {
-                format!("{total} items inside · recent   ↵ open  ^↵ reveal  ^C copy  Del forget  ? ask")
-            } else if absent {
+            // Browse filters (kind:/since:/source:) are named so it is obvious what is in view.
+            let (filters, rest) = crate::store::parse_filters(&q);
+            let (tags, words) = crate::store::split_tags(&rest);
+            let mut scope = if filters.is_empty() { String::new() } else { format!(" · {}", filters.describe()) };
+            for t in &tags {
+                scope.push_str(&format!(" · #{t}"));
+            }
+            let browsing = words.trim().is_empty();
+            let status = if absent {
                 "nothing in the vault mentions that".to_string()
             } else if asking {
                 format!("↵ to ask · {} related items", self.hits.len())
+            } else if browsing && filters.is_empty() {
+                format!("{total} items inside · recent   ↵ open  ^↵ reveal  ^C copy  ^R re-index  Del forget  ? ask")
+            } else if browsing {
+                format!("{} of {total} items · browsing{scope}   ↵ open  ^R re-index  Del forget", self.hits.len())
             } else {
-                format!("{} of {total} items   ↵ open  ^↵ reveal  ^C copy  Del forget", self.hits.len())
+                format!("{} of {total} items{scope}   ↵ open  ^↵ reveal  ^C copy  ^R re-index  Del forget", self.hits.len())
             };
             self.set_status(&status);
         }
         self.fit(true);
+    }
+
+    // ---- undigested list (FEATURES.md §3.5): what fell in but could not be read ----
+
+    /// Open the undigested list in the Files tab (the Settings row opens this).
+    pub unsafe fn show_undigested(hwnd: HWND) {
+        let Some(s) = state(hwnd) else { return };
+        if s.tab != Tab::Files {
+            s.set_tab(Tab::Files);
+        }
+        s.set_preview(false);
+        s.cancel_job();
+        s.answer_shown = false;
+        s.undigested = true;
+        s.restored = false;
+        let _ = SetWindowTextW(s.edit, w!(""));
+        s.refresh();
+        let _ = InvalidateRect(Some(s.hwnd), None, true);
+        let _ = SetFocus(Some(s.edit));
+    }
+
+    unsafe fn refresh_undigested(&mut self) {
+        self.fails = self.store.lock().unwrap().undigested(MAX_FAILS);
+        self.hits.clear();
+        self.rows.clear();
+        let sel = SendMessageW(self.list, LB_GETCURSEL, None, None).0.max(0) as usize;
+        SendMessageW(self.list, LB_RESETCONTENT, None, None);
+        for i in 0..self.fails.len() {
+            SendMessageW(self.list, LB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(i as isize)));
+        }
+        if !self.fails.is_empty() {
+            SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(sel.min(self.fails.len() - 1))), None);
+        }
+        self.answer_shown = false;
+        let status = if self.fails.is_empty() {
+            "nothing undigested — everything that fell in went down   Esc back".to_string()
+        } else {
+            format!("{} undigested   ↵ or R retries  Del dismisses  Esc back", self.fails.len())
+        };
+        self.set_status(&status);
+        self.fit(true);
+    }
+
+    fn selected_fail(&self) -> Option<&crate::store::Failure> {
+        let i = unsafe { SendMessageW(self.list, LB_GETCURSEL, None, None) }.0;
+        usize::try_from(i).ok().and_then(|i| self.fails.get(i))
+    }
+
+    /// Enter / R on an undigested entry: throw the file at the ingest worker again.
+    unsafe fn retry_failure(&mut self) {
+        let Some(f) = self.selected_fail().cloned() else { return };
+        if f.path.is_empty() {
+            self.set_status("that one came from the clipboard — paste it again");
+            return;
+        }
+        let boxed = Box::into_raw(Box::new(f.path.clone()));
+        if PostMessageW(Some(self.dot), crate::dot::WM_RETRY_INGEST, WPARAM(0), LPARAM(boxed as isize)).is_err() {
+            drop(Box::from_raw(boxed));
+            self.set_status("could not retry that one");
+            return;
+        }
+        self.set_status(&format!("swallowing {} again…", f.title));
+    }
+
+    unsafe fn dismiss_failure(&mut self) {
+        let Some(f) = self.selected_fail().cloned() else { return };
+        self.store.lock().unwrap().dismiss_failure(f.id);
+        self.refresh();
+        self.set_status(&format!("dismissed {}", f.title));
+    }
+
+    unsafe fn leave_undigested(&mut self) {
+        self.undigested = false;
+        self.fails.clear();
+        self.refresh();
+        let _ = InvalidateRect(Some(self.hwnd), None, true);
+    }
+
+    /// Right-click on a row: the item's actions (or the undigested entry's) as a
+    /// pixel-plain popup menu; each entry posts the same command the keys use.
+    unsafe fn item_menu(&mut self, pt: POINT) {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        if self.undigested {
+            if self.selected_fail().is_none() {
+                let _ = DestroyMenu(menu);
+                return;
+            }
+            let _ = AppendMenuW(menu, MF_STRING, MENU_ITEM_RETRY, w!("Try again\tR"));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_ITEM_FORGET, w!("Dismiss\tDel"));
+        } else {
+            if self.selected().is_none() {
+                let _ = DestroyMenu(menu);
+                return;
+            }
+            let _ = AppendMenuW(menu, MF_STRING, MENU_ITEM_OPEN, w!("Open\t↵"));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_ITEM_REVEAL, w!("Reveal\tCtrl+↵"));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_ITEM_COPY, w!("Copy text\tCtrl+C"));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_ITEM_REINDEX, w!("Re-index\tCtrl+R"));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, MF_STRING, MENU_ITEM_FORGET, w!("Let it escape\tDel"));
+        }
+        let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_LEFTALIGN, pt.x, pt.y, None, self.hwnd, None);
+        let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+    }
+
+    /// One entry of the item menu (also reached by posting the id to the panel).
+    unsafe fn item_command(&mut self, id: usize) {
+        match id {
+            MENU_ITEM_OPEN => self.open_selected(false),
+            MENU_ITEM_REVEAL => self.open_selected(true),
+            MENU_ITEM_COPY => {
+                self.copy_selected();
+                self.set_status("copied");
+            }
+            MENU_ITEM_REINDEX => self.reindex_selected(),
+            MENU_ITEM_RETRY => self.retry_failure(),
+            MENU_ITEM_FORGET => {
+                if self.undigested {
+                    self.dismiss_failure()
+                } else {
+                    self.forget_selected()
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---- re-index one item (FEATURES.md §5.7) ----
+
+    /// Ctrl+R: read the item's file again (or just re-chunk a note/text) and re-embed it.
+    unsafe fn reindex_selected(&mut self) {
+        let Some(hit) = self.selected() else { return };
+        let (id, kind, title) = (hit.id, hit.kind.clone(), hit.title.clone());
+        let short: String = title.chars().take(40).collect();
+        self.set_status(&format!("re-indexing {short}…"));
+        let _ = UpdateWindow(self.status);
+        let path = self.store.lock().unwrap().open_path(id);
+        let from_file = matches!(kind.as_str(), "pdf" | "image" | "file");
+        if let (true, Some(p)) = (from_file, path.as_deref()) {
+            match crate::ingest::extract_file(std::path::Path::new(p)) {
+                Ok(e) => {
+                    let mut st = self.store.lock().unwrap();
+                    if let Some(stored) = &e.stored {
+                        st.set_stored(id, stored);
+                    }
+                    let _ = st.update_content(id, &e.content);
+                    st.clear_failure_path(p);
+                }
+                Err(msg) => {
+                    let name = crate::ingest::failure_title(p, &msg);
+                    let why = crate::ingest::strip_title(&msg, &name).to_string();
+                    self.store.lock().unwrap().record_failure(p, &name, &why, crate::util::now_secs());
+                    self.set_status(&format!("could not re-index {short}: {why}"));
+                    return;
+                }
+            }
+        }
+        // Notes and pasted text keep their stored text; everything re-chunks and re-embeds.
+        let text = self.store.lock().unwrap().content(id).unwrap_or_default();
+        crate::ingest::embed_item(&self.store, &self.embedder, id, &title, &text);
+        let words = text.split_whitespace().count();
+        // The row's snippet came from the old text: rebuild the plans, keep the selection.
+        let sel = SendMessageW(self.list, LB_GETCURSEL, None, None).0;
+        self.build_rows();
+        let _ = InvalidateRect(Some(self.list), None, true);
+        SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(sel.max(0) as usize)), None);
+        self.set_status(&format!("re-indexed “{short}” ({words} words)"));
     }
 
     unsafe fn selected(&self) -> Option<&Hit> {
@@ -1650,11 +1942,12 @@ impl SearchWin {
     }
 
     unsafe fn move_sel(&mut self, delta: i32) {
-        if self.hits.is_empty() {
+        let n = self.list_len();
+        if n == 0 {
             return;
         }
         let cur = SendMessageW(self.list, LB_GETCURSEL, None, None).0 as i32;
-        let next = (cur + delta).clamp(0, self.hits.len() as i32 - 1);
+        let next = (cur + delta).clamp(0, n as i32 - 1);
         SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(next as usize)), None);
         self.invalidate_bar(Ctl::List);
         if self.preview {
@@ -1724,6 +2017,9 @@ impl SearchWin {
         if self.tab == Tab::Settings {
             return self.draw_setting(dis);
         }
+        if self.tab == Tab::Files && self.undigested {
+            return self.draw_failure(dis);
+        }
         let Some(hit) = self.hits.get(dis.itemID as usize) else { return };
         let selected = (dis.itemState.0 & ODS_SELECTED.0) != 0;
         let hdc = dis.hDC;
@@ -1736,16 +2032,26 @@ impl SearchWin {
         r.right -= pad;
         r.top += self.px(4);
 
-        // kind tag + title
+        // A 7x7 pixel type icon (text / pdf / image / note / code / file) in place of the
+        // old "[kind]" tag; how it matched stays as a small accent mark before the title.
+        let p = self.unit();
+        let name = hit.source.as_deref().unwrap_or(&hit.title);
+        self.draw_icon(hdc, ICON[kind_index(&hit.kind, crate::store::is_code_name(name))], r.left, r.top + self.px(2));
+        let text_left = r.left + 7 * p + pad;
+
         let old = SelectObject(hdc, self.font.into());
-        SetTextColor(hdc, c_accent());
-        let via = match hit.via { "sem" => " ≈", "both" => " ≈=", _ => "" };
-        let mut tag = wide(&format!("[{}]{via}", hit.kind));
-        let mut tag_r = r;
-        DrawTextW(hdc, &mut tag, &mut tag_r, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
-        DrawTextW(hdc, &mut tag, &mut r, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
         let mut title_r = r;
-        title_r.left = tag_r.right + pad;
+        title_r.left = text_left;
+        let via = match hit.via { "sem" => "≈", "both" => "≈=", _ => "" };
+        if !via.is_empty() {
+            SetTextColor(hdc, c_accent());
+            let mut v = wide(via);
+            let mut calc = title_r;
+            DrawTextW(hdc, &mut v, &mut calc, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+            let mut draw = title_r;
+            DrawTextW(hdc, &mut v, &mut draw, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+            title_r.left = calc.right + pad / 2;
+        }
         SetTextColor(hdc, c_fg());
         let mut title = wide(&hit.title);
         if !hit.tags.is_empty() {
@@ -1764,33 +2070,417 @@ impl SearchWin {
         }
         DrawTextW(hdc, &mut title, &mut title_r, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-        // Snippet: FTS marks matched terms with \u{1}…\u{2}; those runs are drawn in the accent.
+        // Snippet: the plan built in build_rows (code block, markdown or one plain line).
         SelectObject(hdc, self.font_small.into());
-        let mut snip_r = r;
-        snip_r.top += self.px(18);
-        let flat: String = hit.snippet.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
-        let mut x = snip_r.left;
-        let mut lit = false;
-        for run in flat.split_inclusive(|c| c == '\u{1}' || c == '\u{2}') {
-            let (text, toggles) = match run.chars().last() {
-                Some('\u{1}') | Some('\u{2}') => (&run[..run.len() - 1], true),
-                _ => (run, false),
-            };
-            if !text.is_empty() && x < snip_r.right {
-                SetTextColor(hdc, if lit { c_accent() } else { c_fg_dim() });
-                let mut w16 = wide(text);
-                let mut m = RECT { left: x, top: snip_r.top, right: snip_r.right, bottom: snip_r.bottom };
-                DrawTextW(hdc, &mut w16, &mut m, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
-                let mut d = RECT { left: x, top: snip_r.top, right: snip_r.right, bottom: snip_r.bottom };
-                DrawTextW(hdc, &mut w16, &mut d, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-                x = m.right;
+        let fallback;
+        let plan = match self.rows.get(dis.itemID as usize) {
+            Some(p) => p,
+            None => {
+                fallback = RowPlan { lines: vec![snippet_line(&hit.snippet, true, false)], height: self.row_height() };
+                &fallback
             }
-            if toggles {
-                lit = !lit;
+        };
+        let lh = self.snip_h();
+        let mut lr = RECT { left: text_left, top: r.top + self.px(18), right: r.right, bottom: r.top + self.px(18) + lh };
+        for line in &plan.lines {
+            if lr.bottom > dis.rcItem.bottom + self.px(2) {
+                break;
             }
+            self.draw_line(hdc, line, lr);
+            lr.top += lh;
+            lr.bottom += lh;
         }
         SelectObject(hdc, old);
     }
+
+    /// One snippet line: code lines sit on the editor ground, list items get a pixel bullet,
+    /// matches and headings are drawn in the accent colour.
+    unsafe fn draw_line(&self, hdc: HDC, line: &SnipLine, rc: RECT) {
+        let mut x = rc.left;
+        if line.code {
+            let bg = RECT { left: (rc.left - self.px(3)).max(0), top: rc.top, right: rc.right, bottom: rc.bottom };
+            FillRect(hdc, &bg, self.brush_edit);
+        }
+        if line.bullet {
+            let u = self.unit();
+            let cy = (rc.top + rc.bottom) / 2;
+            let dot = RECT { left: x, top: cy - u, right: x + 2 * u, bottom: cy + u };
+            SetDCBrushColor(hdc, c_accent());
+            FillRect(hdc, &dot, HBRUSH(GetStockObject(DC_BRUSH).0));
+            x += 4 * u;
+        }
+        for run in &line.runs {
+            if x >= rc.right || run.text.is_empty() {
+                break;
+            }
+            SetTextColor(hdc, match run.ink { Ink::Accent => c_accent(), Ink::Fg => c_fg(), Ink::Dim => c_fg_dim() });
+            let mut w16 = wide(&run.text);
+            let mut draw = RECT { left: x, top: rc.top, right: rc.right, bottom: rc.bottom };
+            DrawTextW(hdc, &mut w16, &mut draw, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            // Advance by the text's own width: DT_CALCRECT adds overhang, which would
+            // put a gap around every highlighted word in a monospace line.
+            let mut size = windows::Win32::Foundation::SIZE::default();
+            let _ = GetTextExtentPoint32W(hdc, &w16[..w16.len().saturating_sub(1)], &mut size);
+            x += size.cx;
+        }
+    }
+
+    /// An undigested entry: warning icon, what it was, the error, where it came from.
+    unsafe fn draw_failure(&self, dis: &DRAWITEMSTRUCT) {
+        let Some(f) = self.fails.get(dis.itemID as usize) else { return };
+        let selected = (dis.itemState.0 & ODS_SELECTED.0) != 0;
+        let hdc = dis.hDC;
+        FillRect(hdc, &dis.rcItem, if selected { self.brush_sel } else { self.brush_bg });
+        SetBkMode(hdc, TRANSPARENT);
+        let pad = self.px(6);
+        let mut r = dis.rcItem;
+        r.left += pad;
+        r.right -= pad;
+        r.top += self.px(4);
+        self.draw_icon(hdc, ICON_WARN, r.left, r.top + self.px(2));
+        let left = r.left + 7 * self.unit() + pad;
+        let old = SelectObject(hdc, self.font.into());
+        SetTextColor(hdc, c_fg());
+        let mut title = wide(&f.title);
+        let mut tr = r;
+        tr.left = left;
+        // When it failed, at the right edge; the name ellipsises before it.
+        SelectObject(hdc, self.font_small.into());
+        let mut when = wide(&ago(f.at));
+        let mut wr = tr;
+        DrawTextW(hdc, &mut when, &mut wr, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+        let ww = wr.right - wr.left;
+        let mut when_area = RECT { left: (tr.right - ww).max(tr.left), top: tr.top + self.px(2), right: tr.right, bottom: tr.bottom };
+        SetTextColor(hdc, c_fg_dim());
+        DrawTextW(hdc, &mut when, &mut when_area, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+        tr.right = (when_area.left - pad).max(tr.left);
+        SelectObject(hdc, self.font.into());
+        SetTextColor(hdc, c_fg());
+        DrawTextW(hdc, &mut title, &mut tr, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        SelectObject(hdc, self.font_small.into());
+        let lh = self.snip_h();
+        SetTextColor(hdc, crate::theme::cr(crate::theme::current().red));
+        let mut err = wide(&f.error);
+        let mut er = RECT { left, top: r.top + self.px(18), right: r.right, bottom: r.top + self.px(18) + lh };
+        DrawTextW(hdc, &mut err, &mut er, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        SetTextColor(hdc, c_fg_dim());
+        let mut path = wide(if f.path.is_empty() { "pasted text" } else { &f.path });
+        let mut pr = RECT { left, top: r.top + self.px(18) + lh, right: r.right, bottom: r.top + self.px(18) + 2 * lh };
+        DrawTextW(hdc, &mut path, &mut pr, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_PATH_ELLIPSIS);
+        SelectObject(hdc, old);
+    }
+
+    /// Draw a 7x7 two-layer pixel icon: the outline in the accent, the detail dim.
+    unsafe fn draw_icon(&self, hdc: HDC, icon: ([u8; 7], [u8; 7]), x: i32, y: i32) {
+        let p = self.unit();
+        for (bits, colour) in [(icon.0, c_accent()), (icon.1, c_fg_dim())] {
+            SetDCBrushColor(hdc, colour);
+            let brush = HBRUSH(GetStockObject(DC_BRUSH).0);
+            for (row, mask) in bits.iter().enumerate() {
+                for col in 0..7i32 {
+                    if mask & (1 << (6 - col)) != 0 {
+                        let rc = RECT { left: x + col * p, top: y + row as i32 * p, right: x + (col + 1) * p, bottom: y + (row as i32 + 1) * p };
+                        FillRect(hdc, &rc, brush);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- snippet plans (FEATURES.md §5.6: code blocks and markdown in results) ----
+
+    /// Work out what each visible row draws below its title, and how tall that makes it.
+    /// Called before the rows are handed to the listbox, which then asks for their heights.
+    unsafe fn build_rows(&mut self) {
+        let raw = self.query_text();
+        let q = Self::question_of(&raw).unwrap_or(&raw).to_string();
+        let (_, unfiltered) = crate::store::parse_filters(&q);
+        let (_, text) = crate::store::split_tags(&unfiltered);
+        let terms: Vec<String> = text
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|t| t.chars().count() >= 3)
+            .map(str::to_lowercase)
+            .collect();
+        let (row_h, lh) = (self.row_height(), self.snip_h());
+        let mut rows = Vec::with_capacity(self.hits.len());
+        for (i, hit) in self.hits.iter().enumerate() {
+            let code = crate::store::is_code_name(hit.source.as_deref().unwrap_or(&hit.title));
+            let lines = self
+                .snippet_block(hit, &terms, i < DETAIL_ROWS)
+                .unwrap_or_else(|| vec![snippet_line(&hit.snippet, !code, code)]);
+            let n = lines.len().max(1) as i32;
+            rows.push(RowPlan { lines, height: row_h + (n - 1) * lh });
+        }
+        self.rows = rows;
+    }
+
+    /// The whole fenced block (or a window of a code file) around the hit, up to
+    /// SNIP_MAX_LINES lines. None for anything that keeps the cheap one-line snippet.
+    fn snippet_block(&self, hit: &Hit, terms: &[String], detail: bool) -> Option<Vec<SnipLine>> {
+        if !detail || matches!(hit.kind.as_str(), "image" | "pdf") {
+            return None;
+        }
+        let code_file = crate::store::is_code_name(hit.source.as_deref().unwrap_or(&hit.title));
+        let content = self.store.lock().unwrap().content(hit.id)?;
+        if content.len() > MAX_SCAN_BYTES {
+            return None;
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.is_empty() {
+            return None;
+        }
+        let at = terms
+            .iter()
+            .filter_map(|t| lines.iter().position(|l| l.to_lowercase().contains(t.as_str())))
+            .min();
+        // A fenced block or a code file is shown as code, keeping its blank lines;
+        // prose and markdown show the hit's line and its neighbours, blanks skipped.
+        let (start, end, code, want) = match (at.and_then(|i| fence_around(&lines, i)), code_file, at) {
+            (Some((a, b)), _, _) => (a, b, true, SNIP_MAX_LINES),
+            (None, true, Some(i)) => (i.saturating_sub(1), i + SNIP_MAX_LINES - 1, true, SNIP_MAX_LINES),
+            (None, true, None) => (0, SNIP_BROWSE_LINES, true, SNIP_BROWSE_LINES),
+            (None, false, Some(i)) => (i, i + SNIP_TEXT_LINES + 2, false, SNIP_TEXT_LINES),
+            (None, false, None) => (0, SNIP_BROWSE_LINES + 2, false, SNIP_BROWSE_LINES),
+        };
+        let end = end.min(lines.len()).max(start);
+        let mut out: Vec<SnipLine> = Vec::new();
+        for l in &lines[start..end] {
+            if out.len() >= want {
+                break;
+            }
+            if l.trim().is_empty() && (!code || out.is_empty()) {
+                continue;
+            }
+            if !code && is_fence(l) {
+                continue; // the ``` marker itself is not worth a line of prose
+            }
+            out.push(if code { code_line(l, terms) } else { text_line(l, terms) });
+        }
+        while out.last().map(|l| l.runs.iter().all(|r| r.text.trim().is_empty())).unwrap_or(false) {
+            out.pop();
+        }
+        (!out.is_empty()).then_some(out)
+    }
+}
+
+/// Icons, one bit per pixel, bit 6 leftmost: (outline in the accent, detail in dim).
+type Icon = ([u8; 7], [u8; 7]);
+/// text, pdf, image, note, code, file — see `kind_index`.
+const ICON: [Icon; 6] = [
+    // text: a page with lines
+    ([0b1111110, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1111110], [0, 0, 0b0111100, 0, 0b0111100, 0, 0]),
+    // pdf: a page with a "P"
+    ([0b1111110, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1111110], [0, 0b0011100, 0b0010100, 0b0011100, 0b0010000, 0, 0]),
+    // image: a frame with a sun and hills
+    ([0b1111110, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1111110], [0, 0b0001000, 0, 0b0001100, 0b0011110, 0b0111110, 0]),
+    // note: a page with a folded corner and a pencil stroke
+    ([0b1111100, 0b1000110, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1111110], [0, 0, 0b0000100, 0b0001000, 0b0010000, 0b0100000, 0]),
+    // code: angle brackets
+    ([0, 0b0010100, 0b0100010, 0b1000001, 0b0100010, 0b0010100, 0], [0, 0, 0, 0, 0, 0, 0]),
+    // file: a plain sheet with a folded corner
+    ([0b1111100, 0b1000110, 0b1000010, 0b1000010, 0b1000010, 0b1000010, 0b1111110], [0, 0, 0, 0, 0, 0, 0]),
+];
+/// The undigested list's warning triangle.
+const ICON_WARN: Icon = (
+    [0b0001000, 0b0010100, 0b0010100, 0b0100010, 0b0100010, 0b1000001, 0b1111111],
+    [0, 0, 0b0001000, 0b0001000, 0, 0b0001000, 0],
+);
+
+/// "just now" / "12 min ago" / "3 d ago" for an undigested entry.
+fn ago(at: i64) -> String {
+    let d = (crate::util::now_secs() - at).max(0);
+    match d {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", d / 60),
+        3600..=86399 => format!("{} h ago", d / 3600),
+        _ => format!("{} d ago", d / 86400),
+    }
+}
+
+fn kind_index(kind: &str, code: bool) -> usize {
+    if code {
+        return 4;
+    }
+    match kind {
+        "pdf" => 1,
+        "image" => 2,
+        "note" => 3,
+        "file" => 5,
+        _ => 0,
+    }
+}
+
+/// The fenced ``` block containing line `i`, as (start, end) line indices, clipped to
+/// SNIP_MAX_LINES around the hit. None when that line is not inside a fence.
+fn fence_around(lines: &[&str], i: usize) -> Option<(usize, usize)> {
+    let is_fence = |l: &&str| is_fence(l);
+    let mut open: Option<usize> = None;
+    for (n, l) in lines.iter().enumerate().take(i + 1) {
+        if is_fence(l) {
+            open = match open {
+                Some(_) => None,
+                None => Some(n),
+            };
+        }
+    }
+    let open = open?;
+    let close = lines.iter().enumerate().skip(i + 1).find(|(_, l)| is_fence(l)).map(|(n, _)| n).unwrap_or(lines.len());
+    let start = open + 1;
+    if close.saturating_sub(start) <= SNIP_MAX_LINES {
+        return Some((start, close));
+    }
+    let s = i.saturating_sub(1).max(start);
+    Some((s, (s + SNIP_MAX_LINES).min(close)))
+}
+
+/// A ``` / ~~~ fence marker line.
+fn is_fence(l: &str) -> bool {
+    let t = l.trim_start();
+    t.starts_with("```") || t.starts_with("~~~")
+}
+
+/// A line of code: tabs expanded, matched terms in the accent, drawn on the code ground.
+fn code_line(raw: &str, terms: &[String]) -> SnipLine {
+    let text: String = raw.replace('\t', "  ").chars().take(200).collect();
+    SnipLine { runs: mark_terms(&text, terms, Ink::Fg), code: true, bullet: false }
+}
+
+/// One line of prose or markdown: the marks become styling (heading in the accent,
+/// list bullet as a pixel dot, `**`/`_`/`` ` `` dropped) and matches are marked.
+fn text_line(raw: &str, terms: &[String]) -> SnipLine {
+    let (text, heading, bullet) = strip_md(raw);
+    let base = if heading { Ink::Accent } else { Ink::Dim };
+    SnipLine { runs: mark_terms(&text, terms, base), code: false, bullet }
+}
+
+/// Drop markdown marks from one line: (text, was a heading, was a list item).
+fn strip_md(raw: &str) -> (String, bool, bool) {
+    let chars: Vec<char> = raw.replace('\t', "  ").trim_end().chars().take(300).collect();
+    let mut i = 0;
+    while i < chars.len() && chars[i] == ' ' {
+        i += 1;
+    }
+    let mut heading = false;
+    let mut bullet = false;
+    if i < chars.len() && chars[i] == '#' {
+        heading = true;
+        while i < chars.len() && matches!(chars[i], '#' | ' ') {
+            i += 1;
+        }
+    } else if i + 1 < chars.len() && matches!(chars[i], '-' | '*' | '+' | '•') && chars[i + 1] == ' ' {
+        bullet = true;
+        i += 2;
+    } else if i > 0 {
+        i = 0; // keep other indentation
+    }
+    let body: Vec<char> = chars[i..].to_vec();
+    let mut out = String::new();
+    for n in 0..body.len() {
+        match body[n] {
+            '*' | '`' | '~' => {}
+            '_' if is_emphasis(&body, n) => {}
+            c => out.push(c),
+        }
+    }
+    (out, heading, bullet)
+}
+
+/// Split `text` into runs with the query's terms in the accent colour.
+fn mark_terms(text: &str, terms: &[String], base: Ink) -> Vec<Run> {
+    let mut runs = Vec::new();
+    // Byte offsets from the lower-cased copy only line up for ASCII.
+    if terms.is_empty() || !text.is_ascii() {
+        push_run(&mut runs, text, base);
+        return runs;
+    }
+    let lower = text.to_lowercase();
+    let mut marks: Vec<(usize, usize)> = Vec::new();
+    for t in terms {
+        let mut from = 0;
+        while let Some(p) = lower[from..].find(t.as_str()) {
+            let a = from + p;
+            marks.push((a, a + t.len()));
+            from = a + t.len();
+        }
+    }
+    marks.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (a, b) in marks {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    let mut pos = 0;
+    for (a, b) in merged {
+        push_run(&mut runs, &text[pos..a], base);
+        push_run(&mut runs, &text[a..b], Ink::Accent);
+        pos = b;
+    }
+    push_run(&mut runs, &text[pos..], base);
+    runs
+}
+
+fn push_run(runs: &mut Vec<Run>, text: &str, ink: Ink) {
+    if text.is_empty() {
+        return;
+    }
+    match runs.last_mut() {
+        Some(last) if last.ink == ink => last.text.push_str(text),
+        _ => runs.push(Run { text: text.to_string(), ink }),
+    }
+}
+
+/// A `_` that delimits markdown emphasis rather than living inside an identifier.
+fn is_emphasis(chars: &[char], n: usize) -> bool {
+    let before = n.checked_sub(1).map(|k| chars[k]).unwrap_or(' ');
+    let after = chars.get(n + 1).copied().unwrap_or(' ');
+    !(before.is_alphanumeric() && after.is_alphanumeric())
+}
+
+/// One snippet line from stored text: FTS5 marks matches with \u{1}…\u{2} (drawn in the
+/// accent), and with `md` the markdown marks become styling — headings in the accent,
+/// list bullets as a pixel dot, `*`/`_`/`` ` `` dropped.
+fn snippet_line(raw: &str, md: bool, code: bool) -> SnipLine {
+    let flat: String = raw.chars().map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c }).collect();
+    let mut chars: Vec<char> = flat.chars().take(400).collect();
+    let mut heading = false;
+    let mut bullet = false;
+    if md {
+        let mut i = 0;
+        while i < chars.len() && matches!(chars[i], ' ' | '\u{1}' | '\u{2}') {
+            i += 1;
+        }
+        if i < chars.len() && chars[i] == '#' {
+            heading = true;
+            while i < chars.len() && matches!(chars[i], '#' | ' ') {
+                i += 1;
+            }
+        } else if i + 1 < chars.len() && matches!(chars[i], '-' | '*' | '+' | '•') && chars[i + 1] == ' ' {
+            bullet = true;
+            i += 2;
+        }
+        chars.drain(..i);
+    }
+    let base = if heading { Ink::Accent } else if code { Ink::Fg } else { Ink::Dim };
+    let mut runs: Vec<Run> = Vec::new();
+    let mut cur = String::new();
+    let mut lit = false;
+    for n in 0..chars.len() {
+        let c = chars[n];
+        match c {
+            '\u{1}' | '\u{2}' => {
+                push_run(&mut runs, &cur, if lit { Ink::Accent } else { base });
+                cur.clear();
+                lit = c == '\u{1}';
+            }
+            '*' | '`' | '~' if md => {}
+            '_' if md && is_emphasis(&chars, n) => {}
+            _ => cur.push(c),
+        }
+    }
+    push_run(&mut runs, &cur, if lit { Ink::Accent } else { base });
+    SnipLine { runs, code, bullet }
 }
 
 impl SearchWin {
@@ -1862,6 +2552,13 @@ unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             if let Some(s) = state(parent) {
                 let page = s.scroll_info(Ctl::List).1;
                 match key {
+                    // The undigested list has its own keys; the query box is idle there.
+                    VK_ESCAPE if s.undigested => { s.leave_undigested(); return LRESULT(0); }
+                    VK_RETURN if s.undigested => { s.retry_failure(); return LRESULT(0); }
+                    VK_DELETE if s.undigested => { s.dismiss_failure(); return LRESULT(0); }
+                    _ if key == VK_R && s.undigested => { s.retry_failure(); return LRESULT(0); }
+                    // Ctrl+R re-indexes the selected item (FEATURES.md §5.7).
+                    _ if key == VK_R && ctrl && s.tab == Tab::Files => { s.reindex_selected(); return LRESULT(0); }
                     VK_ESCAPE if s.job.is_some() => { s.cancel_job(); s.set_status("stopped"); s.fit(true); return LRESULT(0); }
                     VK_ESCAPE if s.preview => { s.set_preview(false); return LRESULT(0); }
                     VK_TAB if !ctrl && s.tab == Tab::Files => { let on = !s.preview; s.set_preview(on); return LRESULT(0); }
@@ -1895,6 +2592,8 @@ unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 }
             }
         }
+        // Nothing is typed into the query box while the undigested list is up.
+        WM_CHAR if state(parent).map(|s| s.undigested).unwrap_or(false) => return LRESULT(0),
         WM_CHAR if wparam.0 == 27 || wparam.0 == 13 || wparam.0 == 9 => return LRESULT(0), // swallow beep
         WM_MOUSEWHEEL => return SendMessageW(parent, msg, Some(wparam), Some(lparam)),
         _ => {}
@@ -1908,6 +2607,22 @@ unsafe extern "system" fn scroll_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, 
     let parent = HWND(refdata as *mut _);
     if msg == WM_MOUSEWHEEL {
         return SendMessageW(parent, msg, Some(wparam), Some(lparam));
+    }
+    if id == SC_LIST && msg == WM_RBUTTONDOWN {
+        // Select what was right-clicked, then offer that row's actions.
+        if let Some(s) = state(parent) {
+            if s.tab != Tab::Settings {
+                let pt = lparam_point(lparam);
+                let hit = SendMessageW(hwnd, LB_ITEMFROMPOINT, Some(WPARAM(0)), Some(LPARAM(((pt.y as u32) << 16 | (pt.x as u32 & 0xFFFF)) as isize))).0;
+                if (hit >> 16) & 0xFFFF == 0 {
+                    SendMessageW(hwnd, LB_SETCURSEL, Some(WPARAM((hit & 0xFFFF) as usize)), None);
+                }
+                let mut screen = pt;
+                let _ = ClientToScreen(hwnd, &mut screen);
+                s.item_menu(screen);
+            }
+        }
+        return LRESULT(0);
     }
     let r = DefSubclassProc(hwnd, msg, wparam, lparam);
     if id == SC_LIST && msg == WM_LBUTTONUP {
@@ -1982,7 +2697,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // No WS_VSCROLL on the list or the answer box: the panel paints their bars.
             s.list = CreateWindowExW(
                 WINDOW_EX_STYLE(0), w!("LISTBOX"), w!(""),
-                WS_CHILD | WS_VISIBLE | WINDOW_STYLE((LBS_OWNERDRAWFIXED | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32),
+                WS_CHILD | WS_VISIBLE | WINDOW_STYLE((LBS_OWNERDRAWVARIABLE | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32),
                 0, 0, 10, 10, Some(hwnd), Some(HMENU(ID_LIST as *mut _)), None, None,
             ).unwrap_or_default();
             s.answer = CreateWindowExW(
@@ -2050,7 +2765,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         crate::dot::WM_SETTINGS_CHANGED => {
             if let Some(s) = state(hwnd) {
-                if s.tab == Tab::Settings {
+                if s.undigested {
+                    // An ingest finished: the undigested list may have gained or lost an entry.
+                    s.refresh();
+                } else if s.tab == Tab::Settings {
                     s.refresh();
                     let _ = SetFocus(Some(s.hwnd));
                 }
@@ -2135,13 +2853,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let id = (wparam.0 & 0xFFFF) as usize;
             let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
             if let Some(s) = state(hwnd) {
+                if code == 0 && (MENU_ITEM_OPEN..=MENU_ITEM_RETRY).contains(&id) {
+                    s.item_command(id);
+                    return LRESULT(0);
+                }
                 if id == ID_EDIT && code == EN_CHANGE {
                     s.restored = false; // a new query supersedes the restored view
                     SetTimer(Some(hwnd), TIMER_DEBOUNCE, 90, None);
                 } else if id == ID_EDITOR && code == EN_CHANGE && !s.loading {
                     s.note_changed();
                 } else if id == ID_LIST && code == LBN_DBLCLK {
-                    if s.tab == Tab::Settings { s.activate_setting() } else { s.open_selected(false) }
+                    if s.tab == Tab::Settings { s.activate_setting() } else if s.undigested { s.retry_failure() } else { s.open_selected(false) }
                 } else if id == ID_LIST && code == LBN_SELCHANGE {
                     if s.tab == Tab::Settings {
                         let _ = SetFocus(Some(s.hwnd));
@@ -2179,6 +2901,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
             }
             LRESULT(0)
+        }
+        WM_MEASUREITEM => {
+            // Result rows grow with their snippet (a code block shows up to six lines).
+            let mi = &mut *(lparam.0 as *mut MEASUREITEMSTRUCT);
+            if let Some(s) = state(hwnd) {
+                mi.itemHeight = s.item_height(mi.itemID as usize) as u32;
+            }
+            LRESULT(1)
         }
         WM_DRAWITEM => {
             let dis = &*(lparam.0 as *const DRAWITEMSTRUCT);

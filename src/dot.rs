@@ -76,12 +76,16 @@ pub const MENU_THEME_NEXT: usize = 21;
 /// Settings tab: toggle whether MCP clients may show bubbles.
 pub const MENU_AGENT_NOTIFY: usize = 22;
 pub const MENU_SCREENSHOT: usize = 14;
+/// Settings row: open the panel's list of things that could not be read (FEATURES.md §3.5).
+pub const MENU_UNDIGESTED: usize = 30;
 pub const MENU_CENTER_MSG_PUB: usize = MENU_CENTER_MSG;
 pub const MENU_START_LOGIN_PUB: usize = MENU_START_LOGIN;
 /// From the Settings tab: wparam = action index, lparam = boxed String combo. The dot
 /// stores it, re-registers, and tells the panel to refresh (WM_SETTINGS_CHANGED).
 pub const WM_SET_HOTKEY: u32 = 0x8018;
 pub const WM_SETTINGS_CHANGED: u32 = 0x8019;
+/// The panel asks for one undigested path to be swallowed again; lparam = Box<String>.
+pub const WM_RETRY_INGEST: u32 = 0x8059;
 /// lparam: Box<Notice> — a bubble with an optional click action (MCP `notify`).
 pub const WM_NOTICE: u32 = 0x801A;
 
@@ -592,6 +596,10 @@ impl Dot {
         }
         let n = self.store.lock().unwrap().count();
         tray::set_tip(self.hwnd, &format!("Blackhole — {n} items inside"));
+        // The panel's undigested list / settings count follow every batch.
+        if !self.search.is_invalid() {
+            let _ = PostMessageW(Some(self.search), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
+        }
     }
 
     // ---- bubbles -------------------------------------------------------
@@ -840,6 +848,12 @@ impl Dot {
                 }
                 SearchWin::open_settings(self.search);
             }
+            MENU_UNDIGESTED => {
+                if !self.search_open() {
+                    self.open_search();
+                }
+                SearchWin::show_undigested(self.search);
+            }
             MENU_NVIM_CONFIG => {
                 if let Some(path) = self.pick_nvim_config() {
                     self.cfg.nvim_init = path;
@@ -1019,6 +1033,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DROP_SWALLOW => {
             if let Some(d) = state(hwnd) {
+                d.swallow();
+            }
+            LRESULT(0)
+        }
+        WM_RETRY_INGEST => {
+            // A retry from the panel's undigested list: the worker reports as usual.
+            let path = *Box::from_raw(lparam.0 as *mut String);
+            if let Some(d) = state(hwnd) {
+                let _ = d.tx.send(Input::Files(vec![std::path::PathBuf::from(path)]));
                 d.swallow();
             }
             LRESULT(0)
