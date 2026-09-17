@@ -20,6 +20,7 @@
 #[path = "../ingest.rs"] mod ingest;
 #[path = "../pdf_layout.rs"] mod pdf_layout;
 #[path = "../ocr.rs"] mod ocr;
+#[path = "../hotkeys.rs"] mod hotkeys;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
