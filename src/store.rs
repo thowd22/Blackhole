@@ -1020,18 +1020,10 @@ impl Store {
         // failing that the list is left alone.
         // Tokenised from the raw query: "225" is shorter than CONTENT_TERM_MIN_LEN and
         // would never reach `own`.
-        let mut digit_tokens: Vec<String> = query
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| t.len() >= 2 && t.chars().any(|c| c.is_ascii_digit()))
-            .map(|t| t.to_lowercase())
-            .collect();
+        let mut digit_tokens: Vec<String> = query.split(|c: char| !c.is_alphanumeric()).filter(|t| t.len() >= 2 && t.chars().any(|c| c.is_ascii_digit())).map(|t| t.to_lowercase()).collect();
         digit_tokens.sort();
         digit_tokens.dedup();
-        let pins: Vec<Vec<i64>> = digit_tokens
-            .iter()
-            .map(|t| self.items_matching(t))
-            .filter(|ids| !ids.is_empty() && ids.len() <= 2)
-            .collect();
+        let pins: Vec<Vec<i64>> = digit_tokens.iter().map(|t| self.items_matching(t)).filter(|ids| !ids.is_empty() && ids.len() <= 2).collect();
         if !pins.is_empty() {
             let strict: Vec<C> = cands.iter().filter(|c| pins.iter().all(|ids| ids.contains(&c.item))).cloned().collect();
             let kept = if strict.is_empty() { cands.iter().filter(|c| pins.iter().any(|ids| ids.contains(&c.item))).cloned().collect() } else { strict };
