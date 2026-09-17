@@ -68,12 +68,11 @@ or the release parts themselves) and is the natural next step for packaging — 
   — a server answering `416` is retried from zero), sha256 checked before each rename, progress written into
   the row, a second click cancels and keeps what came down. When it finishes, `find_model` re-runs so ask mode
   works without a restart.
-- **Caveat.** The downloaded model is the raw Hugging Face export, not the graph-surgery build the installer
-  ships: `tools/last_logits.py`, `gemm_head.py`, `logit_index.py` and `repack.py` have not been run on it, so
-  the prompt pass returns full-sequence logits and there is no `Gemm` LM head or logit-index input. It loads
-  and answers correctly, just heavier and slower on the prompt pass. The fix is to publish the *prepared*
-  model as release assets — `models::PREPARED_BASE` records the intended convention (one file per name under a
-  `model-v1` tag with `SHA256SUMS.txt` beside them); only the asset table changes when that host exists.
+- **Source (2026-09-17, verified end to end: 2.8 GB in ~90 s, joined, sha256-checked, loaded with static shapes and answered a question).** The download is the *prepared* model — the same graph-surgery build the installer
+  ships — published as release assets under the `model-v1` tag (`models::PREPARED_BASE`): `tokenizer.json`,
+  the data file as two parts (GitHub caps assets at 2 GiB; the app joins them and verifies the whole file's
+  sha256), then the graph last, so a folder only shows a `.onnx` once its data is complete. `SHA256SUMS.txt`
+  sits beside them. Republishing a model = new tag, new `ASSETS`/`JOINS` table in `src/models.rs`.
 - **Note on `BLACKHOLE_DATA_DIR`**: it now sets the *base* directory (where `config.json` lives). A
   `vault_dir` recorded in that config is honoured from there, which is what makes the Settings "Vault folder"
   move work. A fresh directory behaves exactly as before.

@@ -829,6 +829,12 @@ impl Store {
     }
 
     /// Number of items whose text contains `term` (FTS5 token match).
+    /// Ids of the items whose text contains `term` as a whole token (FTS tokenisation).
+    fn items_matching(&self, term: &str) -> Vec<i64> {
+        let Ok(mut st) = self.conn.prepare("SELECT rowid FROM items_fts WHERE items_fts MATCH ?1") else { return Vec::new() };
+        st.query_map(params![format!("\"{term}\"")], |r| r.get::<_, i64>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
     fn items_containing(&self, term: &str) -> i64 {
         self.conn.query_row("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1", params![format!("\"{term}\"")], |r| r.get(0)).unwrap_or(0)
     }
@@ -1005,6 +1011,34 @@ impl Store {
         cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         if cands.is_empty() {
             return Vec::new();
+        }
+        // A rare token with digits ("225" in "Corvane-225", an invoice number, a year only
+        // one document mentions) names the document outright. Among hundreds of
+        // near-identical siblings neither cosine nor the cross-encoder weighs one number
+        // inside one line, so such a token is a hard filter on the candidates' documents
+        // rather than a boost. Every pinned token must match; failing that any of them;
+        // failing that the list is left alone.
+        // Tokenised from the raw query: "225" is shorter than CONTENT_TERM_MIN_LEN and
+        // would never reach `own`.
+        let mut digit_tokens: Vec<String> = query
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() >= 2 && t.chars().any(|c| c.is_ascii_digit()))
+            .map(|t| t.to_lowercase())
+            .collect();
+        digit_tokens.sort();
+        digit_tokens.dedup();
+        let pins: Vec<Vec<i64>> = digit_tokens
+            .iter()
+            .map(|t| self.items_matching(t))
+            .filter(|ids| !ids.is_empty() && ids.len() <= 2)
+            .collect();
+        if !pins.is_empty() {
+            let strict: Vec<C> = cands.iter().filter(|c| pins.iter().all(|ids| ids.contains(&c.item))).cloned().collect();
+            let kept = if strict.is_empty() { cands.iter().filter(|c| pins.iter().any(|ids| ids.contains(&c.item))).cloned().collect() } else { strict };
+            if !kept.is_empty() {
+                crate::util::log(&format!("pinned by rare token(s): {} of {} candidate chunks kept", kept.len(), cands.len()));
+                cands = kept;
+            }
         }
         // The "top document" is judged on its best three chunks (decayed), not
         // its single best one: a long document that matches moderately all over

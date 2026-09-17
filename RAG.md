@@ -180,6 +180,7 @@ Origin: JP`, `44. Total: 3211.71` instead of labels and values on separate rows.
 | Qwen3-4B think ≤128, row layout (§2e) | 36/44 | 37 | 6/6 |
 | same, cell-aware forms (first cut: big cells flattened to one line) | 34/44 | 37 | 6/6 — lost the cargo-release dates |
 | **same, cell-aware with multi-row cells kept as lines — shipped** | 35/44 | 37 | 6/6 — the one flip (b22) is a refusal on a CONCEPT.md question whose answer is in the context |
+| same + rare digit-token pin in the ask context (§2g, 2026-09-17) | 35/44 | 37 | 6/6 — identical failing set; the pin never fires on this vault's questions, it only bites among near-identical siblings |
 
 So: no measurable accuracy change within the ±1–2 noise band, but the text is unambiguously better for
 the model and for a person reading a preview, and the two multi-hop customs questions (b23, b24) now
@@ -268,8 +269,12 @@ holds at 400 items too.
 *ask* path's chunk-level context (`context_reranked`) picked a sibling document for one question out of
 eight in the in-app self-check ("access code for Corvane-225" → excerpts from *Corvane-375*). With 400
 near-identical documents the distinguishing token is a number inside one line, which neither the cosine
-nor the cross-encoder weighs heavily. Worth a look: treat a rare alphanumeric token in the query as a
-hard filter on candidate chunks rather than a small boost.
+nor the cross-encoder weighs heavily. **Fixed 2026-09-17:** a digit-bearing token from the raw query
+("225", an invoice number, a year) that occurs in at most two items now pins the candidates to those
+items (all such tokens must match; failing that any; failing that the list is left alone) — tokenised
+from the query itself, since "225" is shorter than the content-term floor. Self-check on the 400-item
+vault: 29/30 → **30/30** (retrieval only); the pin fired on every question. The real-vault answer eval
+(44 questions) was re-run as the regression check — see the table in §2f.
 
 **In-app self-check.** Right-click → **Self-check** runs the whole thing on demand: `<data>\questions.json`
 (`[{"q": …, "expect": ["substring", …]}]`) against the user's own vault, or — with no such file — a

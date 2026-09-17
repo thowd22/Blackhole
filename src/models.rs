@@ -38,45 +38,30 @@ struct Asset {
 /// Folder the default model is downloaded into (`<vault>\models\qwen3-4b`).
 pub const DEFAULT_MODEL: &str = "qwen3-4b";
 
-/// The same export, URLs and sha256 pins `ci/prepare-model.sh` uses. The installer
-/// additionally runs `tools/*.py` over the graph (last-token logits, Gemm LM head,
-/// a logit-index input, one data file); those are graph-only edits — the weights are
-/// untouched — so this download is the same model, just without the speed-ups.
-///
-/// If a prepared build is ever published as a release asset, the convention is one
-/// file per name under `PREPARED_BASE` (see below) and only this table changes.
-const ASSETS: &[Asset] = &[
-    Asset {
-        url: "https://huggingface.co/onnx-community/Qwen3-4B-ONNX/resolve/main/onnx/model_q4f16.onnx",
-        file: "model_q4f16.onnx",
-        sha256: "d3e946f9e38577411b0251051c91a1f20c3c0c831e1cf76a13c58ce279d950de",
-        bytes: 59_762_833,
-    },
-    Asset {
-        url: "https://huggingface.co/onnx-community/Qwen3-4B-ONNX/resolve/main/onnx/model_q4f16.onnx_data",
-        file: "model_q4f16.onnx_data",
-        sha256: "050398248de4fce7b31b2d2caa909596e4c7aa0f35696270df46b8aaf2209fc8",
-        bytes: 2_096_005_120,
-    },
-    Asset {
-        url: "https://huggingface.co/onnx-community/Qwen3-4B-ONNX/resolve/main/onnx/model_q4f16.onnx_data_1",
-        file: "model_q4f16.onnx_data_1",
-        sha256: "363ff5e70ebeb5866afea8eb80b7bdfe22d94d735a8c4d2ebf90c75424c2a410",
-        bytes: 677_150_720,
-    },
-    Asset {
-        url: "https://huggingface.co/onnx-community/Qwen3-4B-ONNX/resolve/main/tokenizer.json",
-        file: "tokenizer.json",
-        sha256: "e7a95fce95bf5b0946d0ddb3f9d7caa030b7e850bbe92b0edb26bcf563e9f3d5",
-        bytes: 9_117_040,
-    },
-];
-
-/// Where a graph-optimised build would live if the project ever ships one as a
-/// release asset: `<PREPARED_BASE>/<file>`, one file per name, sha256 in
-/// `SHA256SUMS.txt` beside them. Nothing reads this yet; `ASSETS` is the source.
+/// The prepared build of the default model, published as release assets under
+/// `PREPARED_BASE`: the same graph the installer ships (last-token logits, Gemm LM
+/// head, logit-index input, one data file — see PACKAGING.md), so a downloaded model
+/// runs exactly like an installed one. The data file is split into two parts
+/// because GitHub caps release assets at 2 GiB; `JOINS` says how they go back together.
+/// Order matters: the graph comes last, so a folder only ever holds a `.onnx` once
+/// its data is complete (`models::list` treats any `.onnx` as a usable model).
 #[allow(dead_code)]
 pub const PREPARED_BASE: &str = "https://github.com/thowd22/Blackhole/releases/download/model-v1";
+macro_rules! prepared {
+    ($f:literal) => {
+        concat!("https://github.com/thowd22/Blackhole/releases/download/model-v1/", $f)
+    };
+}
+const ASSETS: &[Asset] = &[
+    Asset { url: prepared!("tokenizer.json"), file: "tokenizer.json", sha256: "e7a95fce95bf5b0946d0ddb3f9d7caa030b7e850bbe92b0edb26bcf563e9f3d5", bytes: 9_117_040 },
+    Asset { url: prepared!("model_q4f16.onnx.data.part0"), file: "model_q4f16.onnx.data.part0", sha256: "55a881ba24ab32caf622c740f120cc44f2dec6a7f6b35117c818b89c1d9b79e0", bytes: 1_992_294_400 },
+    Asset { url: prepared!("model_q4f16.onnx.data.part1"), file: "model_q4f16.onnx.data.part1", sha256: "243a4d9dfa8748129662317f30bc3b5bd5d5bc18832abc3df440f27b433c6385", bytes: 780_861_440 },
+    Asset { url: prepared!("model_q4f16.onnx"), file: "model_q4f16.onnx", sha256: "e7886798b945581ef80639300147b0d92b66c2c6e72db835834ecf8bbf6d62d3", bytes: 59_762_959 },
+];
+
+/// Files assembled from downloaded parts: (target, parts in order, sha256 of the whole, bytes).
+const JOINS: &[(&str, &[&str], &str, u64)] =
+    &[("model_q4f16.onnx.data", &["model_q4f16.onnx.data.part0", "model_q4f16.onnx.data.part1"], "24e16e8e966196a411b292f7f8251e10faffd8497a3b63b93981febcb2da513f", 2_773_155_840)];
 
 /// A model folder found on disk.
 #[derive(Clone, Debug)]
@@ -325,8 +310,14 @@ fn run_download(hwnd: usize) -> Result<PathBuf, String> {
     TOTAL_BYTES.store(total.max(1), Ordering::Relaxed);
     let mut base = 0u64;
     for a in &assets {
+        // The graph is the last asset: everything before it must be whole and joined.
+        if a.file.ends_with(".onnx") {
+            join_parts(&dir, hwnd)?;
+        }
         let dest = dir.join(a.file);
-        if dest.exists() && std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) == a.bytes && a.bytes > 0 {
+        // A part whose joined file already exists counts as done.
+        let joined_done = JOINS.iter().any(|(target, parts, _, bytes)| parts.contains(&a.file) && std::fs::metadata(dir.join(target)).map(|m| m.len() == *bytes).unwrap_or(false));
+        if joined_done || (dest.exists() && std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) == a.bytes && a.bytes > 0) {
             base += a.bytes;
             DONE_BYTES.store(base, Ordering::Relaxed);
             continue;
@@ -359,6 +350,51 @@ fn run_download(hwnd: usize) -> Result<PathBuf, String> {
         post_progress(hwnd);
     }
     Ok(dir)
+}
+
+/// Concatenate downloaded parts into their target (streaming, then sha256-checked);
+/// parts are deleted afterwards. Nothing to do when the target is already whole.
+fn join_parts(dir: &Path, hwnd: usize) -> Result<(), String> {
+    for (target, parts, sha, bytes) in JOINS {
+        let out = dir.join(target);
+        if std::fs::metadata(&out).map(|m| m.len() == *bytes).unwrap_or(false) {
+            for p in *parts {
+                let _ = std::fs::remove_file(dir.join(p));
+            }
+            continue;
+        }
+        if !parts.iter().all(|p| dir.join(p).exists()) {
+            continue;
+        }
+        *NOTE.write().unwrap() = format!("joining {target}…");
+        post_progress(hwnd);
+        let tmp = dir.join(format!("{target}.part"));
+        {
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?);
+            for p in *parts {
+                let mut r = std::fs::File::open(dir.join(p)).map_err(|e| format!("{p}: {e}"))?;
+                std::io::copy(&mut r, &mut w).map_err(|e| format!("joining {p}: {e}"))?;
+            }
+            use std::io::Write;
+            w.flush().map_err(|e| e.to_string())?;
+        }
+        *NOTE.write().unwrap() = format!("checking {target}…");
+        post_progress(hwnd);
+        let got = sha256_file(&tmp)?;
+        NOTE.write().unwrap().clear();
+        if got != *sha {
+            let _ = std::fs::remove_file(&tmp);
+            for p in *parts {
+                let _ = std::fs::remove_file(dir.join(p));
+            }
+            return Err(format!("{target} did not join cleanly (sha256 {}…) — the parts were removed; try again", &got[..12]));
+        }
+        std::fs::rename(&tmp, &out).map_err(|e| format!("{}: {e}", out.display()))?;
+        for p in *parts {
+            let _ = std::fs::remove_file(dir.join(p));
+        }
+    }
+    Ok(())
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
