@@ -42,7 +42,7 @@ const UNLOAD_AFTER_MS: u32 = 60_000;
 /// Animation tick while nothing but the ring is moving (idle, listening…).
 const IDLE_MS: u32 = 90;
 /// Faster tick while specks or a mood transition are on screen (~20 fps).
-const ACTIVE_MS: u32 = 50;
+const ACTIVE_MS: u32 = 33;
 /// Every mood change eases over this long — fast but visible, never a snap.
 const TRANSITION_MS: u32 = 150;
 const HOTKEY_SUMMON: i32 = 1;
@@ -71,6 +71,8 @@ const MENU_NEW_NOTE: usize = 17;
 pub const MENU_NVIM_CONFIG: usize = 18;
 pub const MENU_NVIM_BUILTIN: usize = 19;
 const MENU_SETTINGS: usize = 20;
+/// Settings tab: cycle to the next theme.
+pub const MENU_THEME_NEXT: usize = 21;
 pub const MENU_SCREENSHOT: usize = 14;
 pub const MENU_CENTER_MSG_PUB: usize = MENU_CENTER_MSG;
 pub const MENU_START_LOGIN_PUB: usize = MENU_START_LOGIN;
@@ -127,7 +129,7 @@ pub struct Dot {
     drag_origin: POINT,
     win_origin: POINT,
     pixels: Vec<u32>,
-    /// 64×64 half-pixel speck overlay, composited over `pixels` at scale time.
+    /// 128×128 quarter-pixel speck overlay, composited over `pixels` at scale time.
     specks: Vec<u32>,
     /// What was last pushed to the screen, so identical frames cost nothing.
     shown: (Vec<u32>, Vec<u32>),
@@ -166,6 +168,7 @@ impl Dot {
             RegisterClassW(&wc);
             let cfg = config::load();
             crate::llm_ort::set_thinking(cfg.think);
+            crate::theme::set_by_name(&cfg.theme);
             let dot = Box::new(Dot {
                 hwnd: HWND::default(),
                 search: HWND::default(),
@@ -280,12 +283,12 @@ impl Dot {
         for y in 0..side as usize {
             let sy = y / mul;
             let row = &self.pixels[sy * SIZE..sy * SIZE + SIZE];
-            let over = &self.specks[(y * 2 / mul) * SPECK_SIZE..(y * 2 / mul + 1) * SPECK_SIZE];
+            let over = &self.specks[(y * 4 / mul) * SPECK_SIZE..(y * 4 / mul + 1) * SPECK_SIZE];
             let out = &mut dst[y * side as usize..(y + 1) * side as usize];
             for (x, px) in out.iter_mut().enumerate() {
                 *px = row[x / mul];
                 if specks {
-                    let s = over[x * 2 / mul];
+                    let s = over[x * 4 / mul];
                     if s >> 24 != 0 {
                         *px = blend_over(*px, s);
                     }
@@ -739,7 +742,7 @@ impl Dot {
     unsafe fn command(&mut self, id: usize) {
         self.command_inner(id);
         // The Settings tab mirrors these; let it redraw with the new values.
-        if matches!(id, MENU_THINK | MENU_CENTER_MSG | MENU_VIEW_FILES | MENU_VIEW_NOTES | MENU_START_LOGIN | MENU_NVIM_CONFIG | MENU_NVIM_BUILTIN) && !self.search.is_invalid() {
+        if matches!(id, MENU_THINK | MENU_CENTER_MSG | MENU_VIEW_FILES | MENU_VIEW_NOTES | MENU_START_LOGIN | MENU_NVIM_CONFIG | MENU_NVIM_BUILTIN | MENU_THEME_NEXT) && !self.search.is_invalid() {
             let _ = PostMessageW(Some(self.search), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
         }
     }
@@ -779,6 +782,14 @@ impl Dot {
                 }
             }
             MENU_NEW_NOTE => self.new_note(),
+            MENU_THEME_NEXT => {
+                self.cfg.theme = crate::theme::next_name().to_string();
+                crate::theme::set_by_name(&self.cfg.theme);
+                config::save(&self.cfg);
+                if !self.search.is_invalid() {
+                    SearchWin::apply_theme(self.search);
+                }
+            }
             MENU_SETTINGS => {
                 if !self.search_open() {
                     self.open_search();

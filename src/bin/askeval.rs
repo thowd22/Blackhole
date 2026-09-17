@@ -21,6 +21,7 @@
 #[path = "../pdf_layout.rs"] mod pdf_layout;
 #[path = "../ocr.rs"] mod ocr;
 #[path = "../hotkeys.rs"] mod hotkeys;
+#[path = "../theme.rs"] mod theme;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;

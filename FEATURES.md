@@ -36,7 +36,7 @@ Sprite-sheet animations, a few frames each, low frame rate (8–12 fps) to keep 
 
 - **Animation pace rule (2026-09-16)**: every transition (mood change, panel open/close, bubble in/out, resize) is animated — fast but visible, ~120–180 ms, eased, still stepped on the pixel grid; nothing snaps and nothing lingers. — done 2026-09-16 (dot mood changes and bubble in/out; panel open/close/resize belong to the panel block)
 - **Thinking animation** (2026-09-16): while the LLM is reasoning or generating, the dot shows it — ring pulses in a slow "breathing" rhythm with a single bright speck orbiting once per second, and the answer box shows a pixel ellipsis that ticks; both stop the instant the first answer token streams. Replaces the static "thinking over N excerpts…" line as the primary signal (the line stays as detail). — done 2026-09-16 (dot half: Mood::Thinking breathing ring + orbiting speck, ended by WM_ASK_FIRST_TOKEN; the panel's pixel ellipsis belongs to the panel block)
-- **Smoother particle motion** (digesting state): the specks currently jump pixel to pixel at the sprite's 32×32 grid and ~11 fps. Smooth them by moving along sub-pixel paths and rendering with 2×2 "half-pixel" steps at the output scale (still snapped to the pixel-art grid, just a finer one), easing velocity along the spiral, and raising the animation tick to ~20 fps only while particles are on screen. — done 2026-09-16
+- **Smoother particle motion** (digesting state): the specks currently jump pixel to pixel at the sprite's 32×32 grid and ~11 fps. — 2026-09-16: overlay is now four sub-pixels per sprite pixel (quarter-pixel steps) at 30 fps while specks move; speeds unchanged. Smooth them by moving along sub-pixel paths and rendering with 2×2 "half-pixel" steps at the output scale (still snapped to the pixel-art grid, just a finer one), easing velocity along the spiral, and raising the animation tick to ~20 fps only while particles are on screen. — done 2026-09-16
 
 ### 1.4 Opacity & unobtrusiveness — P1
 - Optional idle opacity (e.g. 70%) that goes to 100% on hover.
@@ -245,6 +245,7 @@ Small pixel-art speech bubbles anchored to the dot. One rendering component, two
 - Honours "Center on new message" (§2.6).
 
 ## 7. Settings — P1 — Settings tab shipped 2026-09-16
+- Themes — done 2026-09-16: Blackhole, Dracula, Gruvbox, Nord, Catppuccin (Mocha), One Dark, Tokyo Night, Solarized Dark (`src/theme.rs`); the panel's brushes and the Neovim init palette follow; the dot and speech bubbles keep the Blackhole look. Chosen from the Settings tab (cycles), stored as `config.theme`.
 - As built: a Settings tab in the panel (gear button / right-click → Settings…) with the four global hotkeys (click a row, press Ctrl/Alt/Win + key; registered immediately, "taken by another program" shown when Win32 refuses), think-before-answering, center on message, default view, start at sign-in, Neovim config. Hotkeys are stored as text in `config.json` (`hotkeys`), parsed by `src/hotkeys.rs`.
 - Dot size, opacity, shy mode.
 - Sprite/theme selection (a few colour variants of the black hole).

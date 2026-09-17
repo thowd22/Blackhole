@@ -75,13 +75,12 @@ const ANSWER_MIN_LINES: i32 = 2;
 const ANSWER_MAX_LINES: i32 = 10;
 const ANIM_MS: f32 = 150.0;
 
-const BG: COLORREF = COLORREF(0x00140A18); // 0x00BBGGRR: very dark violet
-const BG_EDIT: COLORREF = COLORREF(0x00241430);
-const BG_SEL: COLORREF = COLORREF(0x00602878);
-const BORDER: COLORREF = COLORREF(0x0040A0FF); // orange
-const FG: COLORREF = COLORREF(0x00F0E8FF);
-const FG_DIM: COLORREF = COLORREF(0x00A090B0);
-const FG_KIND: COLORREF = COLORREF(0x0040A0FF);
+// Colours come from the current theme (src/theme.rs); brushes are rebuilt on change.
+fn c_bg() -> COLORREF { crate::theme::cr(crate::theme::current().bg) }
+fn c_bg_edit() -> COLORREF { crate::theme::cr(crate::theme::current().bg_edit) }
+fn c_fg() -> COLORREF { crate::theme::cr(crate::theme::current().fg) }
+fn c_fg_dim() -> COLORREF { crate::theme::cr(crate::theme::current().fg_dim) }
+fn c_accent() -> COLORREF { crate::theme::cr(crate::theme::current().accent) }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Ctl {
@@ -241,10 +240,10 @@ impl SearchWin {
                 hits: Vec::new(),
                 font: HFONT::default(),
                 font_small: HFONT::default(),
-                brush_bg: CreateSolidBrush(BG),
-                brush_edit: CreateSolidBrush(BG_EDIT),
-                brush_sel: CreateSolidBrush(BG_SEL),
-                brush_accent: CreateSolidBrush(BORDER),
+                brush_bg: CreateSolidBrush(c_bg()),
+                brush_edit: CreateSolidBrush(c_bg_edit()),
+                brush_sel: CreateSolidBrush(crate::theme::cr(crate::theme::current().bg_sel)),
+                brush_accent: CreateSolidBrush(c_accent()),
                 scale: 1.0,
                 line_h: 20,
                 answer_shown: false,
@@ -757,7 +756,7 @@ impl SearchWin {
             } else {
                 FillRect(hdc, &RECT { left: r.left, top: r.bottom - u, right: r.right, bottom: r.bottom }, self.brush_sel);
             }
-            SetTextColor(hdc, if active { FG } else { FG_DIM });
+            SetTextColor(hdc, if active { c_fg() } else { c_fg_dim() });
             let mut text = wide(label);
             let mut tr = r;
             DrawTextW(hdc, &mut text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -911,6 +910,27 @@ impl SearchWin {
         }
     }
 
+    /// Theme changed: new brushes, the editor restarted with the new palette, repaint.
+    pub unsafe fn apply_theme(hwnd: HWND) {
+        let Some(s) = state(hwnd) else { return };
+        let _ = DeleteObject(s.brush_bg.into());
+        let _ = DeleteObject(s.brush_edit.into());
+        let _ = DeleteObject(s.brush_sel.into());
+        let _ = DeleteObject(s.brush_accent.into());
+        s.brush_bg = CreateSolidBrush(c_bg());
+        s.brush_edit = CreateSolidBrush(c_bg_edit());
+        s.brush_sel = CreateSolidBrush(crate::theme::cr(crate::theme::current().bg_sel));
+        s.brush_accent = CreateSolidBrush(c_accent());
+        if s.nvim.is_some() {
+            let init = s.nvim_init.clone();
+            SearchWin::set_nvim_init(hwnd, &init);
+        }
+        let _ = InvalidateRect(Some(hwnd), None, true);
+        let _ = InvalidateRect(Some(s.list), None, true);
+        let _ = InvalidateRect(Some(s.edit), None, true);
+        let _ = InvalidateRect(Some(s.answer), None, true);
+    }
+
     /// Rows of the Settings tab from the live config (re-read: the dot owns it).
     fn build_settings(&mut self) {
         let cfg = crate::config::load();
@@ -926,6 +946,7 @@ impl SearchWin {
             };
             rows.push(Setting { label: label.to_string(), value, hint, kind: SettingKind::Hotkey(i) });
         }
+        rows.push(Setting { label: "Theme".into(), value: crate::theme::current().name.into(), hint: format!("click for {} · panel and editor colours; the dot keeps its own", crate::theme::next_name()), kind: SettingKind::Command(crate::dot::MENU_THEME_NEXT) });
         let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
         rows.push(Setting { label: "Think before answering".into(), value: onoff(cfg.think), hint: "~3 s of reasoning; more correct answers".into(), kind: SettingKind::Command(crate::dot::MENU_THINK) });
         rows.push(Setting { label: "Center on new message".into(), value: onoff(cfg.center_on_message), hint: "the dot warps to the screen centre for notifications".into(), kind: SettingKind::Command(crate::dot::MENU_CENTER_MSG_PUB) });
@@ -1008,7 +1029,7 @@ impl SearchWin {
     /// Start Neovim the first time the Notes tab is used (no-op without nvim.exe).
     unsafe fn ensure_nvim(&mut self) {
         if self.nvim.is_none() && !self.editor.is_invalid() && std::env::var_os("BLACKHOLE_NO_NVIM").is_none() {
-            self.nvim = nvim::Host::create(self.hwnd, self.px(15), self.unit(), BORDER, &self.nvim_init);
+            self.nvim = nvim::Host::create(self.hwnd, self.px(15), self.unit(), c_accent(), &self.nvim_init);
         }
     }
 
@@ -1703,7 +1724,7 @@ impl SearchWin {
 
         // kind tag + title
         let old = SelectObject(hdc, self.font.into());
-        SetTextColor(hdc, FG_KIND);
+        SetTextColor(hdc, c_accent());
         let via = match hit.via { "sem" => " ≈", "both" => " ≈=", _ => "" };
         let mut tag = wide(&format!("[{}]{via}", hit.kind));
         let mut tag_r = r;
@@ -1711,7 +1732,7 @@ impl SearchWin {
         DrawTextW(hdc, &mut tag, &mut r, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
         let mut title_r = r;
         title_r.left = tag_r.right + pad;
-        SetTextColor(hdc, FG);
+        SetTextColor(hdc, c_fg());
         let mut title = wide(&hit.title);
         if !hit.tags.is_empty() {
             // Tags sit at the right edge in the accent colour; the title ellipsises before them.
@@ -1721,11 +1742,11 @@ impl SearchWin {
             DrawTextW(hdc, &mut tags, &mut tr, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
             let tw = tr.right - tr.left;
             let mut tag_area = RECT { left: (title_r.right - tw).max(title_r.left), top: title_r.top + self.px(2), right: title_r.right, bottom: title_r.bottom };
-            SetTextColor(hdc, FG_KIND);
+            SetTextColor(hdc, c_accent());
             DrawTextW(hdc, &mut tags, &mut tag_area, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
             title_r.right = (tag_area.left - pad).max(title_r.left);
             SelectObject(hdc, self.font.into());
-            SetTextColor(hdc, FG);
+            SetTextColor(hdc, c_fg());
         }
         DrawTextW(hdc, &mut title, &mut title_r, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
@@ -1742,7 +1763,7 @@ impl SearchWin {
                 _ => (run, false),
             };
             if !text.is_empty() && x < snip_r.right {
-                SetTextColor(hdc, if lit { FG_KIND } else { FG_DIM });
+                SetTextColor(hdc, if lit { c_accent() } else { c_fg_dim() });
                 let mut w16 = wide(text);
                 let mut m = RECT { left: x, top: snip_r.top, right: snip_r.right, bottom: snip_r.bottom };
                 DrawTextW(hdc, &mut w16, &mut m, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
@@ -1772,17 +1793,17 @@ impl SearchWin {
         r.right -= pad;
         r.top += self.px(4);
         let old = SelectObject(hdc, self.font.into());
-        SetTextColor(hdc, FG);
+        SetTextColor(hdc, c_fg());
         let mut label = wide(&row.label);
         let mut lr = r;
         lr.right -= self.px(160);
         DrawTextW(hdc, &mut label, &mut lr, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-        SetTextColor(hdc, if row.value == "off" { FG_DIM } else { FG_KIND });
+        SetTextColor(hdc, if row.value == "off" { c_fg_dim() } else { c_accent() });
         let mut value = wide(&row.value);
         let mut vr = r;
         DrawTextW(hdc, &mut value, &mut vr, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(hdc, self.font_small.into());
-        SetTextColor(hdc, FG_DIM);
+        SetTextColor(hdc, c_fg_dim());
         let mut hint = wide(&row.hint);
         let mut hr = r;
         hr.top += self.px(18);
@@ -1999,8 +2020,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if let Some(s) = state(hwnd) {
                 let ctl = HWND(lparam.0 as *mut _);
                 let is_edit = msg == WM_CTLCOLOREDIT || ctl == s.answer || ctl == s.editor;
-                SetTextColor(hdc, if is_edit { FG } else { FG_DIM });
-                SetBkColor(hdc, if is_edit { BG_EDIT } else { BG });
+                SetTextColor(hdc, if is_edit { c_fg() } else { c_fg_dim() });
+                SetBkColor(hdc, if is_edit { c_bg_edit() } else { c_bg() });
                 return LRESULT(if is_edit { s.brush_edit.0 } else { s.brush_bg.0 } as isize);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)

@@ -53,8 +53,11 @@ around an event horizon, a purple accretion smear, and specks that orbit and fal
   your words appear anywhere in the vault it says so instead of inventing something.
 - **Settings** live in the panel: the gear button in the tab strip (or right-click → Settings…) opens a
   pixel-styled list — the four global hotkeys (click a row, press the keys; it tells you on the spot if
-  another program owns that combination), thinking, center-on-message, default view, start at sign-in, and
-  your Neovim config.
+  another program owns that combination), the **theme**, thinking, center-on-message, default view, start at
+  sign-in, and your Neovim config.
+- **Themes**: Blackhole (the dark-violet default), Dracula, Gruvbox, Nord, Catppuccin, One Dark, Tokyo Night
+  and Solarized Dark. A theme recolours the panel and the editor (Neovim's palette follows it); the dot
+  itself keeps its orange ring and purple smear — that's who it is.
 - A pixel speech bubble walks you through this the first time you run it. The same bubbles carry
   notifications later; a right-click menu has sizes, tray options, start-at-sign-in and a "center on new
   message" toggle. There's a tray icon so the dot can hide.
@@ -318,7 +321,7 @@ portable exe zip, the installer in <2 GiB parts, checksums.
 
 ## Roadmap
 
-Copilot+ NPU providers → configurable hotkeys → web installer and code signing. Details and the
+Copilot+ NPU providers → web installer and code signing. Details and the
 reasoning behind each in [FEATURES.md](FEATURES.md).
 
 ## Credits

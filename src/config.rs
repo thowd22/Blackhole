@@ -30,6 +30,9 @@ pub struct Config {
     /// Global hotkeys in `hotkeys::ACTIONS` order ("Ctrl+Shift+Space", …); empty = default.
     #[serde(default)]
     pub hotkeys: Vec<String>,
+    /// Panel/editor theme name (see `theme::THEMES`); empty = Blackhole.
+    #[serde(default)]
+    pub theme: String,
     /// Search panel size the user dragged, in 96-DPI px (0 = default); see `search.rs`.
     #[serde(default)]
     pub panel_w: i32,
@@ -50,7 +53,7 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0, nvim_init: String::new(), hotkeys: Vec::new() }
+        Config { x: 200, y: 200, scale: 2, center_on_message: true, hidden: false, tutorial_step: 0, think: true, notes_default: false, panel_w: 0, panel_h: 0, nvim_init: String::new(), hotkeys: Vec::new(), theme: String::new() }
     }
 }
 

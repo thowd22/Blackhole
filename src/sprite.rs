@@ -2,7 +2,7 @@
 //!
 //! Everything is quantised to a handful of colours and integer pixels so it
 //! still reads as pixel art after nearest-neighbour scaling. The specks that
-//! orbit and fall in are the one exception: they live on a 64×64 "half-pixel"
+//! orbit and fall in are the one exception: they live on a 128×128 "quarter-pixel"
 //! grid (`render_specks`) so their motion is smooth at 20 fps while each speck
 //! is still a crisp block.
 //!
@@ -10,8 +10,9 @@
 //! looks the same whether the tick runs at the idle or the active rate.
 
 pub const SIZE: usize = 32;
-/// Side of the speck overlay: two half-pixels per sprite pixel.
-pub const SPECK_SIZE: usize = SIZE * 2;
+/// Side of the speck overlay: four sub-pixels per sprite pixel, so a speck can move
+/// in quarter-pixel steps (smooth at every dot size, still snapped to a grid).
+pub const SPECK_SIZE: usize = SIZE * 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mood {
@@ -218,20 +219,20 @@ pub fn render(buf: &mut [u32], anim: &Anim) {
     }
 }
 
-/// Draw one speck as a 2×2 block of half-pixels (one sprite pixel wide) at a
-/// half-pixel position; `weight` scales its alpha during a transition.
+/// Draw one speck as a 4×4 block of sub-pixels (one sprite pixel wide) at a
+/// quarter-pixel position; `weight` scales its alpha during a transition.
 fn speck(over: &mut [u32], hx: f32, hy: f32, c: Rgb, a: u8, weight: f32) {
     let a = (a as f32 * weight).round() as u8;
     if a == 0 {
         return;
     }
-    // Round to the half-pixel grid: a block centred on sprite pixel p covers
-    // half-pixels 2p and 2p+1, i.e. exactly that pixel.
-    let x0 = (hx * 2.0).round() as i32;
-    let y0 = (hy * 2.0).round() as i32;
+    // Round to the quarter-pixel grid: a block centred on sprite pixel p covers
+    // sub-pixels 4p..4p+3, i.e. exactly that pixel.
+    let x0 = (hx * 4.0).round() as i32;
+    let y0 = (hy * 4.0).round() as i32;
     let px = pixel(c, a);
-    for y in y0..y0 + 2 {
-        for x in x0..x0 + 2 {
+    for y in y0..y0 + 4 {
+        for x in x0..x0 + 4 {
             if (0..SPECK_SIZE as i32).contains(&x) && (0..SPECK_SIZE as i32).contains(&y) {
                 let i = y as usize * SPECK_SIZE + x as usize;
                 // Later specks win only where they are brighter; keeps overlaps crisp.
@@ -300,8 +301,8 @@ fn specks_of(over: &mut [u32], mood: Mood, anim: &Anim, weight: f32) {
     }
 }
 
-/// Render the moving specks into a 64×64 premultiplied BGRA overlay (two
-/// half-pixels per sprite pixel). Returns false when nothing was drawn, so the
+/// Render the moving specks into a 128×128 premultiplied BGRA overlay (four
+/// sub-pixels per sprite pixel). Returns false when nothing was drawn, so the
 /// caller can skip compositing.
 pub fn render_specks(over: &mut [u32], anim: &Anim) -> bool {
     debug_assert!(over.len() >= SPECK_SIZE * SPECK_SIZE);

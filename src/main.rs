@@ -16,6 +16,7 @@ mod gpu;
 mod llm_ort;
 mod mcp;
 mod hotkeys;
+mod theme;
 mod nvim;
 mod ocr;
 mod rerank;

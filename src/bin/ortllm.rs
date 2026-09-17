@@ -4,6 +4,7 @@
 
 #[path = "../config.rs"] mod config;
 #[path = "../hotkeys.rs"] mod hotkeys;
+#[path = "../theme.rs"] mod theme;
 #[path = "../util.rs"] mod util;
 #[path = "../runtime.rs"] mod runtime;
 #[path = "../gpu.rs"] mod gpu;

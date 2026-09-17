@@ -341,8 +341,8 @@ vim.o.updatetime = 300
 vim.cmd('syntax enable')
 
 -- Blackhole's palette: dark violet ground, orange accent, dim lilac secondary text.
-local bg, bg_dark, sel, accent, fg, dim = '#301424', '#180A14', '#782860', '#FFA040', '#FFE8F0', '#B090A0'
-local green, red, lilac = '#78E08C', '#FF5040', '#C8A0E8'
+local bg, bg_dark, sel, accent, fg, dim = 'T_BG_EDIT', 'T_BG', 'T_SEL', 'T_ACCENT', 'T_FG', 'T_DIM'
+local green, red, lilac, cursor_line = 'T_GREEN', 'T_RED', 'T_LILAC', 'T_CURSOR'
 local hl = function(g, o) vim.api.nvim_set_hl(0, g, o) end
 hl('Normal', { fg = fg, bg = bg })
 hl('NormalNC', { fg = fg, bg = bg })
@@ -350,7 +350,7 @@ hl('NormalFloat', { fg = fg, bg = bg_dark })
 hl('FloatBorder', { fg = accent, bg = bg_dark })
 hl('LineNr', { fg = dim, bg = bg })
 hl('CursorLineNr', { fg = accent, bg = bg, bold = true })
-hl('CursorLine', { bg = '#3A1A2E' })
+hl('CursorLine', { bg = cursor_line })
 hl('Visual', { bg = sel })
 hl('Search', { fg = bg, bg = accent })
 hl('IncSearch', { fg = bg, bg = green })
@@ -470,7 +470,19 @@ if user_init ~= '' then
   if not ok then vim.schedule(function() vim.notify('Blackhole: your Neovim config failed: ' .. tostring(err), vim.log.levels.WARN) end) end
 end
 "##;
-    let lua = lua.replace("USER_INIT", &user_init.replace('\\', "/"));
+    let t = crate::theme::current();
+    let lua = lua
+        .replace("USER_INIT", &user_init.replace('\\', "/"))
+        .replace("T_BG_EDIT", &crate::theme::hex(t.bg_edit))
+        .replace("T_BG", &crate::theme::hex(t.bg))
+        .replace("T_SEL", &crate::theme::hex(t.bg_sel))
+        .replace("T_ACCENT", &crate::theme::hex(t.accent))
+        .replace("T_FG", &crate::theme::hex(t.fg))
+        .replace("T_DIM", &crate::theme::hex(t.fg_dim))
+        .replace("T_GREEN", &crate::theme::hex(t.green))
+        .replace("T_RED", &crate::theme::hex(t.red))
+        .replace("T_LILAC", &crate::theme::hex(t.lilac))
+        .replace("T_CURSOR", &crate::theme::hex(t.cursor_line));
     std::fs::write(&path, lua)?;
     Ok(path)
 }
@@ -565,8 +577,8 @@ impl Host {
                 rows: 0,
                 grid: Vec::new(),
                 attrs: HashMap::new(),
-                default_fg: 0xFFE8F0,
-                default_bg: 0x301424,
+                default_fg: crate::theme::current().fg,
+                default_bg: crate::theme::current().bg_edit,
                 cursor: (0, 0),
                 mode: "normal".into(),
                 viewport: (0, 0, 1),
