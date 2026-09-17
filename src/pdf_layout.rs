@@ -351,3 +351,127 @@ pub fn extract(bytes: &[u8]) -> Result<String, String> {
     pdf_extract::output_doc(&doc, &mut out).map_err(|e| e.to_string())?;
     Ok(out.out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One glyph per char, laid out left to right; a space in `text` becomes a real gap.
+    fn glyphs(text: &str, y: f64, size: f64, x0: f64) -> Vec<Glyph> {
+        let adv = size * 0.6;
+        let mut out = Vec::new();
+        let mut x = x0;
+        for c in text.chars() {
+            if c == ' ' {
+                x += adv;
+                continue;
+            }
+            out.push(Glyph { x, y, end: x + adv * 0.9, size, text: c.to_string() });
+            x += adv;
+        }
+        out
+    }
+
+    fn lines(rows: &[(f64, f64, String, f64)]) -> Vec<String> {
+        rows.iter().map(|r| r.2.clone()).collect()
+    }
+
+    #[test]
+    fn glyphs_on_one_baseline_become_one_row_with_word_spaces() {
+        let rows = rows_of(glyphs("KOBE JAPAN", 100.0, 10.0, 20.0));
+        assert_eq!(lines(&rows), vec!["KOBE JAPAN"]);
+    }
+
+    #[test]
+    fn a_small_baseline_jitter_stays_on_the_same_row() {
+        let mut gs = glyphs("ACME", 100.0, 10.0, 20.0);
+        gs.extend(glyphs("CORP", 102.0, 10.0, 60.0));
+        assert_eq!(lines(&rows_of(gs)), vec!["ACME CORP"]);
+    }
+
+    #[test]
+    fn a_real_line_break_starts_a_new_row_in_reading_order() {
+        let mut gs = glyphs("second", 130.0, 10.0, 20.0);
+        gs.extend(glyphs("first", 100.0, 10.0, 20.0));
+        assert_eq!(lines(&rows_of(gs)), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn glyphs_out_of_stream_order_are_sorted_by_x() {
+        let mut gs = glyphs("WORLD", 100.0, 10.0, 80.0);
+        gs.extend(glyphs("HELLO", 100.0, 10.0, 20.0));
+        assert_eq!(lines(&rows_of(gs)), vec!["HELLO WORLD"]);
+    }
+
+    #[test]
+    fn an_overprinted_glyph_is_not_doubled() {
+        // Fake-bold PDFs draw the same glyph twice, a hair apart.
+        let mut gs = glyphs("VIN", 100.0, 10.0, 20.0);
+        let mut dupe = gs[0].clone();
+        dupe.x += 0.2;
+        gs.insert(1, dupe);
+        assert_eq!(lines(&rows_of(gs)), vec!["VIN"]);
+    }
+
+    #[test]
+    fn rows_without_a_letter_or_digit_are_dropped() {
+        let rows = rows_of(glyphs("--", 100.0, 10.0, 20.0));
+        assert!(rows.is_empty(), "{rows:?}");
+    }
+
+    #[test]
+    fn a_caps_row_above_a_value_becomes_label_colon_value() {
+        let mut gs = glyphs("IMPORTING CARRIER", 100.0, 10.0, 20.0);
+        gs.extend(glyphs("TRANQUIL ACE 0124A", 118.0, 10.0, 20.0));
+        assert_eq!(cell_text(gs), "IMPORTING CARRIER: TRANQUIL ACE 0124A");
+    }
+
+    #[test]
+    fn a_label_already_ending_in_a_colon_does_not_get_two() {
+        let mut gs = glyphs("TOTAL:", 100.0, 10.0, 20.0);
+        gs.extend(glyphs("1,240.00", 118.0, 10.0, 20.0));
+        assert_eq!(cell_text(gs), "TOTAL: 1,240.00");
+    }
+
+    #[test]
+    fn a_smaller_first_row_is_the_label_even_in_mixed_case() {
+        let mut gs = glyphs("Entry number", 100.0, 6.0, 20.0);
+        gs.extend(glyphs("Bolded value", 118.0, 10.0, 20.0));
+        assert_eq!(cell_text(gs), "Entry number: Bolded value");
+    }
+
+    #[test]
+    fn two_rows_of_the_same_size_and_case_are_just_joined() {
+        let mut gs = glyphs("Tranquil Ace", 100.0, 10.0, 20.0);
+        gs.extend(glyphs("Voyage 0124A", 118.0, 10.0, 20.0));
+        assert_eq!(cell_text(gs), "Tranquil Ace Voyage 0124A");
+    }
+
+    #[test]
+    fn a_value_wrapped_over_two_rows_joins_onto_the_label() {
+        let mut gs = glyphs("SHIPPER", 100.0, 10.0, 20.0);
+        gs.extend(glyphs("ACME CORP", 118.0, 10.0, 20.0));
+        gs.extend(glyphs("OSAKA", 136.0, 10.0, 20.0));
+        assert_eq!(cell_text(gs), "SHIPPER: ACME CORP OSAKA");
+    }
+
+    #[test]
+    fn a_block_of_text_keeps_its_lines() {
+        let mut gs = Vec::new();
+        for (i, line) in ["Line one", "Line two", "Line three", "Line four"].iter().enumerate() {
+            gs.extend(glyphs(line, 100.0 + 18.0 * i as f64, 10.0, 20.0));
+        }
+        assert_eq!(cell_text(gs), "Line one\nLine two\nLine three\nLine four");
+    }
+
+    #[test]
+    fn a_single_row_cell_is_its_own_text() {
+        assert_eq!(cell_text(glyphs("KOBE, JAPAN", 100.0, 10.0, 20.0)), "KOBE, JAPAN");
+    }
+
+    #[test]
+    fn an_empty_cell_is_empty_text() {
+        assert_eq!(cell_text(Vec::new()), "");
+        assert_eq!(cell_text(glyphs("- -", 100.0, 10.0, 20.0)), "");
+    }
+}

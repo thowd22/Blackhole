@@ -19,8 +19,10 @@
 #                onnxruntime-osx-arm64-<ver>.tgz (CoreML EP for the Neural Engine).
 #                Package: .app bundle + notarised .dmg (needs Apple Developer certs in
 #                secrets: APPLE_CERT_P12, APPLE_CERT_PASSWORD, APPLE_ID, APPLE_TEAM_ID).
-#   Both: `cargo test` for the pure modules (chunk, expand, store fusion, pdf_layout)
-#                can run natively there — on Windows-only code they can't run here yet.
+#   Both: `cargo test` for the pure modules (chunk, expand, store fusion, pdf_layout,
+#                hotkeys, theme) can run natively there. Today those same tests are
+#                cross-compiled in the build job and executed on the Windows runner
+#                beside the smoke test, because the crate only links for Windows.
 # ─────────────────────────────────────────────────────────────────────────────────────
 
 name: ci
@@ -39,6 +41,17 @@ env:
   TARGET: x86_64-pc-windows-gnu
 
 jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # Settings live in rustfmt.toml (wide lines: this codebase keeps one thought per line).
+      - run: cargo fmt --all --check
+
   build:
     name: build (windows x64, cross from linux)
     runs-on: ubuntu-latest
@@ -80,6 +93,21 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ env.TARGET }} --bin blackhole
 
+      # The crate only links for Windows, so `cargo test` cannot run here: build the
+      # test binary for the same target and let the smoke job execute it.
+      - name: Compile unit tests
+        run: |
+          set -euo pipefail
+          cargo test --release --target ${{ env.TARGET }} --bin blackhole --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .executable != null) | .executable' | tail -1 > exe.txt
+          cp "$(cat exe.txt)" blackhole-tests.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blackhole-tests
+          path: blackhole-tests.exe
+          if-no-files-found: error
+
       - name: Version stamp
         id: ver
         run: |
@@ -95,10 +123,22 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
 
   smoke:
-    name: smoke test (windows)
+    name: unit tests + smoke test (windows)
     needs: build
     runs-on: windows-latest
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: blackhole-tests
+      # The pure modules (chunking, query expansion, vault fusion and the absent gate,
+      # PDF cells, hotkey parsing, themes) — no models, no window, ~0.1 s.
+      - name: unit tests
+        shell: pwsh
+        env:
+          BLACKHOLE_DATA_DIR: ${{ runner.temp }}\bh-unit
+        run: |
+          .\blackhole-tests.exe --test-threads 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/download-artifact@v4
         with:
           name: blackhole-exe

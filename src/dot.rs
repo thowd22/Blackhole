@@ -76,12 +76,16 @@ pub const MENU_THEME_NEXT: usize = 21;
 /// Settings tab: toggle whether MCP clients may show bubbles.
 pub const MENU_AGENT_NOTIFY: usize = 22;
 pub const MENU_SCREENSHOT: usize = 14;
+/// Run the question set through the ask pipeline and report the score in a bubble.
+pub const MENU_SELF_CHECK: usize = 47;
 pub const MENU_CENTER_MSG_PUB: usize = MENU_CENTER_MSG;
 pub const MENU_START_LOGIN_PUB: usize = MENU_START_LOGIN;
 /// From the Settings tab: wparam = action index, lparam = boxed String combo. The dot
 /// stores it, re-registers, and tells the panel to refresh (WM_SETTINGS_CHANGED).
 pub const WM_SET_HOTKEY: u32 = 0x8018;
 pub const WM_SETTINGS_CHANGED: u32 = 0x8019;
+/// The self-check worker finished; lparam = Box<Notice> with its score.
+pub const WM_SELF_CHECK_DONE: u32 = 0x806C;
 /// lparam: Box<Notice> — a bubble with an optional click action (MCP `notify`).
 pub const WM_NOTICE: u32 = 0x801A;
 
@@ -121,6 +125,8 @@ enum Event {
 }
 
 pub struct Dot {
+    /// A self-check is running on a worker thread (the menu item does nothing meanwhile).
+    self_checking: bool,
     hwnd: HWND,
     search: HWND,
     bubble: HWND,
@@ -192,6 +198,7 @@ impl Dot {
             crate::llm_ort::set_thinking(cfg.think);
             crate::theme::set_by_name(&cfg.theme);
             let dot = Box::new(Dot {
+                self_checking: false,
                 hwnd: HWND::default(),
                 search: HWND::default(),
                 bubble: HWND::default(),
@@ -566,6 +573,24 @@ impl Dot {
         crate::screenshot::start(self.hwnd, self.tx.clone(), unit);
     }
 
+    /// Ask-pipeline self-check on a worker thread (it loads the model and answers
+    /// several questions); the result comes back as a bubble.
+    unsafe fn self_check(&mut self) {
+        if self.self_checking {
+            return;
+        }
+        self.self_checking = true;
+        self.set_mood(Mood::Thinking, None);
+        self.notify_quiet("Running a self-check…".into());
+        let ask = self.ask.clone();
+        let hwnd = self.hwnd.0 as usize;
+        std::thread::spawn(move || {
+            let result = ask.self_check();
+            let notice = Notice { text: result.summary(), quiet: false, action: None, timeout_ms: Some(30_000) };
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_SELF_CHECK_DONE, WPARAM(0), LPARAM(Box::into_raw(Box::new(notice)) as isize));
+        });
+    }
+
     unsafe fn swallow(&mut self) {
         self.pending += 1;
         self.set_mood(Mood::Digesting, None);
@@ -749,6 +774,7 @@ impl Dot {
         let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, w!("Settings…"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_VAULT, w!("Open vault folder"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_TUTORIAL, w!("Show tutorial"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SELF_CHECK, w!("Self-check"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.scale == 1), MENU_SIZE_S, w!("Small"));
         let _ = AppendMenuW(menu, MF_STRING | chk(self.cfg.scale == 2), MENU_SIZE_M, w!("Medium"));
@@ -797,6 +823,7 @@ impl Dot {
                 ShellExecuteW(None, w!("open"), PCWSTR(dir.as_ptr()), None, None, SW_SHOWNORMAL);
             }
             MENU_TUTORIAL => self.restart_tutorial(),
+            MENU_SELF_CHECK => self.self_check(),
             MENU_SIZE_S => self.set_scale(1),
             MENU_SIZE_M => self.set_scale(2),
             MENU_SIZE_L => self.set_scale(3),
@@ -1053,6 +1080,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_NOTICE => {
             let n = *Box::from_raw(lparam.0 as *mut Notice);
             if let Some(d) = state(hwnd) {
+                d.notice(n);
+            }
+            LRESULT(0)
+        }
+        WM_SELF_CHECK_DONE => {
+            let n = *Box::from_raw(lparam.0 as *mut Notice);
+            if let Some(d) = state(hwnd) {
+                d.self_checking = false;
+                d.set_mood(Mood::Idle, None);
                 d.notice(n);
             }
             LRESULT(0)

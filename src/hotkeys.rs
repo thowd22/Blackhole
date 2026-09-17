@@ -99,3 +99,82 @@ pub unsafe fn from_key(vk: u32) -> Option<Combo> {
     let c = Combo { mods, vk };
     parse(&format(c)) // round-trips only combinations we can name and re-register
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_default_binding_parses() {
+        for (name, binding) in ACTIONS {
+            let c = parse(binding).unwrap_or_else(|| panic!("{name}: {binding} does not parse"));
+            assert_eq!(format(c), binding, "{name}");
+        }
+    }
+
+    #[test]
+    fn round_trips_in_canonical_order() {
+        for text in ["Ctrl+Shift+Space", "Ctrl+Alt+S", "Ctrl+Alt+Shift+Win+F7", "Win+V", "Alt+F4", "Ctrl+9", "Ctrl+Shift+PgDn", "Ctrl+["] {
+            let c = parse(text).unwrap_or_else(|| panic!("{text} does not parse"));
+            assert_eq!(format(c), text);
+        }
+    }
+
+    #[test]
+    fn modifier_spelling_and_case_are_forgiving() {
+        assert_eq!(parse("control+shift+space"), parse("Ctrl+Shift+Space"));
+        assert_eq!(parse("CTRL + ALT + s"), parse("Ctrl+Alt+S"));
+        assert_eq!(parse("super+v"), parse("Win+V"));
+        assert_eq!(parse("Ctrl+Shift+ESC"), parse("Ctrl+Shift+Esc"));
+    }
+
+    #[test]
+    fn a_bare_key_would_swallow_typing_and_is_refused() {
+        assert!(parse("S").is_none());
+        assert!(parse("Shift+S").is_none());
+        assert!(parse("Space").is_none());
+    }
+
+    #[test]
+    fn function_keys_may_stand_alone() {
+        assert!(parse("F5").is_some());
+        assert!(parse("Shift+F5").is_some());
+        assert_eq!(format(parse("Shift+F12").unwrap()), "Shift+F12");
+    }
+
+    #[test]
+    fn nonsense_does_not_parse() {
+        assert!(parse("").is_none());
+        assert!(parse("Ctrl+").is_none());
+        assert!(parse("Ctrl+Shift").is_none());
+        assert!(parse("Ctrl+Banana").is_none());
+        assert!(parse("Ctrl++").is_none());
+    }
+
+    #[test]
+    fn modifiers_are_flags_not_an_order() {
+        assert_eq!(parse("Shift+Ctrl+Alt+K"), parse("Alt+Ctrl+Shift+K"));
+    }
+
+    #[test]
+    fn norepeat_is_always_set_so_a_held_key_fires_once() {
+        let c = parse("Ctrl+Shift+Space").unwrap();
+        assert!(c.mods & MOD_NOREPEAT != HOT_KEY_MODIFIERS(0));
+    }
+
+    #[test]
+    fn unknown_virtual_keys_format_as_vk_and_do_not_round_trip() {
+        let c = Combo { mods: MOD_CONTROL | MOD_NOREPEAT, vk: 0xFE };
+        assert_eq!(format(c), "Ctrl+VK254");
+        assert!(parse(&format(c)).is_none());
+    }
+
+    #[test]
+    fn taken_flags_default_to_free() {
+        // Index 3 only, so the flag this test writes is its own.
+        set_taken(3, true);
+        assert!(taken(3));
+        set_taken(3, false);
+        assert!(!taken(3));
+    }
+}

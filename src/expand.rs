@@ -81,3 +81,91 @@ pub fn dense_query(query: &str, expansions: &[&str]) -> String {
         format!("{query} {}", expansions.join(" "))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every synonym is in the vault.
+    fn all(_: &str) -> bool {
+        true
+    }
+    /// Nothing is.
+    fn none(_: &str) -> bool {
+        false
+    }
+
+    #[test]
+    fn table_is_sorted_for_binary_search() {
+        for pair in SYNONYMS.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} must sort before {}", pair[0].0, pair[1].0);
+        }
+    }
+
+    #[test]
+    fn expands_a_known_word() {
+        let out = expand("where did I work last", all);
+        assert!(out.contains(&"engineer"), "{out:?}");
+        assert!(out.contains(&"manager"), "{out:?}");
+    }
+
+    #[test]
+    fn short_queries_are_left_alone() {
+        // Two words or fewer: too little context for the table to help.
+        assert!(expand("my job", all).is_empty());
+        assert!(expand("resume", all).is_empty());
+        assert_eq!(expand("what is my job", all).is_empty(), false);
+    }
+
+    #[test]
+    fn unanchored_synonyms_are_dropped() {
+        // A synonym that occurs nowhere in the vault measurably raised the score of
+        // unanswerable questions, so `in_vault` is the gate.
+        assert!(expand("where did I work last", none).is_empty());
+    }
+
+    #[test]
+    fn only_some_synonyms_may_be_in_the_vault() {
+        let out = expand("where did I work last", |t| t == "manager");
+        assert_eq!(out, vec!["manager"]);
+    }
+
+    #[test]
+    fn words_already_in_the_query_are_not_repeated() {
+        let out = expand("which engineer job did I have", all);
+        assert!(!out.contains(&"engineer"), "{out:?}");
+        assert!(out.contains(&"manager"), "{out:?}");
+    }
+
+    #[test]
+    fn synonyms_are_deduplicated_across_query_words() {
+        let out = expand("my job and my work history", all);
+        let mut sorted = out.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), out.len(), "duplicate expansions: {out:?}");
+    }
+
+    #[test]
+    fn expansion_is_capped() {
+        let out = expand("my job my work my employer my career and employment", all);
+        assert!(out.len() <= MAX_TERMS, "{} terms", out.len());
+    }
+
+    #[test]
+    fn unknown_words_expand_to_nothing() {
+        assert!(expand("what colour is the accretion disk", all).is_empty());
+    }
+
+    #[test]
+    fn punctuation_and_case_do_not_hide_a_word() {
+        let out = expand("What was my SALARY, roughly?", all);
+        assert!(out.contains(&"compensation"), "{out:?}");
+    }
+
+    #[test]
+    fn dense_query_appends_expansions_only_when_there_are_some() {
+        assert_eq!(dense_query("my job", &[]), "my job");
+        assert_eq!(dense_query("my job", &["engineer", "manager"]), "my job engineer manager");
+    }
+}

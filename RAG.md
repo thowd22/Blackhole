@@ -194,6 +194,90 @@ on the CPU (one weight copy in VRAM, one in RAM; `BLACKHOLE_DECODE=gpu` forces t
 
 
 
+## 2g. Scale, reranker cost and short-query refusals (2026-09-16)
+
+Three questions §4.2c left open, answered on a **synthetic** vault so the numbers can be published:
+`eval/gen_vault.py` writes 400 items (170 k words, 3 264 chunks; one-liners, page-length notes and
+900–1 800-word documents across note/text/md/code/pdf) plus 30 questions. Every fact hangs off an
+invented name that occurs in exactly one item ("Project Vexlorn-217 is led by Ilsa Brantwood out of the
+Kobe office. Its access code is 8831"), so a question has exactly one right document and a wrong
+retrieval cannot pass by luck. `askeval --scale <dir> <items.json> <questions.json>` builds the vault
+with the real chunker and embedder and then runs the panel's own live-search path.
+
+**Live search at 400 items** (RX-class DirectML embeddings, 24-core CPU, warm):
+
+| | p50 | p95 |
+|---|---|---|
+| embed the query (bge-small, DirectML) | 29.0 ms | 32.5 ms |
+| hybrid search over 3 264 chunks (FTS5 + brute-force cosine + fusion) | **6.3 ms** | 7.7 ms |
+| keystroke to ranked list | **35.0 ms** | 40.1 ms |
+
+**Hit@1 30/30, Hit@3 30/30** (the top hit's title is the one document that holds the answer). Ingest of
+the whole vault — extract, chunk, embed 3 264 chunks — took 38 s.
+
+The same vault answered live through MCP on an isolated instance (`retrieve`, limit 8, 30 queries):
+**Hit@1 30/30**, round trip p50 76 ms / p95 85 ms — of which ~68 ms is `curl.exe` start-up (the same
+measurement against `tools/list` costs 68 ms), so the server side is ≈8 ms, consistent with the
+in-process numbers above. Brute-force cosine over every chunk is not the bottleneck at this size: at
+6.3 ms for 3 264 chunks, an ANN index would buy nothing before ~50 k chunks (≈6 000 items).
+
+**Reranker cost.** `askeval --rerank-bench` scores 10 real-shaped pairs five times: **8.7 ms per pair**
+at 128 tokens, batch 1, 6 intra-op threads on a 24-core Zen 4 (the reranker is CPU-only by
+construction); the session loads in 0.67 s. So k is now derived from a budget instead of being a magic
+number (`rerank::candidates()`):
+
+    per_pair = 8.7 ms × 6 / intra-op threads        threads = clamp(cores − 2, 2, 6)
+    k        = clamp(400 ms / per_pair, 6, 10)
+
+The ceiling is the accuracy result, not the budget: k=10 is where accuracy saturated and k=5 lost two
+held-out questions, so the budget may only trade k **down** on a machine slower than two intra-op
+threads — it never buys more pairs than the measured-good number. On this machine k=10 costs 87 ms; a
+two-thread laptop pays 261 ms, still inside the 400 ms budget. `BLACKHOLE_RERANK_K` overrides it.
+
+**The absent gate on one- and two-word queries.** The rule ("≥2 content terms, none of them anywhere in
+the vault, and no strong semantic match") had a plain bug: FTS5's `unicode61` tokenizer does not stem, so
+*invoices totals* matched nothing although the vault says *invoice … total*, and the question was refused
+with "that isn't in your vault". `Store::term_present` now also tries the query word's singulars
+("queries" → "query", "boxes" → "box") and a prefix match (a stored "resumes" answers "resume"). One-word
+queries were already never refused (they cannot reach two content terms).
+
+Measured on the 400-item vault (`askeval --absent`, real embeddings) — 10 cases, refusals marked:
+
+| query | words | best cosine | before | after |
+|---|---|---|---|---|
+| Vexlorn-117 / quarterly | 1 | 0.88 / 0.67 | no | no |
+| vexlorn budget | 2 | 0.80 | no | no |
+| budgets codes | 2 | 0.74 | no | no |
+| **reviews meetings** | 2 | 0.62 | **refused** | no |
+| **projects offices** | 2 | 0.63 | **refused** | no |
+| brantwood trondheim | 2 | 0.66 | no | no |
+| quantum teleportation | 2 | 0.54 | refused | refused |
+| gravitational lensing | 2 | 0.59 | refused | refused |
+| wombat husbandry | 2 | 0.58 | refused | refused |
+
+Two false refusals fixed, all three true refusals kept. A second idea — a softer cosine threshold for
+short queries, on the theory that two words carry little lexical evidence — was **measured and dropped**:
+two-word questions whose words are absent but whose meaning is present score 0.63–0.66
+("funding allowance" 0.651, "passcode credentials" 0.629, "supervisor headcount" 0.656) while nonsense
+scores 0.54–0.64 ("photosynthesis chlorophyll" 0.644 beats "funding allowance"). The bands overlap
+outright, so any threshold in that region would only stop the gate from ever firing. The single 0.70
+cut stays for every query length; §2b's finding that cosine cannot separate unanswerable questions
+holds at 400 items too.
+
+**One thing this exposed.** Live search ranks the right document first for all 30 questions, but the
+*ask* path's chunk-level context (`context_reranked`) picked a sibling document for one question out of
+eight in the in-app self-check ("access code for Corvane-225" → excerpts from *Corvane-375*). With 400
+near-identical documents the distinguishing token is a number inside one line, which neither the cosine
+nor the cross-encoder weighs heavily. Worth a look: treat a rare alphanumeric token in the query as a
+hard filter on candidate chunks rather than a small boost.
+
+**In-app self-check.** Right-click → **Self-check** runs the whole thing on demand: `<data>\questions.json`
+(`[{"q": …, "expect": ["substring", …]}]`) against the user's own vault, or — with no such file — a
+built-in five-question set against a scratch vault built on the spot (five invented documents, so the
+answers are known). It reports a score in a bubble and writes `selfcheck.txt` beside the vault. Without
+an LLM installed it still runs, scoring the retrieved excerpts instead of an answer.
+
+
 Everything below runs on what we already ship (ONNX Runtime + DirectML, bge-small, Qwen2.5-1.5B) plus one
 22 M-parameter cross-encoder. Total added download ≈ 23 MB (int8) or 90 MB (fp32).
 

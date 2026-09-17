@@ -42,6 +42,12 @@ const MIN_COSINE: f32 = 0.45;
 /// anywhere in the vault, and no strong semantic match, has no answer here.
 const ABSENT_MIN_TERMS: usize = 2;
 const ABSENT_MAX_COSINE: f32 = 0.70;
+// One threshold for every query length, on purpose. Measured on a 400-item synthetic
+// vault (2026-09-16, RAG.md): two-word questions whose words are absent but whose
+// meaning is present score 0.63–0.66, and nonsense scores 0.57–0.64 — the bands
+// overlap outright ("photosynthesis chlorophyll" beat "funding allowance"), so a
+// softer cosine rule for short queries would only stop the gate from ever firing.
+// What short queries needed was the plural tolerance in `term_present`.
 /// Minimum length for a query token to count as a content term.
 const CONTENT_TERM_MIN_LEN: usize = 4;
 
@@ -273,6 +279,13 @@ impl Store {
         out
     }
 
+    /// Chunks (including document units) across the whole vault — the size of the
+    /// brute-force cosine scan, so the number that matters for search latency.
+    #[allow(dead_code)] // askeval --scale
+    pub fn chunk_count(&self) -> usize {
+        self.index.len()
+    }
+
     pub fn count(&self) -> i64 {
         self.conn
             .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
@@ -288,7 +301,14 @@ impl Store {
         // "#tag" words filter by tag; whatever is left is the search itself.
         let (tags, rest) = split_tags(query);
         if !tags.is_empty() {
-            let mut hits = if rest.trim().is_empty() { self.tagged(limit * 4) } else { self.search_inner(&rest, qvec, limit * 4) };
+            let mut hits = if rest.trim().is_empty() {
+                self.tagged(limit * 4) // already carries its tags
+            } else {
+                // search_inner leaves `tags` empty; the filter below reads them.
+                let mut h = self.search_inner(&rest, qvec, limit * 4);
+                self.attach_tags(&mut h);
+                h
+            };
             hits.retain(|h| tags.iter().all(|t| h.tags.split(' ').any(|x| x == t)));
             hits.truncate(limit);
             return hits;
@@ -524,16 +544,40 @@ impl Store {
         self.index.iter().map(|e| cosine(qvec, &e.vec)).fold(0.0, f32::max)
     }
 
-    /// "Not in your vault": the query has ≥2 content terms, none of them occurs in
-    /// any item, and nothing matches strongly by meaning. Lexical on purpose — cosine
-    /// thresholds and rank margins could not separate unanswerable questions
-    /// (they score as high as real ones); this rule caught 2/2 with 0 false absents.
+    /// Is this word in the vault, allowing for the one difference FTS5's unicode61
+    /// tokenizer cannot see — the plural? "invoices totals" is about an invoice with
+    /// a total, but neither word is a token of "invoice … total", and a two-word
+    /// question refused on that basis is a plain bug. Both directions are covered:
+    /// the query's singular forms, and a prefix match so a stored "resumes" answers
+    /// a query for "resume".
+    fn term_present(&self, term: &str) -> bool {
+        if self.items_containing(term) > 0 {
+            return true;
+        }
+        if stems(term).iter().any(|st| self.items_containing(st) > 0) {
+            return true;
+        }
+        self.items_with_prefix(term) > 0
+    }
+
+    /// Number of items with a token starting with `term` (FTS5 prefix match).
+    fn items_with_prefix(&self, term: &str) -> i64 {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1", params![format!("\"{term}\"*")], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    /// "Not in your vault": the query has ≥2 content terms, none of them (nor an
+    /// obvious inflection of them) occurs in any item, and nothing matches strongly
+    /// by meaning. Lexical on purpose — cosine thresholds and rank margins could not
+    /// separate unanswerable questions (they score as high as real ones); this rule
+    /// caught 2/2 with 0 false absents.
     pub fn absent(&self, query: &str, qvec: Option<&[f32]>) -> bool {
         let terms = content_terms(query);
         if terms.len() < ABSENT_MIN_TERMS {
             return false;
         }
-        if terms.iter().any(|t| self.items_containing(t) > 0) {
+        if terms.iter().any(|t| self.term_present(t)) {
             return false;
         }
         qvec.map(|v| self.best_cosine(v) < ABSENT_MAX_COSINE).unwrap_or(true)
@@ -579,7 +623,7 @@ impl Store {
     /// in document order within a word budget.
     /// Context for grounding an answer, with an optional cross-encoder deciding the top document:
     /// the cheap pipeline proposes the candidates, the reranker scores the best
-    /// `rerank::CANDIDATES` of them, and the document with the highest logit
+    /// `rerank::candidates()` of them, and the document with the highest logit
     /// becomes the top document. Documents it never saw keep their cheap order.
     /// (Rank-fusing the reranker with RRF instead measured a regression.)
     pub fn context_reranked(
@@ -697,10 +741,11 @@ impl Store {
             // Chunks that literally contain a rare query word always get a hearing from the
             // reranker (up to 3), even when their cosine sits below the cut: "raytheon" in
             // one résumé chunk versus a form that is near everything.
-            let mut head: Vec<&C> = cands.iter().take(crate::rerank::CANDIDATES).collect();
+            let k = crate::rerank::candidates();
+            let mut head: Vec<&C> = cands.iter().take(k).collect();
             let literal: Vec<&C> = cands.iter().filter(|c| c.literal && !head.iter().any(|h| h.id == c.id)).take(3).collect();
             for l in literal {
-                if head.len() >= crate::rerank::CANDIDATES {
+                if head.len() >= k {
                     head.pop();
                 }
                 head.push(l);
@@ -967,6 +1012,25 @@ impl Store {
     }
 }
 
+/// Plausible singulars of a word, for the absent gate's presence check:
+/// "queries" → "query", "invoices" → "invoice", "boxes" → "box".
+fn stems(t: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(b) = t.strip_suffix("ies") {
+        if b.len() >= 2 {
+            out.push(format!("{b}y"));
+        }
+    }
+    for suf in ["s", "es"] {
+        if let Some(b) = t.strip_suffix(suf) {
+            if b.len() >= 3 && !out.contains(&b.to_string()) {
+                out.push(b.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn vec_to_blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
@@ -1030,4 +1094,343 @@ pub fn split_tags(query: &str) -> (Vec<String>, String) {
         }
     }
     (tags, rest.join(" "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Anything in here may log; keep that (and any other stray write) out of the
+    /// user's real vault directory.
+    fn isolate() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let dir = std::env::temp_dir().join(format!("blackhole-unit-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            std::env::set_var("BLACKHOLE_DATA_DIR", &dir);
+        });
+    }
+
+    fn store() -> Store {
+        isolate();
+        Store::open(Path::new(":memory:")).expect("in-memory vault")
+    }
+
+    fn add(s: &Store, title: &str, content: &str) -> i64 {
+        s.add(title, "note", None, content, &format!("hash-{title}-{}", content.len()), 1_700_000_000)
+            .expect("insert")
+            .expect("new item")
+    }
+
+    /// A unit vector along axis `i` — cosine 1 with itself, 0 with any other.
+    fn axis(i: usize) -> Vec<f32> {
+        let mut v = vec![0.0; DIM];
+        v[i] = 1.0;
+        v
+    }
+
+    /// A unit vector whose cosine with `axis(i)` is exactly `c`.
+    fn near(i: usize, c: f32) -> Vec<f32> {
+        let mut v = vec![0.0; DIM];
+        v[i] = c;
+        v[DIM - 1] = (1.0 - c * c).sqrt();
+        v
+    }
+
+    // ---- tags ----------------------------------------------------------
+
+    #[test]
+    fn split_tags_separates_hash_words_from_the_query() {
+        let (tags, rest) = split_tags("#work #Ideas rest of query");
+        assert_eq!(tags, vec!["work", "ideas"]);
+        assert_eq!(rest, "rest of query");
+    }
+
+    #[test]
+    fn split_tags_on_a_plain_query_changes_nothing() {
+        let (tags, rest) = split_tags("plain query");
+        assert!(tags.is_empty());
+        assert_eq!(rest, "plain query");
+    }
+
+    #[test]
+    fn a_bare_hash_is_not_a_tag() {
+        let (tags, rest) = split_tags("# not a tag");
+        assert!(tags.is_empty());
+        assert_eq!(rest, "# not a tag");
+    }
+
+    #[test]
+    fn a_tag_only_query_leaves_an_empty_rest() {
+        let (tags, rest) = split_tags("#work");
+        assert_eq!(tags, vec!["work"]);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn tags_round_trip_through_free_text() {
+        let mut s = store();
+        let id = add(&s, "Note", "body text");
+        s.set_tags(id, "#Work, ideas").unwrap();
+        assert_eq!(s.tags_of(id), "work ideas");
+        s.set_tags(id, "").unwrap();
+        assert_eq!(s.tags_of(id), "");
+    }
+
+    #[test]
+    fn a_tag_filters_the_search() {
+        let mut s = store();
+        let a = add(&s, "Alpha", "shared word vessel");
+        let _b = add(&s, "Beta", "shared word vessel too");
+        s.set_tags(a, "work").unwrap();
+        let hits = s.search("#work vessel", None, 10);
+        assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), vec![a]);
+    }
+
+    // ---- fusion --------------------------------------------------------
+
+    #[test]
+    fn term_coverage_is_the_fraction_of_query_words_an_item_has() {
+        let s = store();
+        let both = add(&s, "Manifest", "the tranquil ace sailed from kobe");
+        let one = add(&s, "Recipe", "kobe beef with lime");
+        let cov = s.term_coverage("tranquil kobe", [both, one].into_iter());
+        assert!((cov[&both] - 1.0).abs() < 1e-6, "{cov:?}");
+        assert!((cov[&one] - 0.5).abs() < 1e-6, "{cov:?}");
+    }
+
+    #[test]
+    fn an_item_matching_every_query_word_outranks_a_one_word_coincidence() {
+        let s = store();
+        let both = add(&s, "Manifest", "the tranquil ace sailed from kobe to oakland");
+        let one = add(&s, "Recipe", "kobe beef with lime and salt");
+        let hits = s.search("tranquil kobe", None, 10);
+        assert_eq!(hits[0].id, both);
+        assert!(hits.iter().any(|h| h.id == one), "the weak match still shows up");
+        assert_eq!(hits[0].via, "kw");
+    }
+
+    #[test]
+    fn a_keyword_and_semantic_hit_on_the_same_item_fuse_into_both() {
+        let mut s = store();
+        let id = add(&s, "Manifest", "the tranquil ace sailed from kobe");
+        s.add_chunks(id, &[("the tranquil ace sailed from kobe".to_string(), axis(3))], None).unwrap();
+        let hits = s.search("tranquil ace", Some(&axis(3)), 10);
+        assert_eq!(hits[0].id, id);
+        assert_eq!(hits[0].via, "both");
+    }
+
+    #[test]
+    fn an_item_that_only_matches_by_meaning_still_shows_up() {
+        let mut s = store();
+        let id = add(&s, "Manifest", "the tranquil ace sailed from kobe");
+        s.add_chunks(id, &[("the tranquil ace sailed from kobe".to_string(), axis(3))], None).unwrap();
+        let hits = s.search("completely different words", Some(&axis(3)), 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].via, "sem");
+    }
+
+    #[test]
+    fn a_weak_cosine_is_not_a_hit_at_all() {
+        let mut s = store();
+        let id = add(&s, "Manifest", "vessel voyage");
+        s.add_chunks(id, &[("vessel voyage".to_string(), near(3, 0.30))], None).unwrap();
+        assert!(s.search("nothing in common", Some(&axis(3)), 10).is_empty());
+        assert!(s.semantic(&axis(3), 10).is_empty());
+    }
+
+    #[test]
+    fn semantic_results_stay_within_a_window_of_the_best_one() {
+        let mut s = store();
+        let strong = add(&s, "Strong", "aaa");
+        let weak = add(&s, "Weak", "bbb");
+        s.add_chunks(strong, &[("aaa".to_string(), near(3, 0.95))], None).unwrap();
+        s.add_chunks(weak, &[("bbb".to_string(), near(3, 0.50))], None).unwrap();
+        let hits = s.semantic(&axis(3), 10);
+        assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), vec![strong], "the tail is cut off");
+    }
+
+    #[test]
+    fn an_empty_query_falls_back_to_the_most_recent_items() {
+        let s = store();
+        add(&s, "One", "first");
+        add(&s, "Two", "second");
+        let hits = s.search("   ", None, 10);
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn the_limit_is_respected() {
+        let s = store();
+        for i in 0..8 {
+            add(&s, &format!("Item {i}"), &format!("vessel voyage number {i}"));
+        }
+        assert_eq!(s.search("vessel", None, 3).len(), 3);
+    }
+
+    #[test]
+    fn quotes_in_a_query_cannot_break_the_fts_expression() {
+        let s = store();
+        add(&s, "Manifest", "the tranquil ace");
+        let hits = s.search("\"tranquil\" ace", None, 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(to_fts_query("a b").unwrap(), "\"a\" OR \"b\"*");
+        assert!(to_fts_query("   ").is_none());
+        assert_eq!(fts_tokens("say \"what\""), vec!["say", "what"]);
+    }
+
+    #[test]
+    fn deleting_an_item_takes_it_out_of_both_indexes() {
+        let mut s = store();
+        let id = add(&s, "Manifest", "the tranquil ace");
+        s.add_chunks(id, &[("the tranquil ace".to_string(), axis(3))], None).unwrap();
+        assert_eq!(s.count(), 1);
+        s.delete(id).unwrap();
+        assert_eq!(s.count(), 0);
+        assert!(s.search("tranquil", Some(&axis(3)), 5).is_empty());
+        assert_eq!(s.best_cosine(&axis(3)), 0.0);
+    }
+
+    #[test]
+    fn the_same_thing_twice_is_swallowed_once() {
+        let s = store();
+        let first = s.add("Note", "note", None, "body", "same-hash", 1).unwrap();
+        let again = s.add("Note", "note", None, "body", "same-hash", 2).unwrap();
+        assert!(first.is_some());
+        assert_eq!(again, None);
+        assert_eq!(s.count(), 1);
+    }
+
+    #[test]
+    fn the_catalog_lists_titles_with_their_opening_words() {
+        let s = store();
+        add(&s, "Manifest", "the tranquil ace sailed from kobe");
+        let cat = s.catalog(10);
+        assert!(cat.starts_with("- Manifest [note]: the tranquil ace"), "{cat:?}");
+    }
+
+    // ---- the absent gate ------------------------------------------------
+
+    /// A small vault whose words are known, for the one- and two-word cases below.
+    fn absent_vault() -> Store {
+        let s = store();
+        add(&s, "Invoice 4471", "Invoice total paid 1240.00 to Zephyr Logistics on 3 March. Payment by wire.");
+        add(&s, "Resume.pdf", "Principal MLOps Engineer at Maxar Technologies. Storage Solutions Architect at Raytheon.");
+        add(&s, "Handbook", "Vacation policy: twenty days a year. Queries go to the office manager.");
+        s
+    }
+
+    #[test]
+    fn one_word_queries_are_never_refused() {
+        let s = absent_vault();
+        // Too little evidence either way: one word that happens to be missing is not
+        // a reason to tell the user their vault has nothing.
+        for q in ["raytheon", "quasar", "invoices", "wombat"] {
+            assert!(!s.absent(q, None), "{q:?} was refused on one word");
+        }
+    }
+
+    #[test]
+    fn two_word_queries_whose_words_are_in_the_vault_are_not_refused() {
+        let s = absent_vault();
+        for q in ["zephyr logistics", "vacation policy", "maxar technologies", "payment wire"] {
+            assert!(!s.absent(q, None), "{q:?} was refused although its words are there");
+        }
+    }
+
+    #[test]
+    fn a_plural_is_not_a_missing_word() {
+        let s = absent_vault();
+        // "invoice"/"invoices", "total"/"totals", "query"/"queries": FTS5's tokenizer
+        // does not stem, and refusing these was a plain bug.
+        for q in ["invoices totals", "vacations policies", "engineers architects"] {
+            assert!(!s.absent(q, None), "{q:?} was refused over a plural");
+        }
+    }
+
+    #[test]
+    fn a_singular_finds_a_stored_plural() {
+        let s = absent_vault();
+        assert!(!s.absent("query manager", None), "a stored \"queries\" answers \"query\"");
+    }
+
+    #[test]
+    fn two_words_that_really_are_missing_are_refused() {
+        let s = absent_vault();
+        for q in ["quantum teleportation", "gravitational lensing", "quokka husbandry"] {
+            assert!(s.absent(q, None), "{q:?} should have been refused");
+        }
+    }
+
+    #[test]
+    fn a_very_strong_semantic_match_vetoes_the_refusal() {
+        let mut s = absent_vault();
+        let id = add(&s, "Shipment", "carrier and sailing details");
+        // Neither word is in the vault, but the meaning is right there.
+        s.add_chunks(id, &[("carrier and sailing details".to_string(), near(7, 0.95))], None).unwrap();
+        assert!(!s.absent("vessel voyage", Some(&axis(7))), "semantic evidence must veto a refusal");
+        // …while a middling cosine does not: measured, that band is pure noise.
+        assert!(s.absent("vessel voyage", Some(&near(50, 0.65))));
+    }
+
+    #[test]
+    fn contains_term_is_exact_and_covers_the_title() {
+        let s = absent_vault();
+        assert!(s.contains_term("raytheon"));
+        assert!(s.contains_term("handbook"), "titles are indexed too");
+        assert!(!s.contains_term("raytheons"));
+        assert!(s.any_term_present("something about raytheon"));
+        assert!(!s.any_term_present("nothing familiar herein"));
+    }
+
+    #[test]
+    fn best_cosine_is_the_nearest_thing_in_the_vault() {
+        let mut s = store();
+        let id = add(&s, "Item", "body");
+        s.add_chunks(id, &[("body".to_string(), near(5, 0.80))], None).unwrap();
+        assert!((s.best_cosine(&axis(5)) - 0.80).abs() < 1e-5);
+        assert_eq!(s.best_cosine(&[0.0, 1.0]), 0.0, "a wrong-width vector is not a match");
+    }
+
+    // ---- context ---------------------------------------------------------
+
+    #[test]
+    fn context_puts_the_top_document_first_and_stays_inside_the_budget() {
+        let mut s = store();
+        let near_doc = add(&s, "Manifest", "the tranquil ace sailed from kobe to oakland");
+        let far_doc = add(&s, "Recipe", "kobe beef with lime and salt");
+        s.add_chunks(near_doc, &[("the tranquil ace sailed from kobe to oakland".to_string(), near(9, 0.90))], None).unwrap();
+        s.add_chunks(far_doc, &[("kobe beef with lime and salt".to_string(), near(9, 0.50))], None).unwrap();
+        let out = s.context_reranked("tranquil ace", "", &axis(9), 100, None);
+        assert_eq!(out[0].0, "Manifest");
+        assert!(out.iter().map(|(_, t)| t.split_whitespace().count()).sum::<usize>() <= 100);
+    }
+
+    #[test]
+    fn the_reranker_can_overrule_the_cheap_pipeline_on_the_top_document() {
+        let mut s = store();
+        let cheap_winner = add(&s, "Manifest", "the tranquil ace sailed from kobe to oakland");
+        let rerank_winner = add(&s, "Recipe", "kobe beef with lime and salt");
+        s.add_chunks(cheap_winner, &[("the tranquil ace sailed from kobe to oakland".to_string(), near(9, 0.90))], None).unwrap();
+        s.add_chunks(rerank_winner, &[("kobe beef with lime and salt".to_string(), near(9, 0.55))], None).unwrap();
+        // Score by hand: whatever mentions beef wins.
+        let hook = |_q: &str, ps: &[String]| -> Option<Vec<f32>> { Some(ps.iter().map(|p| if p.contains("beef") { 9.0 } else { 0.0 }).collect()) };
+        let out = s.context_reranked("tranquil ace", "", &axis(9), 100, Some(&hook));
+        assert_eq!(out[0].0, "Recipe");
+    }
+
+    #[test]
+    fn context_of_an_empty_vault_is_empty() {
+        let s = store();
+        assert!(s.context_reranked("anything", "", &axis(1), 100, None).is_empty());
+    }
+
+    #[test]
+    fn stems_cover_the_common_plurals() {
+        assert!(stems("invoices").contains(&"invoice".to_string()), "{:?}", stems("invoices"));
+        assert!(stems("queries").contains(&"query".to_string()), "{:?}", stems("queries"));
+        assert!(stems("boxes").contains(&"box".to_string()), "{:?}", stems("boxes"));
+        assert!(stems("totals").contains(&"total".to_string()), "{:?}", stems("totals"));
+        assert!(stems("ace").is_empty(), "too short to strip");
+    }
 }
