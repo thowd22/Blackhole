@@ -373,6 +373,67 @@ back. No local LLM call, no web stack in the app.
 - **Later**: Lens on an existing image item (Files tab action L), a follow-up question box under the answer
   (re-runs the CLI with the previous answer as context), Codex/Claude "session resume" so follow-ups are cheap.
 
+## 13. Cloud sync — P2 — future (planned 2026-09-18)
+
+Today the vault is one folder on one PC. Sync makes the same vault appear on a second machine (and on the
+phones in §14) without giving up the local-first promise: everything still works offline, the cloud is a relay
+and a backup, never the place where search or asking happens.
+
+- **What syncs**: `vault.db` rows (items, chunks, tags, notes, cursors) and the stored copies in `files\`;
+  not `config.json` (positions, hotkeys and themes are per machine), not the models, not the FTS/embedding
+  indexes — those are rebuilt locally from the synced text and bytes, so the sync payload is small and no
+  provider ever sees a vector index.
+- **Encryption**: end-to-end. A vault key derived from a passphrase (Argon2id) encrypts every blob and row
+  before it leaves the machine (XChaCha20-Poly1305, one nonce per record); the relay stores ciphertext and
+  opaque record ids only. Losing the passphrase loses the cloud copy, not the local vault — say so plainly in
+  the UI. This also closes §4.4's "encrypted at rest" item for the cloud side.
+- **Model**: an append-only log of changes per device (add / update text / set tags / forget / note edit),
+  merged with last-writer-wins per field and tombstones for forgets; notes edited on two devices at once keep
+  both versions as "Note (conflict from <device>)" rather than merging text. Sync runs on the ingest worker
+  after each change and every few minutes when online; never on the UI thread.
+- **Backends**, in order of effort: (1) **a folder** — any synced drive the user already has (OneDrive,
+  Dropbox, iCloud Drive, Syncthing): the encrypted log lives in `<folder>\Blackhole\`, which needs no server
+  at all and is the first thing to ship; (2) **S3-compatible bucket** with the user's own keys (Backblaze B2,
+  Cloudflare R2, MinIO) over WinHTTP; (3) a hosted **Blackhole relay** later, only if (1) and (2) prove
+  insufficient. All three speak the same encrypted-log format, so switching is a copy.
+- **UI**: Settings rows "Cloud sync" (off / folder / bucket), "Sync passphrase" (set once, never shown), a
+  status line ("synced 2 min ago · 3 devices") and a bubble on conflicts. The dot's specks could hint at a sync
+  in progress the way they do for digesting.
+- **MCP**: unchanged — agents talk to the local vault; sync is invisible to them.
+- **Not in scope**: sharing a vault between users, real-time collaboration, syncing the LLM.
+
+## 14. Mobile apps — iOS and Android — P2 — future (planned 2026-09-18)
+
+A phone is where half of what people want to remember shows up — a photo of a whiteboard, a receipt, a link
+from a chat, a voice memo. The mobile Blackhole is a **capture-first companion**, not a port of the desktop:
+swallow on the phone, search on the phone, and let §13 carry it to the desktop where the full engine lives.
+
+- **Share-sheet swallowing** (both platforms): Blackhole appears in the system share sheet for images, PDFs,
+  text, URLs and files; sharing = a drop. A widget / quick-settings tile and a home-screen shortcut open the
+  camera straight into a capture (photo → OCR). Clipboard paste from the app. Voice memos transcribed on-device
+  (Apple Speech / Android SpeechRecognizer — the phone's own engines, so §3.3's audio item lands here first).
+- **On-device engine, scaled down**: the same retrieval design (SQLite + FTS5, bge-small embeddings) on the
+  phone's ML runtime — ONNX Runtime has iOS (CoreML EP) and Android (NNAPI/XNNPACK) builds — so search and
+  `#tag` browsing work offline and identically. OCR: Apple Vision / Google ML Kit rather than PaddleOCR (built
+  in, free, good). **Ask mode stays on the desktop** in the first version (a 4B model is too much for most
+  phones and battery); a phone question can be answered by a synced desktop over the relay later, or by a
+  1–2B on-device model on flagship devices as an option.
+- **Lens on the phone** (§12) is the natural killer feature: point the camera, get the answer; the agent CLI
+  is replaced by a provider API call from the phone with the user's own key.
+- **UI**: the dot is the app icon and a floating button (Android overlay permission / iOS in-app only); one
+  screen with the search field, results, and a Notes tab; the pixel-art theme and the eight palettes carry
+  over. Keep it to what fits a thumb.
+- **Sync** (§13) is a prerequisite: the phone joins the vault with the passphrase, pulls the encrypted log,
+  builds its own indexes. Without sync the app still works as a standalone pocket vault.
+- **Stack**: one shared Rust core (store, chunking, retrieval, sync protocol, MCP-free) compiled for both
+  platforms via `uniffi`, with native shells — SwiftUI on iOS, Kotlin/Compose on Android — for the share sheet,
+  camera and permissions; not a cross-platform UI framework, so the pixel look and the OS integrations stay
+  first-class. This is the same "one Rust core, thin native front end" split §8 and §10 anticipate for Linux
+  and macOS.
+- **Store realities**: Apple requires the share extension and the app to share an App Group container for the
+  vault; background sync is best-effort on iOS (BGAppRefreshTask) and a foreground service on Android; both
+  stores need privacy labels that say "data is end-to-end encrypted and never leaves your devices unencrypted".
+
 ## Open decisions — settled 2026-09-17
 
 - **Primary target platform**: Windows first (10 1903+ / 11, x64). Linux and macOS are roadmap, not v1 — §8's Wayland and accessibility caveats stand.
