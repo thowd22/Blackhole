@@ -408,9 +408,31 @@ A phone is where half of what people want to remember shows up — a photo of a 
 from a chat, a voice memo. The mobile Blackhole is a **capture-first companion**, not a port of the desktop:
 swallow on the phone, search on the phone, and let §13 carry it to the desktop where the full engine lives.
 
-- **Share-sheet swallowing** (both platforms): Blackhole appears in the system share sheet for images, PDFs,
-  text, URLs and files; sharing = a drop. A widget / quick-settings tile and a home-screen shortcut open the
-  camera straight into a capture (photo → OCR). Clipboard paste from the app. Voice memos transcribed on-device
+- **"Share to Blackhole" — the headline feature, and the mobile answer to drag-and-drop.** Every app on both
+  platforms already has a share button, and both platforms have a well-trodden path for receiving from it, so
+  this is the cheapest thing to build and the one people will actually use: read an article, hit share, pick
+  Blackhole, it is in the vault. **Swallow anything anything can share** — a link from a browser, a photo or
+  a screenshot from the gallery, a PDF or any file, selected text, a map location, a contact card, a YouTube
+  or podcast link, a tweet, a chat message.
+  - **iOS**: a *Share Extension* (`NSExtensionActivationRule` accepting public.url, public.image,
+    public.text, public.file-url, public.movie, public.vcard — i.e. effectively everything), plus an *Action
+    Extension* so it also appears in the row of actions. The extension writes into the **App Group** container
+    the app and extension share, so a swallow completes in the extension itself — no app launch, the sheet
+    dismisses in well under a second — and the app indexes it on next wake or via a background task. Files
+    arrive as security-scoped URLs, so copy the bytes inside the extension before it dies.
+  - **Android**: an `<intent-filter>` for `ACTION_SEND` and `ACTION_SEND_MULTIPLE` with `mimeType="*/*"` (so
+    Blackhole is in every app's share sheet), plus `ACTION_PROCESS_TEXT` for the text-selection popup and a
+    *Direct Share* / sharing-shortcut entry so it can sit in the top row. An `ACTION_VIEW` filter makes
+    "open with Blackhole" work too. The receiver is a transparent activity that hands the payload to a
+    foreground service and finishes immediately, so the share sheet never blocks on ingest.
+  - **The swallow itself**: identical to a desktop drop — extract (URL → readable text via §3.3's web path,
+    image → OCR, PDF → text), chunk, embed, store the original bytes. **Feedback**: the dot animation in a
+    small toast / brief overlay ("swallowed — Kagi article, 1,800 words"), matching what the desktop bubble
+    says, with an *Undo* for a few seconds. Multiple items shared at once queue like a multi-file drop.
+  - **Share back out**: the reverse direction too — share a vault item (or a search result, or a note) from
+    Blackhole into any other app, so the vault is not a one-way trap.
+- **Other capture paths**: a widget / quick-settings tile and a home-screen shortcut open the camera straight
+  into a capture (photo → OCR). Clipboard paste from the app. Voice memos transcribed on-device
   (Apple Speech / Android SpeechRecognizer — the phone's own engines, so §3.3's audio item lands here first).
 - **On-device engine, scaled down**: the same retrieval design (SQLite + FTS5, bge-small embeddings) on the
   phone's ML runtime — ONNX Runtime has iOS (CoreML EP) and Android (NNAPI/XNNPACK) builds — so search and

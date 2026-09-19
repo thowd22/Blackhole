@@ -408,7 +408,7 @@ portable exe zip, the installer in <2 GiB parts, checksums.
 with a Save-to-vault button) → Copilot+ NPU providers (Qualcomm QNN, AMD Ryzen AI, Intel OpenVINO) → code
 signing → a web installer that fetches the model at install time → Linux and macOS → **end-to-end encrypted
 cloud sync** over a folder you already sync or your own bucket → **iOS and Android** capture apps built on the
-same Rust core. Details and the reasoning behind each in [FEATURES.md](FEATURES.md) (§12–§14 for the last
+same Rust core, where *share to Blackhole* from any app is the drag-and-drop of the phone. Details and the reasoning behind each in [FEATURES.md](FEATURES.md) (§12–§14 for the last
 three).
 
 ## Credits
