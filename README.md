@@ -404,9 +404,12 @@ portable exe zip, the installer in <2 GiB parts, checksums.
 
 ## Roadmap
 
-Copilot+ NPU providers (Qualcomm QNN, AMD Ryzen AI, Intel OpenVINO) → code signing → a web installer that
-fetches the model at install time → Linux and macOS. Details and the reasoning behind each in
-[FEATURES.md](FEATURES.md).
+**Lens** (Ctrl+Shift+L: screenshot → identified and web-searched by the Claude Code or Codex you already have,
+with a Save-to-vault button) → Copilot+ NPU providers (Qualcomm QNN, AMD Ryzen AI, Intel OpenVINO) → code
+signing → a web installer that fetches the model at install time → Linux and macOS → **end-to-end encrypted
+cloud sync** over a folder you already sync or your own bucket → **iOS and Android** capture apps built on the
+same Rust core. Details and the reasoning behind each in [FEATURES.md](FEATURES.md) (§12–§14 for the last
+three).
 
 ## Credits
 
